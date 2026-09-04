@@ -1,0 +1,192 @@
+import base64
+from pathlib import Path
+
+from src import ai_interaction
+from src import document_processor as dp
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_configured_vision_model_resolution_passes_owner(monkeypatch):
+    seen = []
+
+    def fake_resolve_model(spec, owner=None):
+        seen.append((spec, owner))
+        return ("http://example.test/chat/completions", spec, {"Authorization": "Bearer token"})
+
+    monkeypatch.setattr(ai_interaction, "_resolve_model", fake_resolve_model)
+
+    assert dp._resolve_vl_model("gpt-4o", owner="alice") == (
+        "http://example.test/chat/completions",
+        "gpt-4o",
+        {"Authorization": "Bearer token"},
+    )
+    assert seen == [("gpt-4o", "alice")]
+
+
+def test_auto_detected_vision_model_resolution_passes_owner(monkeypatch):
+    seen = []
+
+    def fake_resolve_model(spec, owner=None):
+        seen.append((spec, owner))
+        if spec == "llava":
+            return ("http://example.test/chat/completions", spec, {})
+        raise ValueError("not available")
+
+    monkeypatch.setattr(ai_interaction, "_resolve_model", fake_resolve_model)
+
+    assert dp._resolve_vl_model("", owner="alice") == (
+        "http://example.test/chat/completions",
+        "llava",
+        {},
+    )
+    assert seen
+    assert all(owner == "alice" for _spec, owner in seen)
+
+
+def test_byte_vision_analysis_uses_owner_scoped_primary_and_fallback(monkeypatch):
+    seen = {}
+
+    def fake_resolve_vl_model(configured, owner=None):
+        seen["primary"] = (configured, owner)
+        return ("http://primary.test/chat/completions", "vision-primary", {"X-Test": "1"})
+
+    def fake_fallbacks(owner=None):
+        seen["fallback_owner"] = owner
+        return []
+
+    def fake_llm_call(url, model, messages, headers=None, timeout=None):
+        seen["llm"] = (url, model, headers, timeout, messages)
+        return "description"
+
+    monkeypatch.setattr(dp, "_load_vl_settings", lambda: {"vision_enabled": True, "vision_model": "gpt-4o"})
+    monkeypatch.setattr(dp, "_resolve_vl_model", fake_resolve_vl_model)
+    monkeypatch.setattr(dp, "llm_call", fake_llm_call)
+
+    from src import endpoint_resolver
+
+    monkeypatch.setattr(endpoint_resolver, "resolve_vision_fallback_candidates", fake_fallbacks)
+
+    image_bytes = b"not-a-real-png-but-caller-validation-is-enough"
+
+    assert dp.analyze_image_bytes_with_vl_result(image_bytes, "image/png", owner="alice") == {
+        "text": "description",
+        "model": "vision-primary",
+    }
+    assert seen["primary"] == ("gpt-4o", "alice")
+    assert seen["fallback_owner"] == "alice"
+    assert seen["llm"][:4] == (
+        "http://primary.test/chat/completions",
+        "vision-primary",
+        {"X-Test": "1"},
+        120,
+    )
+    image_item = seen["llm"][4][0]["content"][1]
+    assert image_item["image_url"]["url"] == (
+        "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+    )
+
+
+def test_path_vision_analysis_delegates_to_in_memory_helper(monkeypatch, tmp_path):
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg bytes")
+    seen = {}
+
+    def fake_analyze(image_bytes, image_format, owner=None):
+        seen.update(bytes=image_bytes, format=image_format, owner=owner)
+        return {"text": "description", "model": "vision-primary"}
+
+    monkeypatch.setattr(dp, "analyze_image_bytes_with_vl_result", fake_analyze)
+
+    assert dp.analyze_image_with_vl_result(str(image), owner="alice") == {
+        "text": "description",
+        "model": "vision-primary",
+    }
+    assert seen == {"bytes": b"jpeg bytes", "format": ".jpg", "owner": "alice"}
+
+
+def test_byte_vision_analysis_rejects_unvalidated_input(monkeypatch):
+    monkeypatch.setattr(dp, "_load_vl_settings", lambda: {"vision_enabled": True})
+
+    assert dp.analyze_image_bytes_with_vl_result(b"", "image/png") == {
+        "text": "[VL model unavailable - image not analyzed]",
+        "model": "",
+    }
+    assert dp.analyze_image_bytes_with_vl_result(b"image", "image/svg+xml") == {
+        "text": "[VL model unavailable - image not analyzed]",
+        "model": "",
+    }
+
+
+def test_byte_vision_analysis_rejects_echoed_inline_frame(monkeypatch):
+    image_bytes = b"private-camera-frame"
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    monkeypatch.setattr(
+        dp,
+        "_load_vl_settings",
+        lambda: {"vision_enabled": True, "vision_model": "vision-primary"},
+    )
+    monkeypatch.setattr(
+        dp,
+        "_resolve_vl_model",
+        lambda _configured, owner=None: ("http://vision.test", "vision-primary", {}),
+    )
+    monkeypatch.setattr(
+        dp,
+        "llm_call",
+        lambda *_args, **_kwargs: f"data:image/png;base64,{encoded}",
+    )
+    from src import endpoint_resolver
+
+    monkeypatch.setattr(endpoint_resolver, "resolve_vision_fallback_candidates", lambda owner=None: [])
+
+    result = dp.analyze_image_bytes_with_vl_result(image_bytes, "image/png", owner="alice")
+    assert result == {
+        "text": "[Vision response rejected because it contained inline image data]",
+        "model": "vision-primary",
+    }
+    assert encoded not in result["text"]
+
+
+def test_byte_vision_errors_never_log_upstream_response_body(monkeypatch, caplog):
+    secret_echo = "data:image/png;base64," + ("A" * 700)
+    monkeypatch.setattr(
+        dp,
+        "_load_vl_settings",
+        lambda: {"vision_enabled": True, "vision_model": "vision-primary"},
+    )
+    monkeypatch.setattr(
+        dp,
+        "_resolve_vl_model",
+        lambda _configured, owner=None: ("http://vision.test", "vision-primary", {}),
+    )
+    monkeypatch.setattr(
+        dp,
+        "llm_call",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(secret_echo)),
+    )
+    from src import endpoint_resolver
+
+    monkeypatch.setattr(endpoint_resolver, "resolve_vision_fallback_candidates", lambda owner=None: [])
+
+    result = dp.analyze_image_bytes_with_vl_result(b"frame", "image/png", owner="alice")
+    assert result["text"].startswith("[VL model unavailable")
+    assert secret_echo not in caplog.text
+
+
+def test_request_vision_call_sites_pass_owner():
+    chat_source = (ROOT / "src" / "chat_handler.py").read_text()
+    processor_source = (ROOT / "src" / "document_processor.py").read_text()
+    upload_source = (ROOT / "routes" / "upload_routes.py").read_text()
+    document_source = (ROOT / "routes" / "document_routes.py").read_text()
+    gallery_source = (ROOT / "routes" / "gallery" / "gallery_routes.py").read_text()
+    memory_source = (ROOT / "routes" / "memory" / "memory_routes.py").read_text()
+
+    assert 'analyze_image_with_vl_result(file_info["path"], owner=owner)' in chat_source
+    assert "analyze_image_with_vl(path, owner=current_user)" in upload_source
+    assert "_process_pdf(path, owner=owner)" in processor_source
+    assert "_process_pdf(pdf_path, owner=user)" in document_source
+    assert "_resolve_vl_model(vl_model, owner=user)" in document_source
+    assert "_resolve_vl_model(configured, owner=user)" in gallery_source
+    assert "_process_pdf(tmp_path, owner=_owner(request))" in memory_source

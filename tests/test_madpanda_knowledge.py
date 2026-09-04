@@ -1,0 +1,259 @@
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from src import madpanda_knowledge as knowledge
+
+
+def test_generic_knowledge_paths_preserve_existing_legacy_installation(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(knowledge, "DATA_DIR", tmp_path)
+    assert knowledge._compatible_data_path("odysseus.json", "madpanda.json") == tmp_path / "odysseus.json"
+
+    legacy = tmp_path / "madpanda.json"
+    legacy.write_text("{}", encoding="utf-8")
+    assert knowledge._compatible_data_path("odysseus.json", "madpanda.json") == legacy
+
+    generic = tmp_path / "odysseus.json"
+    generic.write_text("{}", encoding="utf-8")
+    assert knowledge._compatible_data_path("odysseus.json", "madpanda.json") == generic
+
+
+def test_sync_worker_has_a_hard_memory_ceiling(tmp_path: Path, monkeypatch):
+    called = {}
+
+    def run(command, **kwargs):
+        called["command"] = command
+        return SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr="")
+
+    monkeypatch.setattr(knowledge, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(knowledge.subprocess, "run", run)
+
+    assert knowledge.sync_in_worker({"sync_id": "sync-1"}) == {"ok": True}
+    assert called["command"][:3] == [
+        "/usr/bin/prlimit",
+        f"--as={3 * 1024**3}",
+        "--",
+    ]
+    assert not list(tmp_path.glob("knowledge-sync-*.json"))
+
+
+def test_sync_worker_rejects_overlap(monkeypatch):
+    monkeypatch.setattr(
+        knowledge.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not spawn")),
+    )
+    knowledge.SYNC_WORKER_LOCK.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="knowledge_sync_busy"):
+            knowledge.sync_in_worker({"sync_id": "overlap"})
+    finally:
+        knowledge.SYNC_WORKER_LOCK.release()
+
+
+def test_agent_scope_blocks_client_without_client_name():
+    store = knowledge.KnowledgeStore.__new__(knowledge.KnowledgeStore)
+    agent = knowledge.Agent("jarvis", ("shared", "business_client"), ("*",))
+    assert store._domains(agent, None, None) == ["shared"]
+    with pytest.raises(ValueError, match="client_required"):
+        store._domains(agent, "business_client", None)
+
+
+def test_canonical_knowledge_precedes_higher_scoring_generated_wiki(monkeypatch):
+    store = knowledge.KnowledgeStore.__new__(knowledge.KnowledgeStore)
+    agent = knowledge.Agent("jarvis", ("home_lab", "wiki"), ())
+    monkeypatch.setattr(knowledge, "_audit", lambda *_args, **_kwargs: None)
+
+    def query(_query, domain, _client, _limit, authority):
+        if authority == "primary":
+            return [{"source_id": "canonical", "chunk_id": 0, "score": 0.5}]
+        return [{"source_id": "wiki", "chunk_id": 0, "score": 0.99}]
+
+    store._query_domain = query
+
+    result = store.search(agent, "architecture", limit=2, include_secondary=True)
+
+    assert [row["source_id"] for row in result["results"]] == ["canonical", "wiki"]
+
+
+def test_auth_uses_hashes(tmp_path: Path, monkeypatch):
+    registry = tmp_path / "agents.json"
+    registry.write_text(
+        '{"agents":[{"agent_id":"hermes","token_hash":"2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b","domains":["shared"],"clients":[]}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(knowledge, "AGENTS_FILE", registry)
+    assert knowledge.authenticate("Bearer secret").agent_id == "hermes"
+    with pytest.raises(PermissionError):
+        knowledge.authenticate("Bearer wrong")
+
+
+def test_large_source_embeddings_are_batched():
+    class Embedder:
+        calls = []
+        def encode(self, texts, normalize_embeddings=True):
+            self.calls.append(len(texts))
+            return [[0.0] for _ in texts]
+
+    class Collection:
+        ids = []
+        def upsert(self, ids, documents, metadatas, embeddings):
+            self.ids.extend(ids)
+        def get(self, where=None, include=None):
+            return {"ids": list(self.ids)}
+        def delete(self, ids):
+            raise AssertionError("fresh source must not delete new chunks")
+
+    store = knowledge.KnowledgeStore.__new__(knowledge.KnowledgeStore)
+    store.embedder = Embedder()
+    store.collection = Collection()
+    store._split = lambda _text: [f"chunk {index}" for index in range(205)]
+    count = store._upsert_source({
+        "source_id": "source",
+        "source": "note.md",
+        "domain": "shared",
+        "content_hash": "hash",
+        "text": "body",
+    }, "v1")
+    assert count == 205
+    assert store.embedder.calls == [25, 25, 25, 25, 25, 25, 25, 25, 5]
+
+
+def test_knowledge_projects_primary_and_wiki_into_separate_qdrant_collections():
+    class Embedder:
+        def encode(self, texts, normalize_embeddings=True):
+            return [[0.0, 1.0] for _ in texts]
+
+    class Collection:
+        def __init__(self):
+            self.ids = []
+
+        def upsert(self, ids, documents, metadatas, embeddings):
+            self.ids = list(ids)
+
+        def get(self, where=None, include=None):
+            return {"ids": list(self.ids)}
+
+        def delete(self, ids):
+            pass
+
+    class Projection:
+        enabled = True
+
+        def __init__(self):
+            self.rows = []
+
+        def upsert_many(self, records, embeddings):
+            self.rows.extend(records)
+
+    store = knowledge.KnowledgeStore.__new__(knowledge.KnowledgeStore)
+    store.embedder = Embedder()
+    store.collection = Collection()
+    store.qdrant_documents = Projection()
+    store.qdrant_wiki = Projection()
+    store._split = lambda text: [text]
+
+    store._upsert_source({
+        "source_id": "primary",
+        "source": "architecture.md",
+        "domain": "home_lab",
+        "authority": "primary",
+        "content_hash": "hash-primary",
+        "text": "canonical",
+    }, "v1")
+    store._upsert_source({
+        "source_id": "wiki",
+        "source": "wiki/concept.md",
+        "domain": "wiki",
+        "authority": "secondary",
+        "content_hash": "hash-wiki",
+        "text": "derived",
+    }, "v1")
+
+    assert store.qdrant_documents.rows[0]["payload"]["document_class"] == "canonical_document"
+    assert store.qdrant_wiki.rows[0]["payload"]["document_class"] == "generated_wiki"
+
+
+def test_knowledge_embedder_is_isolated_from_generic_rag(monkeypatch):
+    created = []
+    expected = object()
+    monkeypatch.setattr(
+        knowledge,
+        "FastEmbedClient",
+        lambda model: created.append(model) or expected,
+    )
+    store = knowledge.KnowledgeStore.__new__(knowledge.KnowledgeStore)
+    store.embedder = None
+
+    assert store._ensure_embedder() is expected
+    assert created == [knowledge.KNOWLEDGE_EMBEDDING_MODEL]
+    assert knowledge.KNOWLEDGE_EMBEDDING_MODEL == "BAAI/bge-small-en-v1.5"
+
+
+def test_latest_sync_state_returns_completed_manifest(tmp_path: Path, monkeypatch):
+    sync_dir = tmp_path / "sync"
+    sync_dir.mkdir()
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        '{"index_version":"stamp-contenthash","sources":{"a":{},"b":{}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(knowledge, "SYNC_DIR", sync_dir)
+    monkeypatch.setattr(knowledge, "MANIFEST_FILE", manifest)
+
+    assert knowledge.latest_sync_state() == {
+        "sync_id": None,
+        "index_version": "stamp-contenthash",
+        "content_fingerprint": knowledge._manifest_fingerprint({"a": {}, "b": {}}),
+        "source_fingerprints": {
+            source_id: knowledge._source_fingerprint({"source_id": source_id})
+            for source_id in ("a", "b")
+        },
+        "sources": 2,
+        "batches": [],
+        "finalized": True,
+    }
+
+
+def test_delta_sync_preserves_unchanged_sources_and_removes_missing(tmp_path: Path, monkeypatch):
+    sync_dir = tmp_path / "sync"
+    manifest = tmp_path / "manifest.json"
+    sync_dir.mkdir()
+    manifest.write_text(
+        '{"sources":{"a":{"source":"a.md","content_hash":"old"},'
+        '"b":{"source":"b.md","content_hash":"gone"}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(knowledge, "SYNC_DIR", sync_dir)
+    monkeypatch.setattr(knowledge, "MANIFEST_FILE", manifest)
+    store = knowledge.KnowledgeStore.__new__(knowledge.KnowledgeStore)
+    monkeypatch.setattr(store, "_all_source_ids", lambda: {"a", "b"})
+    removed = []
+    monkeypatch.setattr(store, "_delete_source", lambda source_id: removed.append(source_id) or 1)
+    monkeypatch.setattr(store, "_source_hash", lambda _source_id: "")
+    monkeypatch.setattr(store, "_upsert_source", lambda _doc, _version: 1)
+
+    result = store.sync_batch(
+        "sync-1",
+        "version-1",
+        0,
+        [{
+            "source_id": "c",
+            "source": "c.md",
+            "content_hash": "new",
+            "mtime": 1,
+            "domain": "home_lab",
+            "client": "",
+            "authority": "primary",
+            "sensitivity": "internal",
+            "text": "new document",
+        }],
+        True,
+        ["a", "c"],
+    )
+
+    saved = knowledge._read_json(manifest, {})
+    assert set(saved["sources"]) == {"a", "c"}
+    assert removed == ["b"]
+    assert result["sources"] == 2

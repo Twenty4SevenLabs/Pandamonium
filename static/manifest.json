@@ -1,0 +1,14 @@
+{
+  "name": "Pandamonium",
+  "short_name": "Pandamonium",
+  "description": "A self-hosted AI control plane powered by Pandamonium",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#07080c",
+  "theme_color": "#ff3347",
+  "icons": [
+    { "src": "icons/pandamonium.png", "sizes": "1254x1254", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

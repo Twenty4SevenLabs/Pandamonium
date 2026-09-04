@@ -1,0 +1,3 @@
+services:
+  pandamonium:
+    image: ${PANDAMONIUM_IMAGE:?Set PANDAMONIUM_IMAGE to the release manifest digest}

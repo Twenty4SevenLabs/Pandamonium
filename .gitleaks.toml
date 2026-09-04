@@ -1,0 +1,20 @@
+title = "Pandamonium gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Test-only MCP Portal fixture keys"
+paths = [
+  '''tests/test_mad_mcp_portal_routes.py''',
+  '''/src/tests/test_mad_mcp_portal_routes.py''',
+]
+regexes = ['''fixture-(?:invalid-)?(?:master-)?key-123456789''']
+
+[[allowlists]]
+description = "Test fixture SHA-256 of the word secret (not a live credential)"
+paths = [
+  '''tests/test_madpanda_knowledge.py''',
+  '''/src/tests/test_madpanda_knowledge.py''',
+]
+regexes = ['''2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b''']
