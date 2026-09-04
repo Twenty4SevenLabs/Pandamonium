@@ -1,0 +1,23 @@
+[Unit]
+Description=Pandamonium AI control plane (Docker Compose stack)
+Documentation=file:///mnt/dev-env/projects/pandamonium/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+RequiresMountsFor=/mnt/dev-env
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=root
+WorkingDirectory=/mnt/dev-env/projects/pandamonium
+Environment=COMPOSE_FILE=docker-compose.yml:docker/host-proxmox.yml
+EnvironmentFile=-/mnt/dev-env/projects/pandamonium/.env
+ExecStart=/usr/local/bin/docker-compose up -d --build
+ExecStop=/usr/local/bin/docker-compose stop
+TimeoutStartSec=1800
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

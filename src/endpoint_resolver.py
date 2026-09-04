@@ -121,6 +121,13 @@ def resolve_endpoint_runtime(ep, owner: Optional[str] = None) -> Tuple[str, Opti
         creds = resolve_runtime_credentials(auth_id, owner=owner)
         base = normalize_base(creds.get("base_url") or base)
         api_key = creds.get("api_key")
+    try:
+        from src.unsloth_client import is_unsloth_endpoint, resolve_unsloth_api_key
+
+        if is_unsloth_endpoint(base) and not (api_key or "").strip():
+            api_key = resolve_unsloth_api_key(openai_base=base)
+    except Exception:
+        pass
     return base, api_key
 
 

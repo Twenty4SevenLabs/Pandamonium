@@ -1957,6 +1957,26 @@ async def llm_call_async(
         logger.debug(f"Returning cached response for key: {cache_key}")
         return cached_response
 
+    try:
+        from src.unsloth_client import ensure_model_loaded, is_unsloth_endpoint, resolve_unsloth_api_key, rewrite_unsloth_url
+        if is_unsloth_endpoint(url):
+            url = rewrite_unsloth_url(url)
+            hdrs = headers if isinstance(headers, dict) else {}
+            api_key = resolve_unsloth_api_key(
+                (hdrs.get("Authorization") or "").removeprefix("Bearer ").strip(),
+                url,
+            )
+            loaded = await asyncio.to_thread(ensure_model_loaded, url, model, api_key)
+            if not loaded:
+                raise RuntimeError(
+                    f"Unsloth Studio could not load model '{model}'. "
+                    "Check that the model is downloaded in Studio."
+                )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        logger.warning("Unsloth pre-load skipped: %s", exc)
+
     if provider == "chatgpt-subscription":
         # ChatGPT/Codex requires streamed Responses requests even for callers
         # that want a plain string (auto-title, memory extraction, etc.).
@@ -2113,6 +2133,24 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                      tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
                      tool_choice_none: bool = False, workload: str = "foreground"):
+    try:
+        from src.unsloth_client import ensure_model_loaded, is_unsloth_endpoint, resolve_unsloth_api_key, rewrite_unsloth_url
+        if is_unsloth_endpoint(url):
+            url = rewrite_unsloth_url(url)
+            api_key = resolve_unsloth_api_key(
+                (headers or {}).get("Authorization", "").removeprefix("Bearer ").strip(),
+                url,
+            )
+            loaded = await asyncio.to_thread(ensure_model_loaded, url, model, api_key)
+            if not loaded:
+                raise RuntimeError(
+                    f"Unsloth Studio could not load model '{model}'. "
+                    "Check that the model is downloaded in Studio."
+                )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        logger.warning("Unsloth pre-load skipped: %s", exc)
     target_url = _stream_target_url(url)
     async with _local_model_slot(target_url, model, workload):
         async for chunk in _stream_llm_inner(

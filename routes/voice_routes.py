@@ -649,6 +649,16 @@ def _owned_voice_session(
     return dict(session)
 
 
+def _with_reachable_llm(url: str, model: str, headers: dict[str, str]) -> tuple[str, str, dict[str, str]]:
+    try:
+        from src.unsloth_client import is_unsloth_endpoint, rewrite_unsloth_url
+        if is_unsloth_endpoint(url):
+            url = rewrite_unsloth_url(url)
+    except Exception:
+        pass
+    return url, model, headers
+
+
 def _resolve_voice_runtime(owner: str, linked_session=None) -> tuple[str, str, dict[str, str]]:
     """Resolve an owner-scoped override, then the linked or default chat model."""
     if VOICE_ENDPOINT_ID:
@@ -660,17 +670,17 @@ def _resolve_voice_runtime(owner: str, linked_session=None) -> tuple[str, str, d
         if not resolved:
             raise HTTPException(status_code=503, detail="Configured voice model endpoint is unavailable")
         url, model, headers = resolved
-        return url, model, headers or {}
+        return _with_reachable_llm(url, model, headers or {})
     if linked_session is not None:
         url = str(getattr(linked_session, "endpoint_url", "") or "").strip()
         model = VOICE_MODEL or str(getattr(linked_session, "model", "") or "").strip()
         if url and model:
-            return url, model, dict(getattr(linked_session, "headers", {}) or {})
+            return _with_reachable_llm(url, model, dict(getattr(linked_session, "headers", {}) or {}))
     url, model, headers = resolve_endpoint("default", owner=owner or None)
     model = VOICE_MODEL or str(model or "").strip()
     if not url or not model:
         raise HTTPException(status_code=503, detail="No default chat model is configured")
-    return url, model, headers or {}
+    return _with_reachable_llm(url, model, headers or {})
 
 
 def _append_turn(session: dict, role: str, text: str, status: str, task_id: str | None = None) -> dict:
@@ -1009,18 +1019,17 @@ def _extension_tool_schemas(tool_specs: list[dict[str, Any]]) -> list[dict[str, 
 def _extension_context(
     voice_session: dict[str, Any], tool_specs: list[dict[str, Any]]
 ) -> dict[str, dict[str, Any]]:
-    names: dict[str, list[str]] = {}
+    counts: dict[str, int] = {}
     for tool in tool_specs:
         extension_id = tool["extension_id"]
-        names.setdefault(extension_id, []).append(tool["name"])
+        counts[extension_id] = counts.get(extension_id, 0) + 1
     return {
         extension_id: {
             "engaged": True,
             "state_mounted": True,
-            "tool_count": len(tool_names),
-            "tool_names": tool_names,
+            "tool_count": count,
         }
-        for extension_id, tool_names in names.items()
+        for extension_id, count in counts.items()
     }
 
 

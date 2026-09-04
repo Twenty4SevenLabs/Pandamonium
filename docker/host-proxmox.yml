@@ -1,0 +1,31 @@
+# pve-prod: cgroupns socketpair workaround + host ports that do not collide
+# with Odysseus (7000 / 8080 / 8100 / 8091).
+services:
+  pandamonium:
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+    extra_hosts:
+      - "m1.tail61d527.ts.net:192.168.1.2"
+      - "m2.tail61d527.ts.net:192.168.1.191"
+      - "247laptop.tail61d527.ts.net:192.168.1.98"
+    ports: !override
+      - "127.0.0.1:7080:7000"
+
+  searxng:
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+    ports: !override
+      - "127.0.0.1:18081:8080"
+
+  chromadb:
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+    ports: !override
+      - "127.0.0.1:8110:8000"
+
+  ntfy:
+    ports: !override
+      - "127.0.0.1:8092:80"

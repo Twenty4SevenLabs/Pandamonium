@@ -1,0 +1,13 @@
+# Paths restored after `git reset --hard` to a GitHub tag/branch.
+# Untracked and gitignored files already survive reset; listed tracked files
+# would otherwise be overwritten. Never list .env (handled separately).
+.env.example
+docker-compose.yml
+routes/model_routes.py
+routes/voice_routes.py
+src/endpoint_resolver.py
+src/llm_core.py
+src/model_discovery.py
+docker/host-proxmox.yml
+src/unsloth_client.py
+tests/test_unsloth_client.py

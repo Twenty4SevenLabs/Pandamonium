@@ -169,8 +169,22 @@ class ModelDiscovery:
 
         def _append_env_hosts(out: List[str]) -> None:
             """Add hosts (and any custom ports) from provider-specific env vars."""
-            for env_name in ("OLLAMA_BASE_URL", "OLLAMA_URL", "LM_STUDIO_URL"):
-                raw = os.getenv(env_name, "").strip()
+            raws: List[str] = []
+            for env_name in (
+                "OLLAMA_BASE_URL",
+                "OLLAMA_URL",
+                "LM_STUDIO_URL",
+                "UNSLOTH_BASE_URL",
+                "UNSLOTH_M2_BASE_URL",
+                "UNSLOTH_A1_BASE_URL",
+            ):
+                raws.append(os.getenv(env_name, "").strip())
+            raws.extend(
+                part.strip()
+                for part in os.getenv("UNSLOTH_EXTRA_BASE_URLS", "").split(",")
+                if part.strip()
+            )
+            for raw in raws:
                 if not raw:
                     continue
                 try:
@@ -375,8 +389,18 @@ class ModelDiscovery:
     def _check_port(self, host: str, port: int) -> Optional[Dict[str, Any]]:
         """Check a single host:port for models."""
         base = f"http://{host}:{port}/v1"
+        headers = {"Accept": "application/json"}
+        if port in (8888, 8889, 18888, 18889, 18890):
+            try:
+                from src.unsloth_client import resolve_unsloth_api_key
+
+                key = resolve_unsloth_api_key(openai_base=base)
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
+            except Exception:
+                pass
         try:
-            r = httpx.get(f"{base}/models", timeout=3)
+            r = httpx.get(f"{base}/models", headers=headers, timeout=3)
             if not r.is_success:
                 return None
             data = r.json()
@@ -406,7 +430,7 @@ class ModelDiscovery:
         # Well-known ports: 1919 (FreeToken), 8000-8020 (vLLM, SGLang,
         # Cookbook), 8080 (llama.cpp), 1234 (LM Studio), 11434 (Ollama), and
         # 11435 (APFEL when Ollama owns its default port).
-        ports = [1919] + list(range(8000, 8021)) + [8080, 1234, 11434, 11435]
+        ports = [1919] + list(range(8000, 8021)) + [8080, 8888, 8889, 1234, 11434, 11435]
         ports += [p for p in sorted(self._extra_ports) if p not in ports]
         targets = [(h, p) for h in hosts for p in ports]
 

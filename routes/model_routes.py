@@ -888,6 +888,20 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
                 return []
             logger.warning(f"Anthropic /v1/models failed, using hardcoded list: {e}")
         return list(ANTHROPIC_MODELS)
+    try:
+        from src.unsloth_client import (
+            is_unsloth_endpoint,
+            list_studio_model_ids,
+            resolve_unsloth_api_key,
+        )
+        if is_unsloth_endpoint(base):
+            probe_key = resolve_unsloth_api_key(api_key, base)
+            studio_models = list_studio_model_ids(base, probe_key, timeout=max(timeout, 10))
+            if studio_models:
+                return [m for m in studio_models if _is_chat_model(m)]
+    except Exception as exc:
+        logger.debug("Unsloth studio catalog probe failed for %s: %s", base, exc)
+
     url = _safe_build_models_url(base)
     headers = _safe_build_headers(api_key, base)
     try:
