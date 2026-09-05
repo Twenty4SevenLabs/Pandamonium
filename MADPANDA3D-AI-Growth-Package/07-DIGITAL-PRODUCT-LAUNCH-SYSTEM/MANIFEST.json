@@ -1,0 +1,184 @@
+{
+  "manifest_version": "1.1",
+  "product_name": "MADPANDA3D AI Growth Package",
+  "subtitle": "Agent-Guided Digital Product Launch System",
+  "product_slug": "ai-growth-package",
+  "version": "1.0.0",
+  "release_status": "release_ready",
+  "build_timestamp_utc": "2026-07-27T00:00:00Z",
+  "price_reference": {
+    "amount": 49,
+    "currency": "USD",
+    "billing": "one_time"
+  },
+  "format": "agent-readable Markdown, CSV, JSON, and SHA-256 package",
+  "entrypoint": "START-HERE.md",
+  "status_template": "STATUS.template.md",
+  "reviewer_prompt": "REVIEWER-PROMPT.md",
+  "license": "LICENSE-AND-COMMERCIAL-OUTPUT-RIGHTS.md",
+  "provenance": "PROVENANCE.md",
+  "use_rights_summary": "Internal package use plus commercial use of original buyer-created outputs; no redistribution of the package, substantially equivalent copies, private/third-party material, or MADPANDA3D marks.",
+  "safety_summary": "External content is untrusted data. Human approval and authoritative readback are required for consequential actions.",
+  "checksum_scheme": "MANIFEST.json hashes every customer-content file except itself and SHA256SUMS.txt. SHA256SUMS.txt hashes every package file except itself, including MANIFEST.json.",
+  "total_package_files": 28,
+  "files": [
+    {
+      "path": "CHANGELOG.md",
+      "job": "Version history and release-candidate status.",
+      "sha256": "4a27b14df4af6f2d550be4cae74b6025fd02fe82a962091f1ad8486e85f3e0ec",
+      "bytes": 4997
+    },
+    {
+      "path": "LICENSE-AND-COMMERCIAL-OUTPUT-RIGHTS.md",
+      "job": "Package license and commercial-output boundaries.",
+      "sha256": "61bc0ca0d0e96f50ddd4f6f2b2bd11473d1044e4a1822b2dc6398f423dea1492",
+      "bytes": 2178
+    },
+    {
+      "path": "PLAYBOOK.md",
+      "job": "Operating protocol, exact play order, stop conditions, and launch-ready definition.",
+      "sha256": "7af9e5a31e07167d053708950af39be4d7b8d8de2b11015d3ef92e43ac60cf05",
+      "bytes": 5633
+    },
+    {
+      "path": "PRIVACY-AND-SAFE-USE.md",
+      "job": "Data minimization, untrusted-content, tool-authority, and incident safeguards.",
+      "sha256": "eb6adb739d140b8d0b134f124ced64c9043432829a74a32574d8d2c3485c10b5",
+      "bytes": 2424
+    },
+    {
+      "path": "PROVENANCE.md",
+      "job": "Customer-safe file/group provenance and excluded-material record.",
+      "sha256": "368613708ececf9507b50b5a4422d5a8112f737d8995486909c91ca3101b3718",
+      "bytes": 4919
+    },
+    {
+      "path": "REVIEWER-PROMPT.md",
+      "job": "Fresh-context exact-hash independent-QA prompt and report fields.",
+      "sha256": "299da5359efa1c7cec96075ecfaa961a77bd8cb36eb51f5f93be95f86ad7c90e",
+      "bytes": 2372
+    },
+    {
+      "path": "SOURCES.md",
+      "job": "Public research links, narrow supported facts, and limitations.",
+      "sha256": "a88174835d86444210a4063740f6b0b8b9f3e5c21e3464aa13ea84fd3757a9fd",
+      "bytes": 5160
+    },
+    {
+      "path": "START-HERE.md",
+      "job": "Buyer cold start, activation command, manual route, rights, and support boundary.",
+      "sha256": "87720ed212323026a1fb82d237f05642294713dbbc8399ae10520ba11e4943d7",
+      "bytes": 7630
+    },
+    {
+      "path": "STATUS.template.md",
+      "job": "Copyable project state, gates, blockers, decisions, evidence, and next actions.",
+      "sha256": "6a3207435b5742b7f1f8ea626e755cc7b7d15d5327f8c220009f4330d3d854f1",
+      "bytes": 2374
+    },
+    {
+      "path": "assets/content-calendar.csv",
+      "job": "Copyable approval-aware organic content calendar.",
+      "sha256": "ceac624f29e709b8e46067e2aea4ac100d45f99d9969e5f4de80ec808af2ea60",
+      "bytes": 385
+    },
+    {
+      "path": "assets/delivery-defect-log.csv",
+      "job": "Copyable class-specific fulfillment-defect recurrence log.",
+      "sha256": "f78c10e18201f38ad3c2b15a3fd72e05d7147365542082439896b7ea33894914",
+      "bytes": 234
+    },
+    {
+      "path": "assets/launch-readiness-checklist.md",
+      "job": "Copyable evidence table for product, buyer-path, and launch gates.",
+      "sha256": "f46f6011b13ab8562686d783885eb2b8d826cfc90ef2a4ff32b18f0bd36ef311",
+      "bytes": 3650
+    },
+    {
+      "path": "assets/offer-scorecard.csv",
+      "job": "Copyable buyer/problem offer comparison worksheet.",
+      "sha256": "dbd59c5a8f0241b08739b6013918db41ee88c2f88480b0b22c6b4d3b02c88e9e",
+      "bytes": 359
+    },
+    {
+      "path": "assets/product-qa-rubric.md",
+      "job": "Copyable independent product QA rubric and verdict rules.",
+      "sha256": "614bac3ce58a26929cb459411e359404d986edef24d407d63f466e94a2f8361b",
+      "bytes": 4153
+    },
+    {
+      "path": "assets/research-matrix.csv",
+      "job": "Copyable source/fact/inference/limitation research worksheet.",
+      "sha256": "352a6e5427886c67baa7971379530854335279029f81f876605e73e06b1fdc3d",
+      "bytes": 208
+    },
+    {
+      "path": "assets/revenue-and-feedback-scorecard.csv",
+      "job": "Copyable generic-currency aggregate evidence scorecard.",
+      "sha256": "222b52e9a2e5a1d4e249f5f54a8e6f9d16585f1117d694f5266b882534d694fe",
+      "bytes": 541
+    },
+    {
+      "path": "examples/FICTIONAL-WALKTHROUGH.md",
+      "job": "Clearly labeled fictional end-to-end example connecting all plays.",
+      "sha256": "0d8c26701e1269ec3c624c9a8a8895559481a3b0963ed964485d00f566c717ea",
+      "bytes": 8226
+    },
+    {
+      "path": "plays/00-agent-and-tool-intake.md",
+      "job": "One ordered launch-system play with inputs, actions, artifact, gate, stops, and manual fallback.",
+      "sha256": "60b89b8e2fc1768a83b47d1cf70c60936e0e403c72c9510e550eb11fca6e666f",
+      "bytes": 3239
+    },
+    {
+      "path": "plays/01-extract-buyer-problem.md",
+      "job": "One ordered launch-system play with inputs, actions, artifact, gate, stops, and manual fallback.",
+      "sha256": "2fb1cc7ebb194492e304304fd6feea8bf38af4d14e9a8a3ef6c02efa26744ced",
+      "bytes": 3005
+    },
+    {
+      "path": "plays/02-validate-demand-and-offer.md",
+      "job": "One ordered launch-system play with inputs, actions, artifact, gate, stops, and manual fallback.",
+      "sha256": "a446df1783e11a694ba1ddff1c013b1490f58184cc361ec07abc98104d6b4e2e",
+      "bytes": 3447
+    },
+    {
+      "path": "plays/03-design-the-product.md",
+      "job": "One ordered launch-system play with inputs, actions, artifact, gate, stops, and manual fallback.",
+      "sha256": "4fe4859acaa6c29eb53c589a72881bbdb0afd42e6014e4a2c5689b030b901fa3",
+      "bytes": 2960
+    },
+    {
+      "path": "plays/04-build-the-package.md",
+      "job": "One ordered launch-system play with inputs, actions, artifact, gate, stops, and manual fallback.",
+      "sha256": "70c9c45fbe3030a5915207715341058530616c5c9264a83af2a632a69b8f5c14",
+      "bytes": 3202
+    },
+    {
+      "path": "plays/05-run-product-qa.md",
+      "job": "One ordered launch-system play with inputs, actions, artifact, gate, stops, and manual fallback.",
+      "sha256": "737eeb6e37031108a56aa6bc1e771dfd264e76d64cec5c777b015041145c8822",
+      "bytes": 2848
+    },
+    {
+      "path": "plays/06-prepare-the-buyer-path.md",
+      "job": "One ordered launch-system play with inputs, actions, artifact, gate, stops, and manual fallback.",
+      "sha256": "2e2810f05ec54692dd462361914207e24e23c373efd75138b775379cad4caebd",
+      "bytes": 5250
+    },
+    {
+      "path": "plays/07-build-the-organic-launch.md",
+      "job": "One ordered launch-system play with inputs, actions, artifact, gate, stops, and manual fallback.",
+      "sha256": "6ad9056cfce33e3c289afa4728a2599c0ef5b8080d45b7687fbccf7b0c0512b2",
+      "bytes": 4608
+    },
+    {
+      "path": "plays/08-run-the-30-day-loop.md",
+      "job": "One ordered launch-system play with inputs, actions, artifact, gate, stops, and manual fallback.",
+      "sha256": "50ed45867178a90ef13fb572ea50825d85b963312c3d7d885b7b3495937772a8",
+      "bytes": 7017
+    }
+  ],
+  "manifest_self_hash": "covered_by_SHA256SUMS.txt",
+  "checksum_file_self_hash": "omitted_by_design"
+}

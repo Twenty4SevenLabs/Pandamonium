@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "module_id": "infrastructure",
+  "status": "authoring-candidate",
+  "chapters": ["INF-01", "INF-02", "INF-03", "INF-04", "INF-05", "INF-06", "INF-07", "INF-08"],
+  "guide": "guide/30-infrastructure.md",
+  "dependencies": ["foundation", "networking", "operating-systems"],
+  "templates": ["templates/system/MODEL-FIT-RUNTIME-RESOURCE-CONTRACT.template.md", "templates/system/DATA-AND-RECOVERY-OS-EXTENSION.template.md", "templates/system/DEPLOYMENT-SERVICE-PROCESS-CONTRACT.template.md", "templates/system/OBSERVABILITY-QUEUE-AND-BACKPRESSURE.template.md"],
+  "outputs": ["hardware inventory", "model-fit report", "data and recovery record", "deployment runbook", "observability and incidents record", "knowledge and RAG record", "rollout and recovery record"],
+  "completion_gate": "The selected workload is measured, recoverable, resource-bounded, observable, and accepted through one real user path with rollback preserved."
+}

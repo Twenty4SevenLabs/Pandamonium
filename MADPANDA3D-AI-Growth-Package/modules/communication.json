@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "module_id": "communication",
+  "status": "accepted-for-continued-authoring",
+  "chapters": ["COM-01", "COM-02", "COM-03", "COM-04", "COM-05", "COM-06", "COM-07", "COM-08", "COM-09", "COM-10"],
+  "guide": "guide/40-communication.md",
+  "dependencies": ["orientation"],
+  "templates_glob": "templates/communication/*",
+  "outputs": ["COM-01 through COM-10 buyer-owned records"],
+  "completion_gate": "One bounded communication behavior is specified, tested, independently scored, repaired or deferred, and adapted only through an evidence-supported layer."
+}

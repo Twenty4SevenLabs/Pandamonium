@@ -1,0 +1,360 @@
+{
+  "schema_version": "1.0",
+  "package_id": "madpanda3d-ai-growth-package-next-edition-english-authoring-candidate",
+  "status": "ENGLISH AUTHORING CANDIDATE - NOT RELEASE COPY",
+  "built_from_date": "2026-08-20",
+  "router": "INGEST-ME-FIRST.md",
+  "guide_pdf": "01-AI-GROWTH-GUIDE.pdf",
+  "guide_text": "02-AI-GROWTH-GUIDE.txt",
+  "chapter_count": 77,
+  "appendix_count": 3,
+  "designed_pages": 274,
+  "modules": [
+    {
+      "module_id": "agents-mcp",
+      "status": "authoring-candidate",
+      "manifest": "modules/agents-mcp.json",
+      "guide": "guide/50-agents-mcp.md",
+      "chapters": [
+        "AGT-01",
+        "AGT-02",
+        "AGT-03",
+        "AGT-04",
+        "MCP-01",
+        "MCP-02",
+        "MCP-03",
+        "MCP-04",
+        "MCP-05",
+        "MCP-06"
+      ],
+      "dependencies": [
+        "foundation",
+        "networking",
+        "infrastructure",
+        "communication"
+      ],
+      "templates": [
+        "templates/system/TICKET-STATE-AND-LIVENESS.template.md",
+        "templates/system/SERVICE-PROCESS-READINESS.template.md"
+      ],
+      "chapter_templates": {},
+      "outputs": [
+        "durable workspace",
+        "authority matrix",
+        "ticket and liveness record",
+        "agent operating contract",
+        "tool contracts",
+        "permissions",
+        "service readiness",
+        "connection decision",
+        "vertical-slice proof"
+      ],
+      "completion_gate": "One service and workflow preserve identity, authority, task state, resource liveness, health, external readback, recovery, and independent verification.",
+      "guide_sha256": "8f6b8bce38b228e45c6e8179abd923b2c88819abd14f1bf4b2ad032e7d9687e8"
+    },
+    {
+      "module_id": "business",
+      "status": "authoring-candidate",
+      "manifest": "modules/business.json",
+      "guide": "guide/60-business.md",
+      "chapters": [
+        "BUS-01",
+        "BUS-02",
+        "BUS-03",
+        "BUS-04",
+        "BUS-05",
+        "BUS-06",
+        "BUS-07",
+        "BUS-08"
+      ],
+      "dependencies": [
+        "foundation",
+        "infrastructure",
+        "communication",
+        "agents-mcp"
+      ],
+      "templates": [],
+      "chapter_templates": {},
+      "outputs": [
+        "measured loop",
+        "playbook",
+        "business conversation record",
+        "module activation record",
+        "weekly review",
+        "30-60-90 roadmap",
+        "final capstone decision"
+      ],
+      "completion_gate": "One business loop has approved inputs, bounded authority, observable outcomes, rollback or pause rules, and one evidence-earning next move.",
+      "guide_sha256": "f5b55e8b21295755646dd94d5ba095295cae45a9129a22a9c1179ebfd256f4aa"
+    },
+    {
+      "module_id": "communication",
+      "status": "accepted-for-continued-authoring",
+      "manifest": "modules/communication.json",
+      "guide": "guide/40-communication.md",
+      "chapters": [
+        "COM-01",
+        "COM-02",
+        "COM-03",
+        "COM-04",
+        "COM-05",
+        "COM-06",
+        "COM-07",
+        "COM-08",
+        "COM-09",
+        "COM-10"
+      ],
+      "dependencies": [
+        "orientation"
+      ],
+      "templates": [
+        "templates/communication/AUDIENCE-AND-TONE-PROFILE.template.md",
+        "templates/communication/CAPTURE-CHECK-RESPOND-RECORD.template.md",
+        "templates/communication/DISAGREEMENT-REPAIR-AND-REQUALIFICATION-PLAY.template.md",
+        "templates/communication/FACT-INFERENCE-UNKNOWN-LEDGER.template.csv",
+        "templates/communication/LANGUAGE-AMBIGUITY-AND-OWNERSHIP-REVIEW.template.md",
+        "templates/communication/RESPONSE-QUALITY-AND-FAILURE-LAYER-EVALUATION.template.md",
+        "templates/communication/RESPONSIBLE-ADAPTATION-CAPSTONE.template.md",
+        "templates/communication/TONE-CHANNEL-AND-ACCESSIBILITY-MATRIX.template.md",
+        "templates/communication/VALIDATION-AND-DE-ESCALATION-LADDER.template.md"
+      ],
+      "chapter_templates": {},
+      "outputs": [
+        "COM-01 through COM-10 buyer-owned records"
+      ],
+      "completion_gate": "One bounded communication behavior is specified, tested, independently scored, repaired or deferred, and adapted only through an evidence-supported layer.",
+      "guide_sha256": "5ac8d65e15c109eb29ff4702511a257bb0c20c0bb94086d2645435ed0a4b7935"
+    },
+    {
+      "module_id": "foundation",
+      "status": "authoring-candidate",
+      "manifest": "modules/foundation.json",
+      "guide": "guide/10-foundation.md",
+      "chapters": [
+        "FND-01",
+        "FND-02",
+        "FND-03",
+        "FND-04",
+        "FND-05",
+        "FND-06"
+      ],
+      "dependencies": [
+        "orientation"
+      ],
+      "templates": [
+        "templates/system/MATURITY-RUNTIME-RESOURCE-MAP.template.md"
+      ],
+      "chapter_templates": {},
+      "outputs": [
+        "CURRENT-STATE-INVENTORY.md",
+        "AI-SYSTEM-NEEDS-BRIEF.md",
+        "MATURITY-ASSESSMENT.md",
+        "TARGET-ARCHITECTURE.md",
+        "REFERENCE-PATTERN-DECISION.md",
+        "FOUNDATION-BUILD-BRIEF.md"
+      ],
+      "completion_gate": "The reviewed build brief names one outcome, architecture, authority boundary, resource path, recovery path, first slice, and stop conditions.",
+      "guide_sha256": "400aae38f2d0ece7a8a165bc59b5fe808be4d70d72404a4cfb47d9b6aabb55ac"
+    },
+    {
+      "module_id": "infrastructure",
+      "status": "authoring-candidate",
+      "manifest": "modules/infrastructure.json",
+      "guide": "guide/30-infrastructure.md",
+      "chapters": [
+        "INF-01",
+        "INF-02",
+        "INF-03",
+        "INF-04",
+        "INF-05",
+        "INF-06",
+        "INF-07",
+        "INF-08"
+      ],
+      "dependencies": [
+        "foundation",
+        "networking",
+        "operating-systems"
+      ],
+      "templates": [
+        "templates/system/MODEL-FIT-RUNTIME-RESOURCE-CONTRACT.template.md",
+        "templates/system/DATA-AND-RECOVERY-OS-EXTENSION.template.md",
+        "templates/system/DEPLOYMENT-SERVICE-PROCESS-CONTRACT.template.md",
+        "templates/system/OBSERVABILITY-QUEUE-AND-BACKPRESSURE.template.md"
+      ],
+      "chapter_templates": {},
+      "outputs": [
+        "hardware inventory",
+        "model-fit report",
+        "data and recovery record",
+        "deployment runbook",
+        "observability and incidents record",
+        "knowledge and RAG record",
+        "rollout and recovery record"
+      ],
+      "completion_gate": "The selected workload is measured, recoverable, resource-bounded, observable, and accepted through one real user path with rollback preserved.",
+      "guide_sha256": "6ee1d9e9bf1f18e0ab69e9866fde979ceb7d04da1876aea9fd98d17ac41f117f"
+    },
+    {
+      "module_id": "networking",
+      "status": "accepted-for-continued-authoring",
+      "manifest": "modules/networking.json",
+      "guide": "guide/20-networking.md",
+      "chapters": [
+        "NET-01",
+        "NET-02",
+        "NET-03",
+        "NET-04",
+        "NET-05",
+        "NET-06",
+        "NET-07",
+        "NET-08",
+        "NET-09",
+        "NET-10",
+        "NET-11",
+        "NET-12"
+      ],
+      "dependencies": [
+        "foundation"
+      ],
+      "templates": [
+        "templates/networking/ADDRESS-SUBNET-AND-BROADCAST-DOMAIN-WORKSHEET.template.md",
+        "templates/networking/FOUNDATIONAL-SERVICES-DEPENDENCY-MAP.template.md",
+        "templates/networking/LAYER-TO-COMPONENT-DIAGNOSIS-CARD.template.md",
+        "templates/networking/NETWORK-INVENTORY.template.csv",
+        "templates/networking/NETWORK-REQUIREMENTS-BRIEF.template.md",
+        "templates/networking/NETWORK-TOPOLOGY-AND-FLOW.template.md",
+        "templates/networking/NETWORK-TROUBLESHOOTING-AND-RECOVERY-CAPSTONE.template.md",
+        "templates/networking/PERFORMANCE-BASELINE-AND-FAILOVER-DECISION.template.md",
+        "templates/networking/ROUTE-AND-EGRESS-ALLOWLIST.template.md",
+        "templates/networking/TELEMETRY-SLO-ALERT-AND-CHANGE-PLAN.template.md",
+        "templates/networking/TRUST-ZONE-AND-CONTROL-MATRIX.template.md",
+        "templates/networking/WIRELESS-AND-PRIVATE-ACCESS-PLAN.template.md"
+      ],
+      "chapter_templates": {},
+      "outputs": [
+        "NET-01 through NET-12 buyer-owned records"
+      ],
+      "completion_gate": "One fictional or approved isolated AI path is mapped, protected, observed, diagnosed, recovered, and verified without exposing private topology.",
+      "guide_sha256": "79e6f2848553956885206ad0a00512372b1ed9bd82bd38e97dc5f08d2e54fddc"
+    },
+    {
+      "module_id": "operating-systems",
+      "status": "draft-for-independent-qa",
+      "manifest": "modules/operating-systems.json",
+      "guide": "guide/25-operating-systems.md",
+      "chapters": [
+        "OS-01",
+        "OS-02",
+        "OS-03",
+        "OS-04",
+        "OS-05",
+        "OS-06",
+        "OS-07",
+        "OS-08",
+        "OS-09",
+        "OS-10",
+        "OS-11",
+        "OS-12",
+        "OS-13",
+        "OS-14",
+        "OS-15",
+        "OS-16",
+        "OS-17",
+        "OS-18",
+        "OS-19",
+        "OS-20"
+      ],
+      "dependencies": [
+        "foundation",
+        "networking"
+      ],
+      "templates": [
+        "templates/operating-systems/OS-AWARE-AI-HOST-ACCEPTANCE-RECORD.template.md",
+        "templates/operating-systems/OS-CONCURRENCY-AND-SHARED-STATE-CONTRACT.template.md",
+        "templates/operating-systems/OS-DATA-STORAGE-AND-SERVICE-CONTRACT.template.md",
+        "templates/operating-systems/OS-DEVICE-AND-IO-PATH.template.md",
+        "templates/operating-systems/OS-FILE-ACCESS-AND-PUBLICATION-CONTRACT.template.md",
+        "templates/operating-systems/OS-FILESYSTEM-STATE-MAP.template.md",
+        "templates/operating-systems/OS-HOST-MAINTENANCE-AND-RECOVERY-RUNBOOK.template.md",
+        "templates/operating-systems/OS-HOST-NETWORK-EVIDENCE-CARD.template.md",
+        "templates/operating-systems/OS-HOST-OPERATING-CONTRACT.template.md",
+        "templates/operating-systems/OS-HOST-PLATFORM-DECISION.template.md",
+        "templates/operating-systems/OS-ISOLATION-AND-RESOURCE-LIMIT-PLAN.template.md",
+        "templates/operating-systems/OS-ISOLATION-PLATFORM-AND-OPERATIONS.template.md",
+        "templates/operating-systems/OS-MEMORY-CAPACITY-AND-ALLOCATION-MAP.template.md",
+        "templates/operating-systems/OS-MEMORY-PRESSURE-AND-MODEL-RESIDENCY-TEST.template.md",
+        "templates/operating-systems/OS-PROCESS-AND-SERVICE-STATE-MAP.template.md",
+        "templates/operating-systems/OS-REQUEST-TO-HARDWARE-TRACE.template.md",
+        "templates/operating-systems/OS-SCHEDULING-AND-LATENCY-BASELINE.template.md",
+        "templates/operating-systems/OS-SERVICE-LIFECYCLE-AND-TERMINATION-CONTRACT.template.md",
+        "templates/operating-systems/OS-STORAGE-AND-FAILURE-DOMAIN-PLAN.template.md",
+        "templates/operating-systems/OS-SYSTEM-PERFORMANCE-BASELINE.template.md",
+        "templates/operating-systems/OS-WAIT-GRAPH-AND-LIVENESS-RECORD.template.md"
+      ],
+      "chapter_templates": {
+        "OS-01": "templates/operating-systems/OS-HOST-OPERATING-CONTRACT.template.md",
+        "OS-02": "templates/operating-systems/OS-REQUEST-TO-HARDWARE-TRACE.template.md",
+        "OS-03": "templates/operating-systems/OS-HOST-OPERATING-CONTRACT.template.md",
+        "OS-04": "templates/operating-systems/OS-PROCESS-AND-SERVICE-STATE-MAP.template.md",
+        "OS-05": "templates/operating-systems/OS-SCHEDULING-AND-LATENCY-BASELINE.template.md",
+        "OS-06": "templates/operating-systems/OS-MEMORY-CAPACITY-AND-ALLOCATION-MAP.template.md",
+        "OS-07": "templates/operating-systems/OS-MEMORY-PRESSURE-AND-MODEL-RESIDENCY-TEST.template.md",
+        "OS-08": "templates/operating-systems/OS-CONCURRENCY-AND-SHARED-STATE-CONTRACT.template.md",
+        "OS-09": "templates/operating-systems/OS-WAIT-GRAPH-AND-LIVENESS-RECORD.template.md",
+        "OS-10": "templates/operating-systems/OS-DEVICE-AND-IO-PATH.template.md",
+        "OS-11": "templates/operating-systems/OS-STORAGE-AND-FAILURE-DOMAIN-PLAN.template.md",
+        "OS-12": "templates/operating-systems/OS-FILESYSTEM-STATE-MAP.template.md",
+        "OS-13": "templates/operating-systems/OS-FILE-ACCESS-AND-PUBLICATION-CONTRACT.template.md",
+        "OS-14": "templates/operating-systems/OS-HOST-NETWORK-EVIDENCE-CARD.template.md",
+        "OS-15": "templates/operating-systems/OS-SERVICE-LIFECYCLE-AND-TERMINATION-CONTRACT.template.md",
+        "OS-16": "templates/operating-systems/OS-ISOLATION-AND-RESOURCE-LIMIT-PLAN.template.md",
+        "OS-17": "templates/operating-systems/OS-HOST-PLATFORM-DECISION.template.md",
+        "OS-18": "templates/operating-systems/OS-SYSTEM-PERFORMANCE-BASELINE.template.md",
+        "OS-19": "templates/operating-systems/OS-HOST-MAINTENANCE-AND-RECOVERY-RUNBOOK.template.md",
+        "OS-20": "templates/operating-systems/OS-AWARE-AI-HOST-ACCEPTANCE-RECORD.template.md"
+      },
+      "outputs": [
+        "host operating contract",
+        "request-to-hardware trace",
+        "identity and privilege map",
+        "process and service-state map",
+        "CPU and memory evidence",
+        "concurrency and liveness record",
+        "device and storage contract",
+        "filesystem publication contract",
+        "host-network evidence",
+        "service lifecycle contract",
+        "isolation and platform decision",
+        "performance baseline",
+        "maintenance and recovery runbook",
+        "OS-aware AI host acceptance record"
+      ],
+      "completion_gate": "One declared AI host is mapped, resource-bounded, recoverable, serviceable, measured, failure-tested, and independently accepted without granting the agent undeclared authority.",
+      "guide_sha256": "aec9e66d26804565f8907f60c1cf3dfba500c560e972995b180eb6b1d30f7068"
+    },
+    {
+      "module_id": "orientation",
+      "status": "authoring-candidate",
+      "manifest": "modules/orientation.json",
+      "guide": "guide/00-orientation.md",
+      "chapters": [
+        "ORI-01",
+        "ORI-02",
+        "ORI-03"
+      ],
+      "dependencies": [],
+      "templates": [],
+      "chapter_templates": {},
+      "outputs": [
+        "STATUS.md",
+        "LEARNING-DEPTH-DECISION.md",
+        "working contract"
+      ],
+      "completion_gate": "The buyer can state one outcome, selected depth, ownership boundary, current status, and next action.",
+      "guide_sha256": "6ce57a119b12b8fc583b55c61d2c59a47c65717b9b59b02e7ed455665aeda52b"
+    }
+  ],
+  "generated_buyer_work_root": "06-BUYER-WORKSPACE/artifacts/",
+  "release_authority": false
+}

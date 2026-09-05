@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "module_id": "operating-systems",
+  "status": "draft-for-independent-qa",
+  "chapters": ["OS-01", "OS-02", "OS-03", "OS-04", "OS-05", "OS-06", "OS-07", "OS-08", "OS-09", "OS-10", "OS-11", "OS-12", "OS-13", "OS-14", "OS-15", "OS-16", "OS-17", "OS-18", "OS-19", "OS-20"],
+  "guide": "guide/25-operating-systems.md",
+  "dependencies": ["foundation", "networking"],
+  "templates_glob": "templates/operating-systems/*",
+  "chapter_templates": {
+    "OS-01": "templates/operating-systems/OS-HOST-OPERATING-CONTRACT.template.md",
+    "OS-02": "templates/operating-systems/OS-REQUEST-TO-HARDWARE-TRACE.template.md",
+    "OS-03": "templates/operating-systems/OS-HOST-OPERATING-CONTRACT.template.md",
+    "OS-04": "templates/operating-systems/OS-PROCESS-AND-SERVICE-STATE-MAP.template.md",
+    "OS-05": "templates/operating-systems/OS-SCHEDULING-AND-LATENCY-BASELINE.template.md",
+    "OS-06": "templates/operating-systems/OS-MEMORY-CAPACITY-AND-ALLOCATION-MAP.template.md",
+    "OS-07": "templates/operating-systems/OS-MEMORY-PRESSURE-AND-MODEL-RESIDENCY-TEST.template.md",
+    "OS-08": "templates/operating-systems/OS-CONCURRENCY-AND-SHARED-STATE-CONTRACT.template.md",
+    "OS-09": "templates/operating-systems/OS-WAIT-GRAPH-AND-LIVENESS-RECORD.template.md",
+    "OS-10": "templates/operating-systems/OS-DEVICE-AND-IO-PATH.template.md",
+    "OS-11": "templates/operating-systems/OS-STORAGE-AND-FAILURE-DOMAIN-PLAN.template.md",
+    "OS-12": "templates/operating-systems/OS-FILESYSTEM-STATE-MAP.template.md",
+    "OS-13": "templates/operating-systems/OS-FILE-ACCESS-AND-PUBLICATION-CONTRACT.template.md",
+    "OS-14": "templates/operating-systems/OS-HOST-NETWORK-EVIDENCE-CARD.template.md",
+    "OS-15": "templates/operating-systems/OS-SERVICE-LIFECYCLE-AND-TERMINATION-CONTRACT.template.md",
+    "OS-16": "templates/operating-systems/OS-ISOLATION-AND-RESOURCE-LIMIT-PLAN.template.md",
+    "OS-17": "templates/operating-systems/OS-HOST-PLATFORM-DECISION.template.md",
+    "OS-18": "templates/operating-systems/OS-SYSTEM-PERFORMANCE-BASELINE.template.md",
+    "OS-19": "templates/operating-systems/OS-HOST-MAINTENANCE-AND-RECOVERY-RUNBOOK.template.md",
+    "OS-20": "templates/operating-systems/OS-AWARE-AI-HOST-ACCEPTANCE-RECORD.template.md"
+  },
+  "outputs": ["host operating contract", "request-to-hardware trace", "identity and privilege map", "process and service-state map", "CPU and memory evidence", "concurrency and liveness record", "device and storage contract", "filesystem publication contract", "host-network evidence", "service lifecycle contract", "isolation and platform decision", "performance baseline", "maintenance and recovery runbook", "OS-aware AI host acceptance record"],
+  "completion_gate": "One declared AI host is mapped, resource-bounded, recoverable, serviceable, measured, failure-tested, and independently accepted without granting the agent undeclared authority."
+}

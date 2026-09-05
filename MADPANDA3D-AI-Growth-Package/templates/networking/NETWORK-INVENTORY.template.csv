@@ -1,0 +1,2 @@
+asset_id,role,asset_class,environment,implementation_or_provider,location_scope,workflow_owner,technical_owner,current_state,evidence_label,checked_date,private_evidence_reference,data_or_dependency,availability_or_constraint,blocking_unknown_id,notes
+NET-A001,operator endpoint,endpoint,lab,REDACTED,operator-controlled,OWNER,OWNER,unknown,UNKNOWN,YYYY-MM-DD,OPAQUE-PRIVATE-REF,request origin,unknown,UNK-001,Do not store paths URLs addresses credentials or raw configuration here

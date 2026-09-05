@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "module_id": "foundation",
+  "status": "authoring-candidate",
+  "chapters": ["FND-01", "FND-02", "FND-03", "FND-04", "FND-05", "FND-06"],
+  "guide": "guide/10-foundation.md",
+  "dependencies": ["orientation"],
+  "templates": ["templates/system/MATURITY-RUNTIME-RESOURCE-MAP.template.md"],
+  "outputs": ["CURRENT-STATE-INVENTORY.md", "AI-SYSTEM-NEEDS-BRIEF.md", "MATURITY-ASSESSMENT.md", "TARGET-ARCHITECTURE.md", "REFERENCE-PATTERN-DECISION.md", "FOUNDATION-BUILD-BRIEF.md"],
+  "completion_gate": "The reviewed build brief names one outcome, architecture, authority boundary, resource path, recovery path, first slice, and stop conditions."
+}

@@ -1,0 +1,730 @@
+{
+  "schema_version": "1.0",
+  "package_id": "madpanda3d-ai-growth-package-next-edition-english-authoring-candidate",
+  "status": "ENGLISH AUTHORING CANDIDATE - NOT RELEASE COPY",
+  "built_from_date": "2026-08-20",
+  "files": [
+    {
+      "path": "01-AI-GROWTH-GUIDE.pdf",
+      "role": "candidate-content",
+      "bytes": 1209273,
+      "sha256": "ec9eddf02b96a71cd1d58aeed308100fa083255752515deae90c7d36976fcafd"
+    },
+    {
+      "path": "02-AI-GROWTH-GUIDE.txt",
+      "role": "candidate-content",
+      "bytes": 975993,
+      "sha256": "7c493ec6e56f2df0a91c225f0806f7a02f0d5bc291a600517b37c0fbb6881398"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/AGENTS.md",
+      "role": "candidate-content",
+      "bytes": 4469,
+      "sha256": "440219676d9b1bce0239bcd26b076038319c385225a9fe37cf80b5d2581fb200"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/BACKLOG.md",
+      "role": "candidate-content",
+      "bytes": 1338,
+      "sha256": "fbbf1551e547c9206f903ffe5d32ed601e34c5e126ce60bd26cc395951c1c25a"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/BUGS.md",
+      "role": "candidate-content",
+      "bytes": 1110,
+      "sha256": "52a8d2af7362b577c066441093883d9e5b8caf6bb05f875856243bed50b58424"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/DECISIONS.md",
+      "role": "candidate-content",
+      "bytes": 1472,
+      "sha256": "f3e5f65109566a54fef662fc29b2031dcf16763c5178490e42db46ccc4740116"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/HANDOVER.md",
+      "role": "candidate-content",
+      "bytes": 1555,
+      "sha256": "08fce83c414a1651df9d5cee79c2e33d1fbce3e74dcd69d87bfe2726481ef9ec"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/MEMORY.md",
+      "role": "candidate-content",
+      "bytes": 1201,
+      "sha256": "0b28ddb01ddcb522a73181184cd3c2650b4e54ea480630f4e688f7e22f21c39c"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/STATUS.md",
+      "role": "candidate-content",
+      "bytes": 2137,
+      "sha256": "33f5163ef7caeb9fe46a17016521a407f879863e9780c516f5f27501f9d34385"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/SYSTEM-MAP.md",
+      "role": "candidate-content",
+      "bytes": 3446,
+      "sha256": "85f910dcd16273c9dfac9a82ccba487995e102b09994d199bb91b1849fe80d81"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/artifacts/README.txt",
+      "role": "candidate-content",
+      "bytes": 531,
+      "sha256": "743b5729d9bbd45430813f971d3b5cca2f7fcafd8bef7f112d2aa86bb8f9b965"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/evidence/README.txt",
+      "role": "candidate-content",
+      "bytes": 1928,
+      "sha256": "fc7010ec768c9dcd08d484ca0985fefd664849172fefbf11e7925a103a4a7430"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/tickets/blocked/README.txt",
+      "role": "candidate-content",
+      "bytes": 788,
+      "sha256": "59a07c82d895efd4c2095eb734d7d51004b4100387567e62b7c69dc556f65344"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/tickets/completed/README.txt",
+      "role": "candidate-content",
+      "bytes": 816,
+      "sha256": "c2cf1a7b691412ae848986e810fc7b8f2432ebe50ab322d049ffcdf5bdbd0881"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/tickets/failed/README.txt",
+      "role": "candidate-content",
+      "bytes": 823,
+      "sha256": "d91011ae2d27b094beb71f0c7a000f9f9ad8049793546d5c000c5d840371db71"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/tickets/in-progress/README.txt",
+      "role": "candidate-content",
+      "bytes": 1185,
+      "sha256": "10e1ab973123062e6d05e948a6135014e761e34c77c167577c64f7966648bb17"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/tickets/open/README.txt",
+      "role": "candidate-content",
+      "bytes": 478,
+      "sha256": "eda00725457f661866ac0fa2fd354d8851b12d9291bf0e1fd032f61a7948ccc0"
+    },
+    {
+      "path": "06-BUYER-WORKSPACE/tickets/skipped/README.txt",
+      "role": "candidate-content",
+      "bytes": 467,
+      "sha256": "493d4f7a11c31701c4d68802d1e9dd26ff7d403b60bdf382557fe822616d513b"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/CHANGELOG.md",
+      "role": "candidate-content",
+      "bytes": 4997,
+      "sha256": "4a27b14df4af6f2d550be4cae74b6025fd02fe82a962091f1ad8486e85f3e0ec"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/LICENSE-AND-COMMERCIAL-OUTPUT-RIGHTS.md",
+      "role": "candidate-content",
+      "bytes": 2178,
+      "sha256": "61bc0ca0d0e96f50ddd4f6f2b2bd11473d1044e4a1822b2dc6398f423dea1492"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/PLAYBOOK.md",
+      "role": "candidate-content",
+      "bytes": 5633,
+      "sha256": "7af9e5a31e07167d053708950af39be4d7b8d8de2b11015d3ef92e43ac60cf05"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/PRIVACY-AND-SAFE-USE.md",
+      "role": "candidate-content",
+      "bytes": 2424,
+      "sha256": "eb6adb739d140b8d0b134f124ced64c9043432829a74a32574d8d2c3485c10b5"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/PROVENANCE.md",
+      "role": "candidate-content",
+      "bytes": 4919,
+      "sha256": "368613708ececf9507b50b5a4422d5a8112f737d8995486909c91ca3101b3718"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/REVIEWER-PROMPT.md",
+      "role": "candidate-content",
+      "bytes": 2372,
+      "sha256": "299da5359efa1c7cec96075ecfaa961a77bd8cb36eb51f5f93be95f86ad7c90e"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/SOURCES.md",
+      "role": "candidate-content",
+      "bytes": 5160,
+      "sha256": "a88174835d86444210a4063740f6b0b8b9f3e5c21e3464aa13ea84fd3757a9fd"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/START-HERE.md",
+      "role": "candidate-content",
+      "bytes": 7630,
+      "sha256": "87720ed212323026a1fb82d237f05642294713dbbc8399ae10520ba11e4943d7"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/STATUS.template.md",
+      "role": "candidate-content",
+      "bytes": 2374,
+      "sha256": "6a3207435b5742b7f1f8ea626e755cc7b7d15d5327f8c220009f4330d3d854f1"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/assets/content-calendar.csv",
+      "role": "candidate-content",
+      "bytes": 385,
+      "sha256": "ceac624f29e709b8e46067e2aea4ac100d45f99d9969e5f4de80ec808af2ea60"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/assets/delivery-defect-log.csv",
+      "role": "candidate-content",
+      "bytes": 234,
+      "sha256": "f78c10e18201f38ad3c2b15a3fd72e05d7147365542082439896b7ea33894914"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/assets/launch-readiness-checklist.md",
+      "role": "candidate-content",
+      "bytes": 3650,
+      "sha256": "f46f6011b13ab8562686d783885eb2b8d826cfc90ef2a4ff32b18f0bd36ef311"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/assets/offer-scorecard.csv",
+      "role": "candidate-content",
+      "bytes": 359,
+      "sha256": "dbd59c5a8f0241b08739b6013918db41ee88c2f88480b0b22c6b4d3b02c88e9e"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/assets/product-qa-rubric.md",
+      "role": "candidate-content",
+      "bytes": 4153,
+      "sha256": "614bac3ce58a26929cb459411e359404d986edef24d407d63f466e94a2f8361b"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/assets/research-matrix.csv",
+      "role": "candidate-content",
+      "bytes": 208,
+      "sha256": "352a6e5427886c67baa7971379530854335279029f81f876605e73e06b1fdc3d"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/assets/revenue-and-feedback-scorecard.csv",
+      "role": "candidate-content",
+      "bytes": 541,
+      "sha256": "222b52e9a2e5a1d4e249f5f54a8e6f9d16585f1117d694f5266b882534d694fe"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/examples/FICTIONAL-WALKTHROUGH.md",
+      "role": "candidate-content",
+      "bytes": 8226,
+      "sha256": "0d8c26701e1269ec3c624c9a8a8895559481a3b0963ed964485d00f566c717ea"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/plays/00-agent-and-tool-intake.md",
+      "role": "candidate-content",
+      "bytes": 3239,
+      "sha256": "60b89b8e2fc1768a83b47d1cf70c60936e0e403c72c9510e550eb11fca6e666f"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/plays/01-extract-buyer-problem.md",
+      "role": "candidate-content",
+      "bytes": 3005,
+      "sha256": "2fb1cc7ebb194492e304304fd6feea8bf38af4d14e9a8a3ef6c02efa26744ced"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/plays/02-validate-demand-and-offer.md",
+      "role": "candidate-content",
+      "bytes": 3447,
+      "sha256": "a446df1783e11a694ba1ddff1c013b1490f58184cc361ec07abc98104d6b4e2e"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/plays/03-design-the-product.md",
+      "role": "candidate-content",
+      "bytes": 2960,
+      "sha256": "4fe4859acaa6c29eb53c589a72881bbdb0afd42e6014e4a2c5689b030b901fa3"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/plays/04-build-the-package.md",
+      "role": "candidate-content",
+      "bytes": 3202,
+      "sha256": "70c9c45fbe3030a5915207715341058530616c5c9264a83af2a632a69b8f5c14"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/plays/05-run-product-qa.md",
+      "role": "candidate-content",
+      "bytes": 2848,
+      "sha256": "737eeb6e37031108a56aa6bc1e771dfd264e76d64cec5c777b015041145c8822"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/plays/06-prepare-the-buyer-path.md",
+      "role": "candidate-content",
+      "bytes": 5250,
+      "sha256": "2e2810f05ec54692dd462361914207e24e23c373efd75138b775379cad4caebd"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/plays/07-build-the-organic-launch.md",
+      "role": "candidate-content",
+      "bytes": 4608,
+      "sha256": "6ad9056cfce33e3c289afa4728a2599c0ef5b8080d45b7687fbccf7b0c0512b2"
+    },
+    {
+      "path": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/plays/08-run-the-30-day-loop.md",
+      "role": "candidate-content",
+      "bytes": 7017,
+      "sha256": "50ed45867178a90ef13fb572ea50825d85b963312c3d7d885b7b3495937772a8"
+    },
+    {
+      "path": "INGEST-ME-FIRST.md",
+      "role": "candidate-content",
+      "bytes": 2912,
+      "sha256": "b9ce01fb795d608e472ae1334023c1f76a329241d430f456a2ee9b0fd87e7d55"
+    },
+    {
+      "path": "PACKAGE-INDEX.json",
+      "role": "candidate-content",
+      "bytes": 14488,
+      "sha256": "5bb6b0775832a058a417c04a5b5f3dbc0dafa55631c3421790c1ce89ca5d1221"
+    },
+    {
+      "path": "PROVENANCE.md",
+      "role": "candidate-content",
+      "bytes": 4252,
+      "sha256": "3accb69a513a7e8eb181f4fdc06be12a9b34cd3c66da38947d4a4a323e9632fd"
+    },
+    {
+      "path": "SOURCES.md",
+      "role": "candidate-content",
+      "bytes": 5052,
+      "sha256": "ae2614d5d6fc340cf05802435617371a6facdf07e5e1d69980d8bb55ee6c5638"
+    },
+    {
+      "path": "guide/00-orientation.md",
+      "role": "candidate-content",
+      "bytes": 11006,
+      "sha256": "6ce57a119b12b8fc583b55c61d2c59a47c65717b9b59b02e7ed455665aeda52b"
+    },
+    {
+      "path": "guide/10-foundation.md",
+      "role": "candidate-content",
+      "bytes": 34497,
+      "sha256": "400aae38f2d0ece7a8a165bc59b5fe808be4d70d72404a4cfb47d9b6aabb55ac"
+    },
+    {
+      "path": "guide/20-networking.md",
+      "role": "candidate-content",
+      "bytes": 210277,
+      "sha256": "79e6f2848553956885206ad0a00512372b1ed9bd82bd38e97dc5f08d2e54fddc"
+    },
+    {
+      "path": "guide/25-operating-systems.md",
+      "role": "candidate-content",
+      "bytes": 286802,
+      "sha256": "aec9e66d26804565f8907f60c1cf3dfba500c560e972995b180eb6b1d30f7068"
+    },
+    {
+      "path": "guide/30-infrastructure.md",
+      "role": "candidate-content",
+      "bytes": 34619,
+      "sha256": "6ee1d9e9bf1f18e0ab69e9866fde979ceb7d04da1876aea9fd98d17ac41f117f"
+    },
+    {
+      "path": "guide/40-communication.md",
+      "role": "candidate-content",
+      "bytes": 160280,
+      "sha256": "5ac8d65e15c109eb29ff4702511a257bb0c20c0bb94086d2645435ed0a4b7935"
+    },
+    {
+      "path": "guide/50-agents-mcp.md",
+      "role": "candidate-content",
+      "bytes": 42252,
+      "sha256": "8f6b8bce38b228e45c6e8179abd923b2c88819abd14f1bf4b2ad032e7d9687e8"
+    },
+    {
+      "path": "guide/60-business.md",
+      "role": "candidate-content",
+      "bytes": 30148,
+      "sha256": "f5b55e8b21295755646dd94d5ba095295cae45a9129a22a9c1179ebfd256f4aa"
+    },
+    {
+      "path": "guide/90-appendix-a.md",
+      "role": "candidate-content",
+      "bytes": 3872,
+      "sha256": "05f874a29e16d9e294b81d6f50d79f92f14a8be7c1bde4571adaf5425340155b"
+    },
+    {
+      "path": "guide/91-appendix-b.md",
+      "role": "candidate-content",
+      "bytes": 4061,
+      "sha256": "f039cf44eeda3d17b333d487c3d1a8e26821a0880cb56c83cf9a7aca3829c502"
+    },
+    {
+      "path": "guide/92-appendix-c.md",
+      "role": "candidate-content",
+      "bytes": 3193,
+      "sha256": "7a8fe9026a5e6e0f56fa750544197afec968a280da4901b178e56d48e1006100"
+    },
+    {
+      "path": "modules/agents-mcp.json",
+      "role": "candidate-content",
+      "bytes": 855,
+      "sha256": "0d153e048da1d33f4d7be2ecb7eed14e9fc79a7a59618b3da2230487cd9b31e7"
+    },
+    {
+      "path": "modules/business.json",
+      "role": "candidate-content",
+      "bytes": 737,
+      "sha256": "7268180a23e76acdd10fff1f15f24beca51a67782c5c74975a89188fd236bb9c"
+    },
+    {
+      "path": "modules/communication.json",
+      "role": "candidate-content",
+      "bytes": 589,
+      "sha256": "cf38c250bde09b305acee8d60ef48317adcb2e1c5586f6cc56c77f22c3b7a167"
+    },
+    {
+      "path": "modules/foundation.json",
+      "role": "candidate-content",
+      "bytes": 674,
+      "sha256": "19281b96e95210285078ae2bc28d8e62b869c15c22617d0deccdcaec8d0e5ee1"
+    },
+    {
+      "path": "modules/infrastructure.json",
+      "role": "candidate-content",
+      "bytes": 960,
+      "sha256": "c68043f54e7ddb6706483730e9462e173a9ef3838b9ba4cf4f3c34af20913638"
+    },
+    {
+      "path": "modules/networking.json",
+      "role": "candidate-content",
+      "bytes": 589,
+      "sha256": "034dcb100b6001b0073227a4cb2dfaf11457e0f023742773d10f3c3cb3601fb9"
+    },
+    {
+      "path": "modules/operating-systems.json",
+      "role": "candidate-content",
+      "bytes": 2923,
+      "sha256": "cc28c82ad4fa8d26116360641a6ffabedaee599fd24b456a36097ad4ffa5ea64"
+    },
+    {
+      "path": "modules/orientation.json",
+      "role": "candidate-content",
+      "bytes": 424,
+      "sha256": "ff51611770649e1ec471ad06fbdaff93652c15129e17372b7f020c52736665fe"
+    },
+    {
+      "path": "templates/CHAPTER-SOURCE-AND-PROVENANCE.template.md",
+      "role": "candidate-content",
+      "bytes": 2052,
+      "sha256": "b2c7568976e5dafafd2b73ccee65bf4018e525663f8d7e0ad41ac296fcca244c"
+    },
+    {
+      "path": "templates/CHAPTER.template.md",
+      "role": "candidate-content",
+      "bytes": 2948,
+      "sha256": "6f74083a30fa0379a4c24af2b4b933a58bd35b6f89363c79ba54d44105a26414"
+    },
+    {
+      "path": "templates/PROVENANCE.template.md",
+      "role": "candidate-content",
+      "bytes": 1402,
+      "sha256": "67c937febdcf600984f0a44b33cca5eeb6ebcf07c027a8286de0b5889e316091"
+    },
+    {
+      "path": "templates/SOURCES.template.md",
+      "role": "candidate-content",
+      "bytes": 1178,
+      "sha256": "e892045328f66949fcac0131c360682192aa70616e736459565f368b76f67537"
+    },
+    {
+      "path": "templates/communication/AUDIENCE-AND-TONE-PROFILE.template.md",
+      "role": "candidate-content",
+      "bytes": 4053,
+      "sha256": "d7959bdc4f8618365e87b69ed86307982df83e92625686bc74d117091ff0c90d"
+    },
+    {
+      "path": "templates/communication/CAPTURE-CHECK-RESPOND-RECORD.template.md",
+      "role": "candidate-content",
+      "bytes": 3342,
+      "sha256": "dce577409b90ee6aacdad831f63329cfc689a978472c5805aa15b5dab1792a75"
+    },
+    {
+      "path": "templates/communication/DISAGREEMENT-REPAIR-AND-REQUALIFICATION-PLAY.template.md",
+      "role": "candidate-content",
+      "bytes": 4264,
+      "sha256": "7833796ef6b50b3da0ef6ae6d88d16bd120d186be514d242e5df7092ed870ef3"
+    },
+    {
+      "path": "templates/communication/FACT-INFERENCE-UNKNOWN-LEDGER.template.csv",
+      "role": "candidate-content",
+      "bytes": 804,
+      "sha256": "a7dd0527c7870cf478fdd6306e6607e9448967fe4f6dc2f5814eebb031c83137"
+    },
+    {
+      "path": "templates/communication/LANGUAGE-AMBIGUITY-AND-OWNERSHIP-REVIEW.template.md",
+      "role": "candidate-content",
+      "bytes": 1949,
+      "sha256": "312b28cb86d297655cdbc00fdcaae0bf99c6a94210b6be33bc49aa8c7521eb4c"
+    },
+    {
+      "path": "templates/communication/RESPONSE-QUALITY-AND-FAILURE-LAYER-EVALUATION.template.md",
+      "role": "candidate-content",
+      "bytes": 6013,
+      "sha256": "4ce506600339b086059c284cc9a40cd0ee61a26f943eaf636713ac2a1c2fda47"
+    },
+    {
+      "path": "templates/communication/RESPONSIBLE-ADAPTATION-CAPSTONE.template.md",
+      "role": "candidate-content",
+      "bytes": 5645,
+      "sha256": "fdc21a5e8fc2345b5a4f12afa89cea0747b718c7a9e53388d6b80a993468476c"
+    },
+    {
+      "path": "templates/communication/TONE-CHANNEL-AND-ACCESSIBILITY-MATRIX.template.md",
+      "role": "candidate-content",
+      "bytes": 2666,
+      "sha256": "f3270f51f88bb202988a96fd054b6aedf103cd6889aa7acad2767f8e07a17d3c"
+    },
+    {
+      "path": "templates/communication/VALIDATION-AND-DE-ESCALATION-LADDER.template.md",
+      "role": "candidate-content",
+      "bytes": 4081,
+      "sha256": "f588d71a92c75c1544be57ecae5b35a8b7d99ad9ae5831b3e2fbc82c1db90c05"
+    },
+    {
+      "path": "templates/networking/ADDRESS-SUBNET-AND-BROADCAST-DOMAIN-WORKSHEET.template.md",
+      "role": "candidate-content",
+      "bytes": 2790,
+      "sha256": "75bbc8c292613999959c0bee8d476bc773c8e28371d5beb0adbcb3f9766f3e86"
+    },
+    {
+      "path": "templates/networking/FOUNDATIONAL-SERVICES-DEPENDENCY-MAP.template.md",
+      "role": "candidate-content",
+      "bytes": 2900,
+      "sha256": "17ae2ee5be3161934fb92b56f1b2bbf4a9450a1471c577c8174805d068c9ad1f"
+    },
+    {
+      "path": "templates/networking/LAYER-TO-COMPONENT-DIAGNOSIS-CARD.template.md",
+      "role": "candidate-content",
+      "bytes": 2822,
+      "sha256": "1b5d222f0e45311e759e540cdc31cc7abd2af29037f2ce2f158b8aafc59f68b6"
+    },
+    {
+      "path": "templates/networking/NETWORK-INVENTORY.template.csv",
+      "role": "candidate-content",
+      "bytes": 482,
+      "sha256": "201ace9b154e3157c4230f7428a0498b099184f6988b8b9120431ce2853ca5f7"
+    },
+    {
+      "path": "templates/networking/NETWORK-REQUIREMENTS-BRIEF.template.md",
+      "role": "candidate-content",
+      "bytes": 1424,
+      "sha256": "e3fddcd5007238ae129606943ff1f6e6bd2ee6ec79efd9a5017acf5947d6f978"
+    },
+    {
+      "path": "templates/networking/NETWORK-TOPOLOGY-AND-FLOW.template.md",
+      "role": "candidate-content",
+      "bytes": 3266,
+      "sha256": "da997b29d45cdf827499a72c9bd6f6fac72815573cf51358995e819708c47b37"
+    },
+    {
+      "path": "templates/networking/NETWORK-TROUBLESHOOTING-AND-RECOVERY-CAPSTONE.template.md",
+      "role": "candidate-content",
+      "bytes": 5983,
+      "sha256": "4906c7bd808e346346026c4048c815b79dbff6a11fa413ab33029ea0013b46cc"
+    },
+    {
+      "path": "templates/networking/PERFORMANCE-BASELINE-AND-FAILOVER-DECISION.template.md",
+      "role": "candidate-content",
+      "bytes": 5090,
+      "sha256": "425f772f680fa7f3312804206458a6511283a93056da076971d2ef58cc606bf7"
+    },
+    {
+      "path": "templates/networking/ROUTE-AND-EGRESS-ALLOWLIST.template.md",
+      "role": "candidate-content",
+      "bytes": 5197,
+      "sha256": "8e43294b65c100d65ffca52f757d6a4303395dbe64c990cf79df5d52a42a836e"
+    },
+    {
+      "path": "templates/networking/TELEMETRY-SLO-ALERT-AND-CHANGE-PLAN.template.md",
+      "role": "candidate-content",
+      "bytes": 6631,
+      "sha256": "4262cb6d6b3d64d5f0e7a0bab054cd3e49a3157bba771fb27afb4e8dcc57576f"
+    },
+    {
+      "path": "templates/networking/TRUST-ZONE-AND-CONTROL-MATRIX.template.md",
+      "role": "candidate-content",
+      "bytes": 4062,
+      "sha256": "8b0b65601d085af30c0b0426437465f2e7e7e3037bdf16cd9168970841bde9fd"
+    },
+    {
+      "path": "templates/networking/WIRELESS-AND-PRIVATE-ACCESS-PLAN.template.md",
+      "role": "candidate-content",
+      "bytes": 5141,
+      "sha256": "a5b380d2cfa391e2c1a51a348dbf5865bff67c1d1039ea7e07389730cd8aad40"
+    },
+    {
+      "path": "templates/operating-systems/OS-AWARE-AI-HOST-ACCEPTANCE-RECORD.template.md",
+      "role": "candidate-content",
+      "bytes": 2385,
+      "sha256": "458121ce74939ee7d30157156182f1a3fa87c2744be5fb481910b4130598f726"
+    },
+    {
+      "path": "templates/operating-systems/OS-CONCURRENCY-AND-SHARED-STATE-CONTRACT.template.md",
+      "role": "candidate-content",
+      "bytes": 1361,
+      "sha256": "cffebc293729f6f6f34cd0bb6fd42f57720dadf1475188e96f6eea2a37a81e8f"
+    },
+    {
+      "path": "templates/operating-systems/OS-DATA-STORAGE-AND-SERVICE-CONTRACT.template.md",
+      "role": "candidate-content",
+      "bytes": 2121,
+      "sha256": "bc521d8d1887bc5b1059ed449865233a27199bfe805f36e5aad6d6b0fbceecdf"
+    },
+    {
+      "path": "templates/operating-systems/OS-DEVICE-AND-IO-PATH.template.md",
+      "role": "candidate-content",
+      "bytes": 1239,
+      "sha256": "30f2d9093b92e397eb8ccf37da36a3985e717718cd29d384660ffd9ccd16b841"
+    },
+    {
+      "path": "templates/operating-systems/OS-FILE-ACCESS-AND-PUBLICATION-CONTRACT.template.md",
+      "role": "candidate-content",
+      "bytes": 1288,
+      "sha256": "166e48fa57a0f26408223377cbcd3d728a4172897d32eca6c40f088e8726962e"
+    },
+    {
+      "path": "templates/operating-systems/OS-FILESYSTEM-STATE-MAP.template.md",
+      "role": "candidate-content",
+      "bytes": 1319,
+      "sha256": "b84a65a148039d34f7c3ae1e1c225661a7e021daa803351ecc636694eda369c5"
+    },
+    {
+      "path": "templates/operating-systems/OS-HOST-MAINTENANCE-AND-RECOVERY-RUNBOOK.template.md",
+      "role": "candidate-content",
+      "bytes": 3116,
+      "sha256": "35bdea8c87e83d33708eb2de90d4b793cb2b581d360fd4f640fc7c3652217108"
+    },
+    {
+      "path": "templates/operating-systems/OS-HOST-NETWORK-EVIDENCE-CARD.template.md",
+      "role": "candidate-content",
+      "bytes": 1568,
+      "sha256": "02b1e3ceef61c29f8aada7ba9aa39f9d5da818d59d6e5f9c2bb73c3c34e86dbf"
+    },
+    {
+      "path": "templates/operating-systems/OS-HOST-OPERATING-CONTRACT.template.md",
+      "role": "candidate-content",
+      "bytes": 3084,
+      "sha256": "05b2296a24ba58c7ebf82f1c433e161e5c8fcab7af07ca04c05cbc07a7640f94"
+    },
+    {
+      "path": "templates/operating-systems/OS-HOST-PLATFORM-DECISION.template.md",
+      "role": "candidate-content",
+      "bytes": 1195,
+      "sha256": "cfb2035bc7efcc74ecd9f16c6beb50cb3120b8bad383e4b6c1681d26f5709022"
+    },
+    {
+      "path": "templates/operating-systems/OS-ISOLATION-AND-RESOURCE-LIMIT-PLAN.template.md",
+      "role": "candidate-content",
+      "bytes": 1879,
+      "sha256": "fc6f6635577b679401f6c953f2cdc965b44fb8ecce0d7996803dc3b9fc8036a7"
+    },
+    {
+      "path": "templates/operating-systems/OS-ISOLATION-PLATFORM-AND-OPERATIONS.template.md",
+      "role": "candidate-content",
+      "bytes": 2212,
+      "sha256": "19d14d5a473e054f585ccc9544314e64d1e7721fd09710e4dfc24eaa2408be9e"
+    },
+    {
+      "path": "templates/operating-systems/OS-MEMORY-CAPACITY-AND-ALLOCATION-MAP.template.md",
+      "role": "candidate-content",
+      "bytes": 1319,
+      "sha256": "06e65f585594408ba76d09dae2db05b91663416972992896f2074b90462fca74"
+    },
+    {
+      "path": "templates/operating-systems/OS-MEMORY-PRESSURE-AND-MODEL-RESIDENCY-TEST.template.md",
+      "role": "candidate-content",
+      "bytes": 1335,
+      "sha256": "1e700407da768b9a22a3b8159afef7ff27187e6321d2d37a911dfaa2082da8d4"
+    },
+    {
+      "path": "templates/operating-systems/OS-PROCESS-AND-SERVICE-STATE-MAP.template.md",
+      "role": "candidate-content",
+      "bytes": 1317,
+      "sha256": "3974a8c14b9bf162708958434576f471844cca2edfbe119a54ae3f30d7ad01c9"
+    },
+    {
+      "path": "templates/operating-systems/OS-REQUEST-TO-HARDWARE-TRACE.template.md",
+      "role": "candidate-content",
+      "bytes": 1511,
+      "sha256": "08b9690ddd85f72898431028afa6604e332636908ef708c95f1abe1b7937f2c7"
+    },
+    {
+      "path": "templates/operating-systems/OS-SCHEDULING-AND-LATENCY-BASELINE.template.md",
+      "role": "candidate-content",
+      "bytes": 1540,
+      "sha256": "33dbdae35bd7d071fcdf8036a41f2aa3c524752a1b078cb4387fdc2b779412da"
+    },
+    {
+      "path": "templates/operating-systems/OS-SERVICE-LIFECYCLE-AND-TERMINATION-CONTRACT.template.md",
+      "role": "candidate-content",
+      "bytes": 2029,
+      "sha256": "cd02c76cbb56625a7bc2caef36f7704ac66c00c8e225e2d80c4602f25ca4e10e"
+    },
+    {
+      "path": "templates/operating-systems/OS-STORAGE-AND-FAILURE-DOMAIN-PLAN.template.md",
+      "role": "candidate-content",
+      "bytes": 1819,
+      "sha256": "02dd947e03adc0180944ba843b6a48594494bc25d37d32626d2f5740ee0f45e4"
+    },
+    {
+      "path": "templates/operating-systems/OS-SYSTEM-PERFORMANCE-BASELINE.template.md",
+      "role": "candidate-content",
+      "bytes": 1613,
+      "sha256": "5eabb21cf85156f546642df5dad2da87eb6268bfd24aae875fd71e5ba460a8dd"
+    },
+    {
+      "path": "templates/operating-systems/OS-WAIT-GRAPH-AND-LIVENESS-RECORD.template.md",
+      "role": "candidate-content",
+      "bytes": 1435,
+      "sha256": "e5eaacb1877eac46c0fde330fa147827d3920775badb0bc5640fd4ec5e23e83b"
+    },
+    {
+      "path": "templates/system/DATA-AND-RECOVERY-OS-EXTENSION.template.md",
+      "role": "candidate-content",
+      "bytes": 708,
+      "sha256": "deec801cbae9dd097df742aae804691d0871c0fd0202ccf2ade494e1f86fec9a"
+    },
+    {
+      "path": "templates/system/DEPLOYMENT-SERVICE-PROCESS-CONTRACT.template.md",
+      "role": "candidate-content",
+      "bytes": 1026,
+      "sha256": "28d32b4a3600cd72b654d97feaec8718d5d52911440a8765589623fa850bb4f6"
+    },
+    {
+      "path": "templates/system/MATURITY-RUNTIME-RESOURCE-MAP.template.md",
+      "role": "candidate-content",
+      "bytes": 535,
+      "sha256": "78bc94fa0ad9169105458e000e097cf0fd2fe70db2383793a8ab99b6e4676545"
+    },
+    {
+      "path": "templates/system/MODEL-FIT-RUNTIME-RESOURCE-CONTRACT.template.md",
+      "role": "candidate-content",
+      "bytes": 935,
+      "sha256": "23ae2f2eafe550db25988fd51d0e57a2dff97bd6cfa1c2218b0f9aaf308e0896"
+    },
+    {
+      "path": "templates/system/OBSERVABILITY-QUEUE-AND-BACKPRESSURE.template.md",
+      "role": "candidate-content",
+      "bytes": 706,
+      "sha256": "63018a341a0b4ec54a87650466fef878475d66f8f62a660e804c6692a915c0e1"
+    },
+    {
+      "path": "templates/system/SERVICE-PROCESS-READINESS.template.md",
+      "role": "candidate-content",
+      "bytes": 805,
+      "sha256": "e4cddcefa5c4f2de8d3a7dc496936a4c5907c0e4df78a1627613a8dd570c4a5f"
+    },
+    {
+      "path": "templates/system/TICKET-STATE-AND-LIVENESS.template.md",
+      "role": "candidate-content",
+      "bytes": 807,
+      "sha256": "6e81c11774a6e1bb2b0c11d45b6c1400423bad54151670c1407bfee11c973cd9"
+    }
+  ],
+  "manifest_self_hash": "covered-by-SHA256SUMS.txt",
+  "release_archive_created": false
+}

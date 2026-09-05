@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "module_id": "business",
+  "status": "authoring-candidate",
+  "chapters": ["BUS-01", "BUS-02", "BUS-03", "BUS-04", "BUS-05", "BUS-06", "BUS-07", "BUS-08"],
+  "guide": "guide/60-business.md",
+  "dependencies": ["foundation", "infrastructure", "communication", "agents-mcp"],
+  "optional_existing_module": "07-DIGITAL-PRODUCT-LAUNCH-SYSTEM/START-HERE.md",
+  "templates": [],
+  "outputs": ["measured loop", "playbook", "business conversation record", "module activation record", "weekly review", "30-60-90 roadmap", "final capstone decision"],
+  "completion_gate": "One business loop has approved inputs, bounded authority, observable outcomes, rollback or pause rules, and one evidence-earning next move."
+}

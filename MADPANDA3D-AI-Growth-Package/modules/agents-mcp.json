@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "module_id": "agents-mcp",
+  "status": "authoring-candidate",
+  "chapters": ["AGT-01", "AGT-02", "AGT-03", "AGT-04", "MCP-01", "MCP-02", "MCP-03", "MCP-04", "MCP-05", "MCP-06"],
+  "guide": "guide/50-agents-mcp.md",
+  "dependencies": ["foundation", "networking", "infrastructure", "communication"],
+  "templates": ["templates/system/TICKET-STATE-AND-LIVENESS.template.md", "templates/system/SERVICE-PROCESS-READINESS.template.md"],
+  "outputs": ["durable workspace", "authority matrix", "ticket and liveness record", "agent operating contract", "tool contracts", "permissions", "service readiness", "connection decision", "vertical-slice proof"],
+  "completion_gate": "One service and workflow preserve identity, authority, task state, resource liveness, health, external readback, recovery, and independent verification."
+}

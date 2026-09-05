@@ -1,0 +1,1 @@
+defect_record_hash,detected_utc,period_start_utc,period_end_utc,defect_class,affected_order_count,resolved_utc,recurrence_scope_start_utc,recurrence_scope_end_utc,predeclared_threshold,class_count_in_scope,gate_result,sanitized_notes

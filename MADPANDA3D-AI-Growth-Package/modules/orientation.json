@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "module_id": "orientation",
+  "status": "authoring-candidate",
+  "chapters": ["ORI-01", "ORI-02", "ORI-03"],
+  "guide": "guide/00-orientation.md",
+  "dependencies": [],
+  "templates": [],
+  "outputs": ["STATUS.md", "LEARNING-DEPTH-DECISION.md", "working contract"],
+  "completion_gate": "The buyer can state one outcome, selected depth, ownership boundary, current status, and next action."
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "module_id": "networking",
+  "status": "accepted-for-continued-authoring",
+  "chapters": ["NET-01", "NET-02", "NET-03", "NET-04", "NET-05", "NET-06", "NET-07", "NET-08", "NET-09", "NET-10", "NET-11", "NET-12"],
+  "guide": "guide/20-networking.md",
+  "dependencies": ["foundation"],
+  "templates_glob": "templates/networking/*",
+  "outputs": ["NET-01 through NET-12 buyer-owned records"],
+  "completion_gate": "One fictional or approved isolated AI path is mapped, protected, observed, diagnosed, recovered, and verified without exposing private topology."
+}
