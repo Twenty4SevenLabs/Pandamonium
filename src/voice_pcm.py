@@ -13,6 +13,57 @@ from typing import Any
 
 TTS_INFERENCE_LOCK = asyncio.Lock()
 _SENTENCE_END = re.compile(r"[.!?][\"')\]]*(?=\s|$)")
+_ONES = (
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+    "seventeen", "eighteen", "nineteen",
+)
+_TENS = ("", "", "twenty", "thirty", "forty", "fifty")
+_CLOCK_RE = re.compile(
+    r"(?<![+\-T])\b([01]?\d|2[0-3])[:.]([0-5]\d)(?:\s*(a\.?m\.?|p\.?m\.?))?\b",
+    re.IGNORECASE,
+)
+
+
+def _hour_word(hour_24: int) -> str:
+    return _ONES[hour_24 % 12 or 12]
+
+
+def _minute_words(minute: int) -> str:
+    if minute == 0:
+        return "o'clock"
+    if minute < 10:
+        return f"oh {_ONES[minute]}"
+    if minute < 20:
+        return _ONES[minute]
+    tens, ones = divmod(minute, 10)
+    if ones == 0:
+        return _TENS[tens]
+    return f"{_TENS[tens]}-{_ONES[ones]}"
+
+
+def _clock_meridiem(raw: str | None, hour_24: int) -> str:
+    if raw:
+        compact = re.sub(r"[.\s]", "", raw).lower()
+        return "AM" if compact.startswith("a") else "PM"
+    if hour_24 == 0:
+        return "AM"
+    if hour_24 >= 13:
+        return "PM"
+    return ""
+
+
+def expand_spoken_clocks(text: str) -> str:
+    """Rewrite clock times as words so TTS does not read a colon as 'point'."""
+
+    def replace(match: re.Match[str]) -> str:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        spoken = f"{_hour_word(hour)} {_minute_words(minute)}"
+        meridiem = _clock_meridiem(match.group(3), hour)
+        return f"{spoken} {meridiem}" if meridiem else spoken
+
+    return _CLOCK_RE.sub(replace, text)
 
 
 def speech_text(text: str) -> str:
@@ -39,7 +90,7 @@ def speech_text(text: str) -> str:
                 lines.append(line.strip(" |").rstrip(" :;,-"))
         if lines:
             paragraphs.append(" ".join(lines))
-    return "\n\n".join(paragraphs).strip()
+    return expand_spoken_clocks("\n\n".join(paragraphs).strip())
 
 
 def speech_blocks(text: str, *, first_max_chars: int = 280, max_chars: int = 360) -> list[str]:

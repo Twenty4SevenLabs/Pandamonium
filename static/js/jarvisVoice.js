@@ -19,6 +19,7 @@ let playbackWaitResolve = null;
 let sphereAudioContext = null;
 let sphereAnalyser = null;
 let sphereSource = null;
+let sphereSilentGain = null;
 let sphereAudioTimer = null;
 let sphereFreqData = null;
 let playbackAudioContext = null;
@@ -58,6 +59,31 @@ let activeTurnAudioPromise = null;
 let activeAudioTurnId = null;
 let captureAudioContext = null;
 let captureVoicedMs = 0;
+let sphereTimeData = null;
+let speechPulseTimer = null;
+let capturePcmChunks = [];
+let capturePcmSampleRate = 48000;
+let captureProcessor = null;
+let captureMeterSource = null;
+let capturePeakRms = 0;
+let captureHeardVoice = false;
+let captureLastVoiceAt = 0;
+let captureMeterStream = null;
+let captureAnalyserRms = 0;
+let captureRecorderBytes = 0;
+let captureDeviceLabel = '';
+let listenMetricsTimer = null;
+let listenChunks = [];
+let bargeWatching = false;
+let bargeVoicedMs = 0;
+let bargeArmedAt = 0;
+let bargeInFlight = false;
+let bargeBaseline = 0;
+let voiceTurnEpoch = 0;
+let playbackTailPromise = Promise.resolve();
+let browserTranscript = '';
+let pendingSpokenText = '';
+let speechRecognition = null;
 let voiceCallGeneration = 0;
 let extensionSurfaceConfigs = new Map();
 let extensionSurfaceId = '';
@@ -77,13 +103,24 @@ const ICON_STOP = '<svg width="18" height="18" viewBox="0 0 24 24" fill="current
 const ICON_CLOSE = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
 const END_VOICE_LABEL = 'End voice — task continues';
 const VIEW_CHAT_LABEL = 'View chat — voice stays active';
-const ORGANIC_SPHERE_URL = '/static/vendor/organic-sphere/index.html?v=20260710T195450Z';
+const ORGANIC_SPHERE_URL = '/static/vendor/organic-sphere/index.html?v=20260905T051200Z';
 const INSECURE_MIC_MESSAGE = 'Microphone needs localhost or HTTPS.';
-const SPHERE_AUDIO_GAIN = 0.35;
-const SPHERE_AUDIO_SMOOTHING = 0.75;
-const VOICE_RMS_THRESHOLD = 0.018;
+const SPHERE_AUDIO_GAIN = 0.85;
+const SPHERE_AUDIO_SMOOTHING = 0.55;
+const SPHERE_IDLE_VOLUME = 0;
+const SPHERE_IDLE_LEVELS = [0, 0, 0, 0, 0, 0, 0, 0];
+const VOICE_RMS_THRESHOLD = 0.005;
 const VOICE_SAMPLE_INTERVAL_MS = 140;
 const MIN_VOICED_MS = 280;
+const MIN_TRANSCRIPT_CHARS = 8;
+const MIN_RECORDING_BYTES = 400;
+const CHUNK_VOICE_BYTES = 1000;
+const VOICE_SILENCE_MS = 1600;
+const MAX_TURN_MS = 5 * 60 * 1000;
+const BARGE_IN_MS = 180;
+const BARGE_RMS_THRESHOLD = 0.03;
+const BARGE_RMS_RATIO = 2.5;
+const BARGE_GRACE_MS = 400;
 const VOICE_CUE_GAIN = 0.12;
 const VOICE_PREWARM_TIMEOUT_MS = 2500;
 const CALL_PANEL_TRANSITION_MS = 280;
@@ -190,33 +227,399 @@ function shapeSphereLevels(volume, levels) {
   return { volume: sphereSmoothedVolume, levels: shapedLevels };
 }
 
-function postSphereLevels(next = status, volume = 0, levels = fallbackSphereLevels(next)) {
-  if (!organicSphereFrame?.contentWindow) return;
-  const shaped = shapeSphereLevels(volume, levels);
-  organicSphereFrame.contentWindow.postMessage({
+function connectMeter(ctx, source, fftSize = 256) {
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = fftSize;
+  analyser.smoothingTimeConstant = 0.4;
+  const silent = ctx.createGain();
+  silent.gain.value = 0;
+  source.connect(analyser);
+  analyser.connect(silent);
+  silent.connect(ctx.destination);
+  return { analyser, silent };
+}
+
+function postSphereLevels(next = status, volume = 0) {
+  const speech = clamp01(volume);
+  const talking = speech >= 0.18 && next === 'listening' && !bargeWatching;
+  if (!talking) {
+    sphereSmoothedVolume = 0;
+    sphereSmoothedLevels = [0, 0, 0, 0, 0, 0, 0, 0];
+  }
+  const sourceVolume = talking ? speech * 0.55 : SPHERE_IDLE_VOLUME;
+  const sourceLevels = talking
+    ? [
+        speech * 0.9,
+        speech * 0.45,
+        speech * 0.28,
+        speech * 0.12,
+        0, 0, 0, 0,
+      ]
+    : SPHERE_IDLE_LEVELS.slice();
+  const shaped = talking ? shapeSphereLevels(sourceVolume, sourceLevels) : { volume: 0, levels: SPHERE_IDLE_LEVELS.slice() };
+  const orb = $('jarvis-call-orb');
+  if (orb) {
+    orb.style.transform = talking ? `scale(${(1 + shaped.volume * 0.08).toFixed(3)})` : '';
+    orb.style.filter = talking ? `brightness(${(1 + shaped.volume * 0.18).toFixed(3)})` : '';
+  }
+  const win = organicSphereFrame?.contentWindow;
+  if (!win) return;
+  const bridge = win.__jarvisSphereBridge;
+  if (bridge) {
+    bridge.ready = talking;
+    bridge.state = next;
+    bridge.volume = shaped.volume;
+    bridge.levels = shaped.levels;
+  }
+  win.postMessage({
     type: 'jarvis-audio-levels',
     state: next,
     volume: shaped.volume,
     levels: shaped.levels,
-  }, window.location.origin);
+    ready: talking,
+  }, '*');
 }
 
-function stopSphereAudio() {
+function stopSphereGraph() {
   if (sphereAudioTimer) {
     clearInterval(sphereAudioTimer);
     sphereAudioTimer = null;
   }
   try { sphereSource?.disconnect(); } catch {}
   try { sphereAnalyser?.disconnect(); } catch {}
+  try { sphereSilentGain?.disconnect(); } catch {}
   sphereSource = null;
   sphereAnalyser = null;
+  sphereSilentGain = null;
   sphereFreqData = null;
+  sphereTimeData = null;
   sphereSmoothedVolume = 0;
   sphereSmoothedLevels = Array(8).fill(0);
+}
+
+function stopSphereAudio() {
+  stopSphereGraph();
   if (sphereAudioContext) {
     sphereAudioContext.close().catch(() => {});
     sphereAudioContext = null;
   }
+}
+
+async function resumeAudioContext(ctx) {
+  if (!ctx) return null;
+  if (ctx.state === 'suspended') {
+    try { await ctx.resume(); } catch {}
+  }
+  return ctx;
+}
+
+async function ensureCaptureAudioContext() {
+  const AudioContext = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContext) return null;
+  if (!captureAudioContext || captureAudioContext.state === 'closed') {
+    captureAudioContext = new AudioContext();
+  }
+  return resumeAudioContext(captureAudioContext);
+}
+
+async function ensureSphereAudioContext() {
+  const AudioContext = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContext) return null;
+  if (!sphereAudioContext || sphereAudioContext.state === 'closed') {
+    sphereAudioContext = new AudioContext();
+  }
+  return resumeAudioContext(sphereAudioContext);
+}
+
+function unlockCaptureAudio() {
+  ensureCaptureAudioContext().catch(error => {
+    console.warn('Jarvis capture audio unavailable:', error);
+  });
+}
+
+function unlockSphereAudio() {
+  ensureSphereAudioContext().catch(error => {
+    console.warn('Jarvis sphere audio unavailable:', error);
+  });
+}
+
+function encodeWavPcm16(chunks, sampleRate) {
+  let length = 0;
+  chunks.forEach(chunk => { length += chunk.length; });
+  const pcm = new Float32Array(length);
+  let offset = 0;
+  chunks.forEach(chunk => {
+    pcm.set(chunk, offset);
+    offset += chunk.length;
+  });
+  const buffer = new ArrayBuffer(44 + pcm.length * 2);
+  const view = new DataView(buffer);
+  const writeString = (at, value) => {
+    for (let i = 0; i < value.length; i += 1) view.setUint8(at + i, value.charCodeAt(i));
+  };
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + pcm.length * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, pcm.length * 2, true);
+  let index = 44;
+  for (let i = 0; i < pcm.length; i += 1, index += 2) {
+    const sample = Math.max(-1, Math.min(1, pcm[i]));
+    view.setInt16(index, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function stopMeterStream() {
+  if (!captureMeterStream) return;
+  captureMeterStream.getTracks().forEach(track => {
+    try { track.stop(); } catch {}
+  });
+  captureMeterStream = null;
+}
+
+function bindMeterStream(stream) {
+  return stream;
+}
+
+function createMediaRecorder(stream) {
+  const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+  const mimeType = types.find(type => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported?.(type));
+  try {
+    return mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+  } catch {
+    return new MediaRecorder(stream);
+  }
+}
+
+function reportListenMetrics() {
+  if (!sessionId) return;
+  const track = mediaStream?.getAudioTracks?.()[0];
+  fetch(`/api/voice/sessions/${encodeURIComponent(sessionId)}/listen-metrics`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', ...browserTimezoneHeaders() },
+    body: JSON.stringify({
+      rms: Number(Math.max(capturePeakRms, captureAnalyserRms).toFixed(4)),
+      peak: Number(capturePeakRms.toFixed(4)),
+      voiced_ms: Math.round(bargeWatching ? bargeVoicedMs : captureVoicedMs),
+      context_state: captureAudioContext?.state || '',
+      recorder_state: mediaRecorder?.state || '',
+      analyser_rms: Number(captureAnalyserRms.toFixed(4)),
+      track_muted: Boolean(track?.muted),
+      track_enabled: track?.enabled !== false,
+      track_ready: track?.readyState || '',
+      probe_playing: false,
+      browser_stt: Boolean(speechRecognition),
+      recorder_bytes: captureRecorderBytes,
+      barge_watching: bargeWatching,
+      device_label: captureDeviceLabel,
+    }),
+  }).catch(() => {});
+}
+
+function stopPcmCapture() {
+  try { captureProcessor?.disconnect(); } catch {}
+  try { captureMeterSource?.disconnect(); } catch {}
+  captureProcessor = null;
+  captureMeterSource = null;
+}
+
+async function ensureVoiceMeterWorklet(ctx) {
+  if (!ctx?.audioWorklet?.addModule) return false;
+  if (ctx._jarvisWorkletLoaded) return true;
+  try {
+    await ctx.audioWorklet.addModule('/static/js/voiceMeterProcessor.js?v=20260905T081200Z');
+    ctx._jarvisWorkletLoaded = true;
+    return true;
+  } catch (error) {
+    console.warn('Jarvis voice meter worklet unavailable:', error);
+    return false;
+  }
+}
+
+function bargeEnergyDecision(rms, baseline, voicedMs, sampleMs, now, armedAt) {
+  if (now < armedAt) {
+    return {
+      baseline: baseline > 0 ? (baseline * 0.85) + (rms * 0.15) : rms,
+      voicedMs: 0,
+      interrupt: false,
+    };
+  }
+  const threshold = Math.max(BARGE_RMS_THRESHOLD, (baseline || 0) * BARGE_RMS_RATIO);
+  if (rms > threshold) {
+    const nextVoiced = voicedMs + sampleMs;
+    return {
+      baseline,
+      voicedMs: nextVoiced,
+      interrupt: nextVoiced >= BARGE_IN_MS,
+    };
+  }
+  return {
+    baseline: baseline > 0 ? (baseline * 0.95) + (rms * 0.05) : rms,
+    voicedMs: Math.max(0, voicedMs - sampleMs),
+    interrupt: false,
+  };
+}
+
+function applyCapturedRms(rms, sampleCount = 128) {
+  captureAnalyserRms = rms;
+  if (rms > capturePeakRms) capturePeakRms = rms;
+  const sampleMs = (sampleCount / Math.max(1, capturePcmSampleRate)) * 1000;
+  if (bargeWatching) {
+    const decision = bargeEnergyDecision(
+      rms,
+      bargeBaseline,
+      bargeVoicedMs,
+      sampleMs,
+      Date.now(),
+      bargeArmedAt,
+    );
+    bargeBaseline = decision.baseline;
+    bargeVoicedMs = decision.voicedMs;
+    if (decision.interrupt) interruptAndListen().catch(handleError);
+    return;
+  }
+  const voiceBoost = clamp01(rms * 40);
+  if (status === 'listening') {
+    const levels = Array.from({ length: 8 }, (_, i) => clamp01(voiceBoost / (i + 1)));
+    postSphereLevels('listening', voiceBoost, levels);
+  }
+  if (rms > VOICE_RMS_THRESHOLD) {
+    captureHeardVoice = true;
+    captureLastVoiceAt = Date.now();
+    captureVoicedMs += sampleMs;
+  }
+}
+
+function endListenOnSilence(callGeneration) {
+  if (
+    captureHeardVoice
+    && captureVoicedMs >= MIN_VOICED_MS
+    && Date.now() - captureLastVoiceAt >= VOICE_SILENCE_MS
+    && isCurrentVoiceCall(callGeneration)
+  ) {
+    stopListening();
+  }
+}
+
+function applyRecorderChunk(size, callGeneration) {
+  if (bargeWatching) return;
+  if (captureProcessor) {
+    endListenOnSilence(callGeneration);
+    return;
+  }
+  const rms = Math.min(1, Math.max(0, (size - 200) / 3600));
+  if (rms > capturePeakRms) capturePeakRms = rms;
+  if (status === 'listening') {
+    postSphereLevels('listening', rms);
+  }
+  if (size > CHUNK_VOICE_BYTES) {
+    captureHeardVoice = true;
+    captureLastVoiceAt = Date.now();
+    captureVoicedMs += 250;
+    return;
+  }
+  endListenOnSilence(callGeneration);
+}
+
+async function startPcmCapture(ctx, source, sink = null) {
+  try { captureProcessor?.disconnect(); } catch {}
+  captureProcessor = null;
+  capturePcmChunks = [];
+  capturePcmSampleRate = ctx.sampleRate || 48000;
+  const output = sink || ctx.destination;
+  if (await ensureVoiceMeterWorklet(ctx)) {
+    const node = new AudioWorkletNode(ctx, 'voice-meter', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      channelCount: 1,
+      channelCountMode: 'explicit',
+    });
+    node.port.onmessage = event => {
+      applyCapturedRms(Number(event.data?.rms) || 0, Number(event.data?.samples) || 128);
+    };
+    source.connect(node);
+    node.connect(output);
+    captureProcessor = node;
+    return;
+  }
+  if (typeof ctx.createScriptProcessor !== 'function') return;
+  const processor = ctx.createScriptProcessor(4096, 2, 2);
+  processor.onaudioprocess = event => {
+    const samples = event.inputBuffer.getChannelData(0);
+    capturePcmChunks.push(new Float32Array(samples));
+    let sum = 0;
+    for (let i = 0; i < samples.length; i += 1) sum += samples[i] * samples[i];
+    applyCapturedRms(Math.sqrt(sum / samples.length), samples.length);
+  };
+  source.connect(processor);
+  processor.connect(output);
+  captureProcessor = processor;
+}
+
+async function applyMicEchoCancellation(stream) {
+  const track = stream?.getAudioTracks?.()[0];
+  if (!track?.applyConstraints) return;
+  try {
+    await track.applyConstraints({
+      echoCancellation: false,
+      noiseSuppression: true,
+      autoGainControl: true,
+    });
+  } catch (error) {
+    console.warn('Jarvis echo cancellation constraint unavailable:', error);
+  }
+}
+
+async function armCaptureMeter(stream) {
+  if (!stream) return;
+  const ctx = await ensureCaptureAudioContext();
+  if (!ctx) return;
+  stopPcmCapture();
+  let source;
+  try {
+    source = ctx.createMediaStreamSource(stream);
+  } catch (error) {
+    console.warn('Jarvis capture meter unavailable:', error);
+    return;
+  }
+  captureMeterSource = source;
+  const silent = ctx.createGain();
+  silent.gain.value = 0;
+  silent.connect(ctx.destination);
+  await startPcmCapture(ctx, source, silent);
+}
+
+function pulseSphereFromSpeech(intensity) {
+  const level = clamp01(intensity);
+  const levels = Array.from({ length: 8 }, (_, index) => clamp01(level / (index + 1)));
+  postSphereLevels('listening', level, levels);
+}
+
+function stopSpeechOrbPulse() {
+  if (speechPulseTimer) {
+    clearInterval(speechPulseTimer);
+    speechPulseTimer = null;
+  }
+}
+
+function startSpeechOrbPulse() {
+  stopSpeechOrbPulse();
+  let tick = 0;
+  speechPulseTimer = setInterval(() => {
+    tick += 1;
+    pulseSphereFromSpeech(0.42 + Math.abs(Math.sin(tick / 2.4)) * 0.48);
+  }, 70);
 }
 
 function setAudioSessionType(type) {
@@ -304,42 +707,45 @@ function closePlaybackAudio() {
 }
 
 function startSpherePulse(next = status) {
-  stopSphereAudio();
-  sphereAudioTimer = setInterval(() => {
-    const levels = fallbackSphereLevels(next);
-    postSphereLevels(next, Math.max(...levels), levels);
-  }, 120);
+  stopSphereGraph();
+  postSphereLevels(next, 0);
 }
 
-function startSphereAnalyser(sourceFactory, next = status) {
-  stopSphereAudio();
-  const AudioContext = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContext) {
+async function startSphereAnalyser(sourceFactory, next = status) {
+  stopSphereGraph();
+  const context = await ensureSphereAudioContext();
+  if (!context) {
     startSpherePulse(next);
     return;
   }
   try {
-    sphereAudioContext = new AudioContext();
-    sphereAnalyser = sphereAudioContext.createAnalyser();
-    sphereAnalyser.fftSize = 256;
-    sphereSource = sourceFactory(sphereAudioContext);
-    sphereSource.connect(sphereAnalyser);
+    sphereSource = sourceFactory(context);
+    const meter = connectMeter(context, sphereSource, 256);
+    sphereAnalyser = meter.analyser;
+    sphereSilentGain = meter.silent;
     sphereFreqData = new Uint8Array(sphereAnalyser.frequencyBinCount);
-    sphereAudioContext.resume?.().catch(() => {});
+    sphereTimeData = new Uint8Array(sphereAnalyser.fftSize);
     sphereAudioTimer = setInterval(() => {
+      sphereAnalyser.getByteTimeDomainData(sphereTimeData);
+      let energy = 0;
+      for (let i = 0; i < sphereTimeData.length; i += 1) {
+        const normalized = (sphereTimeData[i] - 128) / 128;
+        energy += normalized * normalized;
+      }
+      const rms = Math.sqrt(energy / sphereTimeData.length);
+      const voiceBoost = clamp01(rms * 6);
       sphereAnalyser.getByteFrequencyData(sphereFreqData);
       const levelCount = 8;
       const binSize = Math.floor(sphereFreqData.length / levelCount) || 1;
+      const weights = [1, 0.85, 0.7, 0.55, 0.4, 0.28, 0.2, 0.14];
       const levels = [];
-      let max = 0;
       for (let i = 0; i < levelCount; i += 1) {
         let sum = 0;
         for (let j = 0; j < binSize; j += 1) sum += sphereFreqData[(i * binSize) + j] || 0;
         const value = clamp01(sum / binSize / 255);
-        levels.push(value);
-        if (value > max) max = value;
+        levels.push(Math.max(value, voiceBoost * weights[i]));
       }
-      postSphereLevels(next, max, levels);
+      postSphereLevels(next, Math.max(voiceBoost, ...levels), levels);
     }, 80);
     logSphere('audio-bridge-ready', { source: next });
   } catch (error) {
@@ -349,23 +755,15 @@ function startSphereAnalyser(sourceFactory, next = status) {
 }
 
 function startSphereStream(stream) {
-  startSphereAnalyser(ctx => ctx.createMediaStreamSource(stream), 'listening');
+  startSphereAnalyser(ctx => ctx.createMediaStreamSource(stream), 'listening').catch(error => {
+    console.warn('[Jarvis sphere] audio bridge fallback:', error);
+    startSpherePulse('listening');
+  });
 }
 
 function startPlaybackSphereAnalyser() {
-  stopSphereAudio();
-  if (!playbackAnalyser) return;
-  sphereFreqData = new Uint8Array(playbackAnalyser.frequencyBinCount);
-  sphereAudioTimer = setInterval(() => {
-    playbackAnalyser.getByteFrequencyData(sphereFreqData);
-    const binSize = Math.floor(sphereFreqData.length / 8) || 1;
-    const levels = Array.from({ length: 8 }, (_, index) => {
-      let sum = 0;
-      for (let offset = 0; offset < binSize; offset += 1) sum += sphereFreqData[(index * binSize) + offset] || 0;
-      return clamp01(sum / binSize / 255);
-    });
-    postSphereLevels('speaking', Math.max(...levels), levels);
-  }, 80);
+  stopSphereGraph();
+  postSphereLevels('speaking', 0);
 }
 
 function mountOrganicSphere() {
@@ -529,7 +927,11 @@ function setStatus(next, detail = '') {
     if (next === 'speaking' && playbackAudioSources.size) {
       postSphereLevels(next);
     } else if (next === 'transcribing' || next === 'thinking' || next === 'worker' || next === 'background' || next === 'buffering' || next === 'interrupted' || next === 'speaking') {
-      startSpherePulse(next);
+      stopSphereGraph();
+      postSphereLevels(next, 0);
+    } else if (next === 'listening') {
+      stopSphereGraph();
+      postSphereLevels(next, 0);
     } else {
       postSphereLevels(next);
     }
@@ -1850,9 +2252,35 @@ function waitForSpeechQueueIdle() {
 
 function resumeListeningIfReady() {
   if (!isActive || brainTurnInProgress || activeTurnAudioPromise || speechQueueRunning || speechQueue.length || currentSpeech) return;
-  if (status === 'failed' || mediaRecorder?.state === 'recording') return;
+  if (status === 'failed') return;
+  startFreshListenTurn(voiceCallGeneration).catch(handleError);
+}
+
+function trimListenChunksToTail(ms = 2000) {
+  if (listenChunks.length <= 2) return;
+  const header = listenChunks[0];
+  const keep = Math.max(1, Math.round(ms / 250));
+  const tail = listenChunks.slice(-keep).filter(chunk => chunk !== header);
+  listenChunks = [header, ...tail];
+  captureRecorderBytes = listenChunks.reduce((sum, chunk) => sum + (chunk.size || 0), 0);
+}
+
+async function startFreshListenTurn(callGeneration = voiceCallGeneration) {
+  bargeWatching = false;
+  bargeVoicedMs = 0;
+  const previous = mediaRecorder;
+  if (previous?.state === 'recording') {
+    discardRecordingGeneration = callGeneration;
+    await new Promise(resolve => {
+      const finish = () => resolve();
+      previous.addEventListener('stop', finish, { once: true });
+      try { previous.stop(); } catch { finish(); }
+    });
+    if (mediaRecorder === previous) mediaRecorder = null;
+  }
+  if (!isCurrentVoiceCall(callGeneration) || !isActive) return;
   setStatus('listening');
-  startListening().catch(handleError);
+  await startListening(null, callGeneration);
 }
 
 function enqueueSpeech(text, type = 'speech', source = 'jarvis', timings = {}) {
@@ -1882,11 +2310,80 @@ function workerSpeech(event) {
 }
 
 function pauseCaptureForSpeech() {
-  if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
-  discardRecordingGeneration = voiceCallGeneration;
+  if (bargeWatching && mediaRecorder?.state === 'recording') return;
+  bargeWatching = true;
+  bargeVoicedMs = 0;
+  bargeBaseline = 0;
+  bargeArmedAt = Date.now() + BARGE_GRACE_MS;
+  listenChunks.length = 0;
+  captureHeardVoice = false;
+  captureVoicedMs = 0;
+  captureLastVoiceAt = 0;
   clearTurnTimers();
-  mediaRecorder.stop();
-  stopTracks();
+  postSphereLevels('speaking', 0);
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    discardRecordingGeneration = voiceCallGeneration;
+    try { mediaRecorder.stop(); } catch { /* already inactive */ }
+    return;
+  }
+  startBargeWatch(voiceCallGeneration).catch(handleError);
+}
+
+async function startBargeWatch(callGeneration = voiceCallGeneration) {
+  bargeWatching = true;
+  bargeVoicedMs = 0;
+  bargeBaseline = 0;
+  bargeArmedAt = Date.now() + BARGE_GRACE_MS;
+  listenChunks.length = 0;
+  captureHeardVoice = false;
+  captureVoicedMs = 0;
+  if (mediaRecorder?.state === 'recording') return;
+  if (!isCurrentVoiceCall(callGeneration) || !isActive) return;
+  const stream = liveMicrophoneStream() || await requestMicrophone(callGeneration);
+  if (!stream || !isCurrentVoiceCall(callGeneration) || !isActive) return;
+  attachListenRecorder(stream, callGeneration);
+}
+
+function continueBargeRecordingAsListen(callGeneration = voiceCallGeneration, options = {}) {
+  bargeWatching = false;
+  bargeVoicedMs = 0;
+  setStatus('listening');
+  startListenTurnTimer(callGeneration);
+  if (options.fromInterrupt) {
+    captureHeardVoice = true;
+    captureLastVoiceAt = Date.now();
+    captureVoicedMs = Math.max(MIN_VOICED_MS, 400);
+    return;
+  }
+  captureHeardVoice = false;
+  captureLastVoiceAt = 0;
+  captureVoicedMs = 0;
+}
+
+async function interruptAndListen() {
+  if (bargeInFlight) return;
+  bargeInFlight = true;
+  const callGeneration = voiceCallGeneration;
+  try {
+    bargeWatching = false;
+    bargeVoicedMs = 0;
+    voiceTurnEpoch += 1;
+    await interrupt();
+    speechPaused = false;
+    brainTurnInProgress = false;
+    activeTurnAudioPromise = null;
+    currentSpeech = null;
+    if (!isCurrentVoiceCall(callGeneration) || !isActive) return;
+    if (mediaRecorder?.state === 'recording') {
+      trimListenChunksToTail(8000);
+      applyMicEchoCancellation(mediaStream).catch(() => {});
+      continueBargeRecordingAsListen(callGeneration, { fromInterrupt: true });
+      return;
+    }
+    await startListening(null, callGeneration);
+  } finally {
+    bargeInFlight = false;
+  }
 }
 
 async function processSpeechQueue() {
@@ -2307,9 +2804,9 @@ function interruptVoiceSession(voiceSessionId) {
   }).catch(() => {});
 }
 
-async function transcribe(blob) {
+async function transcribeBlob(blob) {
   const form = new FormData();
-  form.append('file', blob, `jarvis-turn-${Date.now()}.webm`);
+  form.append('file', blob, `jarvis-turn-${Date.now()}.${blob.type && blob.type.includes('wav') ? 'wav' : 'webm'}`);
   const res = await fetch('/api/stt/transcribe', {
     method: 'POST',
     credentials: 'same-origin',
@@ -2318,9 +2815,113 @@ async function transcribe(blob) {
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     const message = body?.detail?.message || body?.error || 'Transcription failed';
+    if (/402|insufficient api credit/i.test(String(message))) {
+      console.warn('Jarvis server ASR unavailable:', message);
+      return '';
+    }
     throw new Error(message);
   }
   return (body.text || '').trim();
+}
+
+async function transcribe(blob) {
+  const browserText = await stopBrowserRecognition();
+  if (browserText) return browserText;
+  return transcribeBlob(blob);
+}
+
+function browserSpeechAvailable() {
+  return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+}
+
+function startBrowserRecognition(options = {}) {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const callGeneration = options.callGeneration ?? voiceCallGeneration;
+  stopBrowserRecognition();
+  browserTranscript = '';
+  if (!SpeechRecognition) return false;
+  try {
+    speechRecognition = new SpeechRecognition();
+    speechRecognition.continuous = false;
+    speechRecognition.interimResults = true;
+    speechRecognition.lang = navigator.language || 'en-US';
+    speechRecognition.onsoundstart = () => {
+      if (isCurrentVoiceCall(callGeneration)) startSpeechOrbPulse();
+    };
+    speechRecognition.onspeechstart = () => {
+      if (isCurrentVoiceCall(callGeneration)) startSpeechOrbPulse();
+    };
+    speechRecognition.onresult = event => {
+      let finalText = '';
+      let interimText = '';
+      for (let index = 0; index < event.results.length; index += 1) {
+        const piece = event.results[index][0]?.transcript || '';
+        if (event.results[index].isFinal) finalText += `${piece} `;
+        else interimText += piece;
+      }
+      browserTranscript = `${finalText}${interimText}`.trim();
+      const transcriptEl = $('jarvis-call-transcript');
+      if (transcriptEl && browserTranscript) transcriptEl.textContent = browserTranscript;
+      pulseSphereFromSpeech(event.results[event.results.length - 1]?.isFinal ? 0.82 : 0.58);
+    };
+    speechRecognition.onerror = event => {
+      if (event.error !== 'aborted' && event.error !== 'no-speech') {
+        console.warn('Jarvis browser STT error:', event.error);
+      }
+    };
+    speechRecognition.onend = () => {
+      const text = (browserTranscript || '').trim();
+      speechRecognition = null;
+      isStopping = false;
+      stopSpeechOrbPulse();
+      if (!isCurrentVoiceCall(callGeneration) || !isActive) return;
+      if (status !== 'listening' && status !== 'connecting') return;
+      if (text) {
+        pauseCaptureForSpeech();
+        if (!sessionId || status === 'connecting') {
+          pendingSpokenText = text;
+          return;
+        }
+        if (status !== 'listening' && status !== 'connecting') return;
+        handleHeardTurn(text, callGeneration).catch(handleError);
+        return;
+      }
+      if (status === 'listening' || status === 'connecting') {
+        startBrowserRecognition({ callGeneration });
+      }
+    };
+    speechRecognition.start();
+    return true;
+  } catch (error) {
+    console.warn('Jarvis browser STT unavailable:', error);
+    speechRecognition = null;
+    return false;
+  }
+}
+
+function stopBrowserRecognition() {
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      const text = (browserTranscript || '').trim();
+      speechRecognition = null;
+      resolve(text);
+    };
+    if (!speechRecognition) {
+      finish();
+      return;
+    }
+    try {
+      speechRecognition.onend = finish;
+      speechRecognition.stop();
+    } catch {
+      finish();
+      return;
+    }
+    window.setTimeout(finish, 450);
+  });
 }
 
 async function sendTurn(text) {
@@ -2405,15 +3006,26 @@ function stopPlaybackAudio() {
   });
   playbackAudioSources.clear();
   playbackScheduledUntil = 0;
-  stopSphereAudio();
+  if (!isActive) stopSphereGraph();
 }
 
 function stopTracks() {
+  stopSpeechOrbPulse();
+  stopPcmCapture();
+  stopMeterStream();
+  bargeWatching = false;
+  bargeVoicedMs = 0;
+  bargeInFlight = false;
+  listenChunks = [];
+  if (listenMetricsTimer) {
+    clearInterval(listenMetricsTimer);
+    listenMetricsTimer = null;
+  }
   if (mediaStream) {
     mediaStream.getTracks().forEach(track => track.stop());
     mediaStream = null;
   }
-  stopSphereAudio();
+  stopSphereGraph();
   setAudioSessionType(isActive ? 'playback' : 'auto');
 }
 
@@ -2426,10 +3038,6 @@ function clearTurnTimers() {
     clearTimeout(maxTurnTimer);
     maxTurnTimer = null;
   }
-  if (captureAudioContext) {
-    captureAudioContext.close().catch(() => {});
-    captureAudioContext = null;
-  }
 }
 
 function stopListening() {
@@ -2438,62 +3046,83 @@ function stopListening() {
   clearTurnTimers();
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.stop();
-  } else {
-    stopTracks();
-    isStopping = false;
-    setStatus('idle');
+    return;
   }
+  if (speechRecognition) {
+    try { speechRecognition.stop(); } catch { isStopping = false; }
+    return;
+  }
+  isStopping = false;
 }
 
-function startSilenceWatch(stream, callGeneration) {
-  const AudioContext = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContext) return;
-  const ctx = new AudioContext();
-  captureAudioContext = ctx;
-  const source = ctx.createMediaStreamSource(stream);
-  const analyser = ctx.createAnalyser();
-  analyser.fftSize = 1024;
-  source.connect(analyser);
-  const data = new Uint8Array(analyser.fftSize);
-  let heardVoice = false;
-  let lastVoiceAt = 0;
+function startListenTurnTimer(callGeneration) {
   captureVoicedMs = 0;
-
-  silenceTimer = setInterval(() => {
-    analyser.getByteTimeDomainData(data);
-    let sum = 0;
-    for (let i = 0; i < data.length; i += 1) {
-      const normalized = (data[i] - 128) / 128;
-      sum += normalized * normalized;
-    }
-    const rms = Math.sqrt(sum / data.length);
-    if (rms > VOICE_RMS_THRESHOLD) {
-      heardVoice = true;
-      lastVoiceAt = Date.now();
-      captureVoicedMs += VOICE_SAMPLE_INTERVAL_MS;
-    }
-    if (heardVoice && Date.now() - lastVoiceAt > 1200 && isCurrentVoiceCall(callGeneration)) {
-      stopListening();
-    }
-  }, VOICE_SAMPLE_INTERVAL_MS);
-
+  capturePeakRms = 0;
+  captureAnalyserRms = 0;
+  captureHeardVoice = false;
+  captureLastVoiceAt = 0;
   maxTurnTimer = setTimeout(() => {
     if (isCurrentVoiceCall(callGeneration)) stopListening();
-  }, 30000);
+  }, MAX_TURN_MS);
+}
+
+function microphoneConstraints(deviceId = '') {
+  const audio = {
+    echoCancellation: false,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
+  if (deviceId) audio.deviceId = { exact: deviceId };
+  return { audio };
+}
+
+function pickAudioInput(devices) {
+  const mics = (devices || []).filter(device => device && device.kind === 'audioinput' && device.deviceId);
+  if (!mics.length) return null;
+  const ranked = mics.map(device => {
+    const label = String(device.label || '').toLowerCase();
+    const deviceId = String(device.deviceId || '');
+    let score = 0;
+    if (deviceId === 'communications' || label.includes('communications')) score -= 100;
+    if (/stereo mix|what u hear|cable|voicemeeter|vb-audio/.test(label)) score -= 80;
+    if (deviceId === 'default') score += 20;
+    if (/headset|headphone|airpods|buds/.test(label)) score += 40;
+    if (/microphone|\bmic\b/.test(label)) score += 25;
+    if (label) score += 5;
+    return { device, score };
+  }).sort((left, right) => right.score - left.score);
+  return ranked[0]?.device || null;
+}
+
+function liveMicrophoneStream() {
+  const track = mediaStream?.getAudioTracks?.()[0];
+  if (track && track.readyState === 'live' && track.enabled !== false) return mediaStream;
+  return null;
 }
 
 async function requestMicrophone(callGeneration = voiceCallGeneration) {
   let stream;
   try {
     setAudioSessionType('play-and-record');
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        channelCount: 1,
-      },
-    });
+    stream = await navigator.mediaDevices.getUserMedia(microphoneConstraints());
+    let devices = [];
+    try {
+      devices = await navigator.mediaDevices.enumerateDevices?.() || [];
+    } catch {}
+    const picked = pickAudioInput(devices);
+    const currentTrack = stream.getAudioTracks?.()[0];
+    const currentId = currentTrack?.getSettings?.().deviceId || '';
+    captureDeviceLabel = currentTrack?.label || picked?.label || '';
+    if (picked?.deviceId && picked.deviceId !== currentId) {
+      try {
+        const next = await navigator.mediaDevices.getUserMedia(microphoneConstraints(picked.deviceId));
+        stream.getTracks().forEach(track => track.stop());
+        stream = next;
+        captureDeviceLabel = stream.getAudioTracks?.()[0]?.label || picked.label || captureDeviceLabel;
+      } catch (error) {
+        console.warn('Jarvis preferred microphone unavailable:', error);
+      }
+    }
   } catch (error) {
     setAudioSessionType(isActive ? 'playback' : 'auto');
     if (!isCurrentVoiceCall(callGeneration)) return null;
@@ -2506,6 +3135,163 @@ async function requestMicrophone(callGeneration = voiceCallGeneration) {
   return stream;
 }
 
+async function handleHeardTurn(text, callGeneration) {
+  if (!isCurrentVoiceCall(callGeneration) || !isActive) return;
+  const spoken = String(text || '').trim();
+  if (!spoken || spoken.length < MIN_TRANSCRIPT_CHARS) {
+    setStatus('listening', 'No speech detected.');
+    window.setTimeout(() => {
+      if (isCurrentVoiceCall(callGeneration)) startListening().catch(handleError);
+    }, 400);
+    return;
+  }
+  const turnEpoch = ++voiceTurnEpoch;
+  stopSpeechOrbPulse();
+  try {
+    const turnStarted = performance.now();
+    if (!isCurrentVoiceCall(callGeneration)) return;
+    setStatus('transcribing');
+    const timings = { turn_started_at: turnStarted, stt_ms: 0, transcript_chars: spoken.length };
+    const transcriptEl = $('jarvis-call-transcript');
+    if (transcriptEl) transcriptEl.textContent = spoken;
+    renderLiveUser(spoken, timings, turnStarted);
+
+    speechPaused = false;
+    setStatus('thinking');
+    if (!isCurrentVoiceCall(callGeneration)) return;
+    brainTurnInProgress = true;
+    const brainStarted = performance.now();
+    const response = await streamTurn(spoken, timings, turnStarted, callGeneration);
+    if (!isCurrentVoiceCall(callGeneration)) return;
+    timings.respond_ms = performance.now() - brainStarted;
+    const reply = response.assistant_text || '';
+    const diagnostic = response.diagnostics || {};
+    if (diagnostic.brain_ms != null) timings.brain_ms = diagnostic.brain_ms;
+    if (diagnostic.brain_first_token_ms != null) timings.brain_first_token_ms = diagnostic.brain_first_token_ms;
+    timings.assistant_chars = reply.length;
+    timings.num_predict = diagnostic.num_predict || '';
+    const panel = $('jarvis-call-panel');
+    if (panel) {
+      panel.dataset.voiceModel = diagnostic.model || '';
+      panel.dataset.turnDiagnostic = `${spoken.length}:${reply.length}:${diagnostic.guard_reason || 'ok'}`;
+    }
+    const replyEl = $('jarvis-call-reply');
+    if (replyEl) replyEl.textContent = reply;
+    brainTurnInProgress = false;
+    await response.audioPromise;
+    if (turnEpoch !== voiceTurnEpoch) return;
+    if (!isCurrentVoiceCall(callGeneration)) return;
+    await playbackTailPromise;
+    if (turnEpoch !== voiceTurnEpoch) return;
+    if (activeTurnAudioPromise === response.audioPromise) activeTurnAudioPromise = null;
+    activeAudioTurnId = null;
+    if (!speechQueueRunning && speechQueue.length) processSpeechQueue().catch(handleError);
+    await waitForSpeechQueueIdle();
+    if (!isCurrentVoiceCall(callGeneration)) return;
+    stopPlaybackAudio();
+    delete timings.turn_started_at;
+    await postTurnDiagnostics(timings, response.voiceSessionId);
+    if (!isCurrentVoiceCall(callGeneration)) return;
+    resumeListeningIfReady();
+  } catch (error) {
+    if (!isCurrentVoiceCall(callGeneration)) return;
+    brainTurnInProgress = false;
+    handleError(error);
+  }
+}
+
+function attachListenRecorder(requestedStream, callGeneration) {
+  setAudioSessionType('play-and-record');
+  mediaStream = requestedStream;
+  captureRecorderBytes = 0;
+  listenChunks = [];
+  isStopping = false;
+  applyMicEchoCancellation(requestedStream).catch(() => {});
+  armCaptureMeter(requestedStream).catch(error => {
+    console.warn('Jarvis capture meter unavailable:', error);
+  });
+  mediaRecorder = createMediaRecorder(mediaStream);
+  const recorder = mediaRecorder;
+
+  recorder.ondataavailable = event => {
+    if (mediaRecorder !== recorder) return;
+    const size = event.data?.size || 0;
+    if (size) {
+      captureRecorderBytes += size;
+      listenChunks.push(event.data);
+    }
+    applyRecorderChunk(size, callGeneration);
+  };
+
+  recorder.onstop = async () => {
+    if (mediaRecorder !== recorder) {
+      if (discardRecordingGeneration === callGeneration) discardRecordingGeneration = null;
+      return;
+    }
+    if (!isCurrentVoiceCall(callGeneration)) {
+      if (requestedStream !== mediaStream) {
+        requestedStream.getTracks().forEach(track => track.stop());
+      }
+      return;
+    }
+    clearTurnTimers();
+    mediaRecorder = null;
+    isStopping = false;
+
+    if (discardRecordingGeneration === callGeneration) {
+      discardRecordingGeneration = null;
+      captureVoicedMs = 0;
+      stopBrowserRecognition().catch(() => {});
+      if (bargeWatching && isCurrentVoiceCall(callGeneration) && isActive) {
+        startBargeWatch(callGeneration).catch(handleError);
+      }
+      return;
+    }
+
+    if (bargeWatching) {
+      window.setTimeout(() => {
+        if (isCurrentVoiceCall(callGeneration) && isActive) startBargeWatch(callGeneration).catch(handleError);
+      }, 80);
+      return;
+    }
+
+    const browserText = await stopBrowserRecognition();
+    const blob = new Blob(listenChunks, { type: 'audio/webm' });
+    listenChunks = [];
+    if (!blob.size && !browserText) {
+      setStatus('listening', 'No speech detected.');
+      window.setTimeout(() => {
+        if (isCurrentVoiceCall(callGeneration)) startListening().catch(handleError);
+      }, 400);
+      return;
+    }
+    if (!browserText && blob.size < MIN_RECORDING_BYTES) {
+      captureVoicedMs = 0;
+      setStatus('listening', 'No speech detected.');
+      window.setTimeout(() => {
+        if (isCurrentVoiceCall(callGeneration)) startListening().catch(handleError);
+      }, 400);
+      return;
+    }
+    captureVoicedMs = 0;
+    setStatus('transcribing');
+    const text = browserText || await transcribeBlob(blob);
+    await handleHeardTurn(text, callGeneration);
+  };
+
+  try {
+    recorder.start(250);
+  } catch {
+    recorder.start();
+  }
+  if (listenMetricsTimer) {
+    clearInterval(listenMetricsTimer);
+    listenMetricsTimer = null;
+  }
+  listenMetricsTimer = setInterval(reportListenMetrics, 2000);
+  reportListenMetrics();
+}
+
 async function startListening(requestedStream = null, callGeneration = voiceCallGeneration) {
   if (!window.isSecureContext) {
     setStatus('failed', INSECURE_MIC_MESSAGE);
@@ -2516,12 +3302,20 @@ async function startListening(requestedStream = null, callGeneration = voiceCall
     setStatus('failed', 'Microphone is not available.');
     return;
   }
-  if (!isActive || brainTurnInProgress || activeTurnAudioPromise || speechQueueRunning || currentSpeech) return;
-  if (mediaRecorder?.state === 'recording') return;
+  if (!isActive || brainTurnInProgress || activeTurnAudioPromise || speechQueueRunning || currentSpeech) {
+    if (requestedStream && requestedStream !== mediaStream) {
+      requestedStream.getTracks().forEach(track => track.stop());
+    }
+    return;
+  }
+  if (mediaRecorder?.state === 'recording') {
+    continueBargeRecordingAsListen(callGeneration);
+    return;
+  }
 
-  const recordingChunks = [];
   isStopping = false;
-  if (!requestedStream) requestedStream = await requestMicrophone(callGeneration);
+  const reusedStream = !requestedStream ? liveMicrophoneStream() : null;
+  if (!requestedStream) requestedStream = reusedStream || await requestMicrophone(callGeneration);
   if (!requestedStream) return;
   if (!isCurrentVoiceCall(callGeneration)
       || brainTurnInProgress
@@ -2529,115 +3323,15 @@ async function startListening(requestedStream = null, callGeneration = voiceCall
       || speechQueueRunning
       || currentSpeech
       || mediaRecorder?.state === 'recording') {
-    requestedStream.getTracks().forEach(track => track.stop());
+    if (requestedStream !== mediaStream) {
+      requestedStream.getTracks().forEach(track => track.stop());
+    }
     return;
   }
-  setAudioSessionType('play-and-record');
-  mediaStream = requestedStream;
-  startSphereStream(mediaStream);
-  mediaRecorder = new MediaRecorder(mediaStream, { mimeType: 'audio/webm' });
-
-  mediaRecorder.ondataavailable = event => {
-    if (event.data?.size) recordingChunks.push(event.data);
-  };
-
-  mediaRecorder.onstop = async () => {
-    if (!isCurrentVoiceCall(callGeneration)) {
-      requestedStream.getTracks().forEach(track => track.stop());
-      return;
-    }
-    clearTurnTimers();
-    stopTracks();
-    isStopping = false;
-
-    if (discardRecordingGeneration === callGeneration) {
-      discardRecordingGeneration = null;
-      captureVoicedMs = 0;
-      return;
-    }
-
-    const blob = new Blob(recordingChunks, { type: 'audio/webm' });
-    if (!blob.size) {
-      setStatus('idle');
-      return;
-    }
-    if (captureVoicedMs < MIN_VOICED_MS) {
-      captureVoicedMs = 0;
-      setStatus('listening', 'No speech detected.');
-      window.setTimeout(() => {
-        if (isCurrentVoiceCall(callGeneration)) startListening().catch(handleError);
-      }, 400);
-      return;
-    }
-    captureVoicedMs = 0;
-
-    try {
-      const turnStarted = performance.now();
-      await playVoiceCue('heard');
-      if (!isCurrentVoiceCall(callGeneration)) return;
-      setStatus('transcribing');
-      const timings = { turn_started_at: turnStarted };
-      const sttStarted = performance.now();
-      const text = await transcribe(blob);
-      timings.stt_ms = performance.now() - sttStarted;
-      timings.transcript_chars = text.length;
-      if (!isCurrentVoiceCall(callGeneration)) return;
-      const transcriptEl = $('jarvis-call-transcript');
-      if (transcriptEl) transcriptEl.textContent = text || '';
-      if (!text) {
-        setStatus('listening', 'No speech detected.');
-        window.setTimeout(() => {
-          if (isCurrentVoiceCall(callGeneration)) startListening().catch(handleError);
-        }, 800);
-        return;
-      }
-      renderLiveUser(text, timings, turnStarted);
-
-      speechPaused = false;
-      setStatus('thinking');
-      await playVoiceCue('thinking');
-      if (!isCurrentVoiceCall(callGeneration)) return;
-      brainTurnInProgress = true;
-      const brainStarted = performance.now();
-      const response = await streamTurn(text, timings, turnStarted, callGeneration);
-      if (!isCurrentVoiceCall(callGeneration)) return;
-      timings.respond_ms = performance.now() - brainStarted;
-      const reply = response.assistant_text || '';
-      const diagnostic = response.diagnostics || {};
-      if (diagnostic.brain_ms != null) timings.brain_ms = diagnostic.brain_ms;
-      if (diagnostic.brain_first_token_ms != null) timings.brain_first_token_ms = diagnostic.brain_first_token_ms;
-      timings.assistant_chars = reply.length;
-      timings.num_predict = diagnostic.num_predict || '';
-      const panel = $('jarvis-call-panel');
-      if (panel) {
-        panel.dataset.voiceModel = diagnostic.model || '';
-        panel.dataset.turnDiagnostic = `${text.length}:${reply.length}:${diagnostic.guard_reason || 'ok'}`;
-      }
-      const replyEl = $('jarvis-call-reply');
-      if (replyEl) replyEl.textContent = reply;
-      brainTurnInProgress = false;
-      await response.audioPromise;
-      if (!isCurrentVoiceCall(callGeneration)) return;
-      if (activeTurnAudioPromise === response.audioPromise) activeTurnAudioPromise = null;
-      activeAudioTurnId = null;
-      if (!speechQueueRunning && speechQueue.length) processSpeechQueue().catch(handleError);
-      await waitForSpeechQueueIdle();
-      if (!isCurrentVoiceCall(callGeneration)) return;
-      stopPlaybackAudio();
-      delete timings.turn_started_at;
-      await postTurnDiagnostics(timings, response.voiceSessionId);
-      if (!isCurrentVoiceCall(callGeneration)) return;
-      resumeListeningIfReady();
-    } catch (error) {
-      if (!isCurrentVoiceCall(callGeneration)) return;
-      brainTurnInProgress = false;
-      handleError(error);
-    }
-  };
-
-  mediaRecorder.start();
+  bargeWatching = false;
+  attachListenRecorder(requestedStream, callGeneration);
   setStatus('listening');
-  startSilenceWatch(mediaStream, callGeneration);
+  startListenTurnTimer(callGeneration);
 }
 
 async function ensurePlaybackContext() {
@@ -2731,7 +3425,7 @@ async function playPcmAudioStream(url, options, timings, token, turnId = null, v
 
       const hasQueuedAudio = playbackScheduledUntil > context.currentTime + 0.005;
       if (playbackScheduledUntil && !hasQueuedAudio) timings.scheduler_underruns += 1;
-      const beginsAt = hasQueuedAudio ? playbackScheduledUntil : context.currentTime + 0.05;
+      const beginsAt = hasQueuedAudio ? playbackScheduledUntil : context.currentTime + 0.12;
       source.start(beginsAt);
       playbackScheduledUntil = beginsAt + audioBuffer.duration;
       timings.tts_chunks += 1;
@@ -2742,6 +3436,7 @@ async function playPcmAudioStream(url, options, timings, token, turnId = null, v
         timings.tts_first_audio_ms = performance.now() - started;
         if (timings.turn_started_at != null) timings.end_to_first_audio_ms = performance.now() - timings.turn_started_at;
         setStatus('speaking');
+        pauseCaptureForSpeech();
         if (turnId) postPlaybackState(turnId, 'started', timings, voiceSessionId);
       }
     };
@@ -2758,13 +3453,15 @@ async function playPcmAudioStream(url, options, timings, token, turnId = null, v
     if (token !== playbackToken) return null;
     if (!streamDone || !playbackStarted) throw new Error('Streaming speech ended before audio was ready.');
 
-    await lastSourceEnded;
-    if (token !== playbackToken) return null;
+    playbackTailPromise = lastSourceEnded.then(async () => {
+      if (turnId && token === playbackToken) {
+        await postPlaybackState(turnId, 'completed', timings, voiceSessionId);
+      }
+      return streamDone;
+    });
     timings.tts_generation_ms = Number(streamDone.generation_ms) || performance.now() - started;
     timings.playback_duration_ms = Number(streamDone.audio_ms) || 0;
     timings.tts_total_ms = performance.now() - started;
-    playbackScheduledUntil = 0;
-    if (turnId) await postPlaybackState(turnId, 'completed', timings, voiceSessionId);
     return streamDone;
   } catch (error) {
     if (token !== playbackToken || error?.name === 'AbortError') return null;
@@ -2816,6 +3513,7 @@ async function playBufferedAudio(url, options, timings, token, turnId = null, vo
     playbackAudioSources.add(source);
     startPlaybackSphereAnalyser();
     setStatus('speaking');
+    pauseCaptureForSpeech();
     if (turnId) postPlaybackState(turnId, 'started', timings, voiceSessionId);
 
     await new Promise((resolve, reject) => {
@@ -2890,6 +3588,8 @@ async function startCall() {
   }
 
   unlockPlaybackAudio();
+  unlockCaptureAudio();
+  unlockSphereAudio();
   if (!pendingVoiceTargetState) {
     const selectedTarget = voiceTargetForModel(
       window.sessionModule?.getCurrentModel?.(),
@@ -2907,6 +3607,7 @@ async function startCall() {
   setCallPanelMinimized(false);
   speechPaused = false;
   speechQueue = [];
+  currentSpeech = null;
   brainTurnInProgress = false;
   activeWorkerTaskId = null;
   activeCodexThreadId = null;
@@ -2938,6 +3639,7 @@ async function startCall() {
       requestedStream.getTracks().forEach(track => track.stop());
       return;
     }
+    mediaStream = requestedStream;
     await startListening(requestedStream, callGeneration);
   } catch (error) {
     if (!isCurrentVoiceCall(callGeneration)) return;
@@ -2974,6 +3676,16 @@ function endCall() {
   closePlaybackAudio();
   if (window.aiTTSManager) window.aiTTSManager.stop();
   stopSphereAudio();
+  const orb = $('jarvis-call-orb');
+  if (orb) {
+    orb.style.transform = '';
+    orb.style.filter = '';
+  }
+  if (captureAudioContext) {
+    captureAudioContext.close().catch(() => {});
+    captureAudioContext = null;
+  }
+  stopBrowserRecognition().catch(() => {});
   stopListening();
   stopTracks();
   setAudioSessionType('auto');
@@ -3044,8 +3756,7 @@ async function handleInputSphereClick() {
     return;
   }
   if (status === 'speaking' || status === 'buffering') {
-    await interrupt();
-    await startListening();
+    await interruptAndListen();
     return;
   }
   endCall();
@@ -3089,8 +3800,7 @@ function bind() {
       if (status === 'listening') {
         stopListening();
       } else if (status === 'speaking' || status === 'buffering') {
-        await interrupt();
-        await startListening();
+        await interruptAndListen();
       } else if (status === 'idle' || status === 'interrupted' || status === 'failed') {
         await startListening();
       }

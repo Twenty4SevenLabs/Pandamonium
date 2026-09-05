@@ -41796,7 +41796,7 @@ html.jarvis-voice-minimized .extension-surface-panel.is-open {
   box-shadow: none;
   overflow: hidden;
   pointer-events: none;
-  transform: none;
+  transform-origin: center center;
   animation: none !important;
 }
 .jarvis-call-panel.has-agent-task .jarvis-call-orb {

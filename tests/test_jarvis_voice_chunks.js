@@ -11,6 +11,7 @@ const sessionsSource = fs.readFileSync(path.join(__dirname, '../static/js/sessio
 const index = fs.readFileSync(path.join(__dirname, '../static/index.html'), 'utf8');
 const style = fs.readFileSync(path.join(__dirname, '../static/style.css'), 'utf8');
 const serviceWorker = fs.readFileSync(path.join(__dirname, '../static/sw.js'), 'utf8');
+const voiceMeter = fs.readFileSync(path.join(__dirname, '../static/js/voiceMeterProcessor.js'), 'utf8');
 const workerAdaptersSource = fs.readFileSync(path.join(__dirname, '../src/agent_worker_adapters.py'), 'utf8');
 const chatStreamSource = fs.readFileSync(path.join(__dirname, '../static/js/chatStream.js'), 'utf8');
 const chatSource = fs.readFileSync(path.join(__dirname, '../static/js/chat.js'), 'utf8');
@@ -55,7 +56,8 @@ assert.match(source, /source\.start\(beginsAt\)/);
 assert.match(source, /playbackScheduledUntil = beginsAt \+ audioBuffer\.duration/);
 assert.match(source, /let lastSourceEnded = Promise\.resolve\(\)/);
 assert.match(source, /source\.onended = finish/);
-assert.match(source, /await lastSourceEnded/);
+assert.match(source, /playbackTailPromise = lastSourceEnded/);
+assert.match(source, /await playbackTailPromise/);
 assert.match(source, /playBufferedAudio/);
 assert.match(source, /response\.arrayBuffer\(\)/);
 assert.match(source, /context\.decodeAudioData/);
@@ -74,23 +76,101 @@ assert.match(source, /is requesting approval\. Please take a look\./);
 assert.match(source, /has a question\. Please take a look\./);
 assert.match(source, /hit a problem\. Please take a look\./);
 assert.match(source, /WORKER_SPEECH_MAX_CHARS = 700/);
-assert.match(source, /VOICE_RMS_THRESHOLD = 0\.018/);
+assert.match(source, /VOICE_RMS_THRESHOLD = 0\.005/);
 assert.match(source, /VOICE_SAMPLE_INTERVAL_MS = 140/);
 assert.match(source, /MIN_VOICED_MS = 280/);
+assert.match(source, /function ensureCaptureAudioContext\(/);
+assert.match(source, /function ensureSphereAudioContext\(/);
+assert.match(source, /unlockCaptureAudio\(\)/);
+assert.match(source, /unlockSphereAudio\(\)/);
+assert.match(source, /function connectMeter\(/);
+assert.doesNotMatch(source, /silent: ctx\.destination/);
+assert.doesNotMatch(source, /createMediaStreamDestination/);
+assert.match(source, /silent\.gain\.value = 0/);
+assert.match(source, /analyser\.connect\(silent\)/);
+assert.match(source, /capturePeakRms/);
+assert.match(source, /VOICE_SILENCE_MS = 1600/);
+assert.match(source, /MAX_TURN_MS = 5 \* 60 \* 1000/);
+assert.match(source, /CHUNK_VOICE_BYTES = 1000/);
+assert.match(source, /function applyRecorderChunk\(/);
+assert.match(source, /recorder\.start\(250\)/);
+const pauseCaptureBody = source.match(/function pauseCaptureForSpeech\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
+assert.doesNotMatch(pauseCaptureBody, /stopTracks\(\)/);
+assert.match(pauseCaptureBody, /mediaRecorder\.stop\(\)/);
+assert.match(source, /bargeWatching = true/);
+assert.doesNotMatch(source, /BARGE_IN_BYTES/);
+assert.match(source, /BARGE_IN_MS = 180/);
+assert.match(source, /BARGE_RMS_THRESHOLD = 0\.03/);
+assert.match(source, /BARGE_RMS_RATIO = 2\.5/);
+assert.match(source, /BARGE_GRACE_MS = 400/);
+assert.match(source, /function bargeEnergyDecision\(/);
+assert.match(source, /function armCaptureMeter\(/);
+assert.match(source, /function applyMicEchoCancellation\(/);
+const applyRecorderBody = source.match(/function applyRecorderChunk\([^)]*\) \{([\s\S]*?)\n\}/)?.[1] || '';
+assert.match(applyRecorderBody, /if \(bargeWatching\) return/);
+assert.doesNotMatch(applyRecorderBody, /size > BARGE_IN_BYTES|BARGE_SKIP_CHUNKS|bargeChunkIndex/);
+assert.match(source, /captureAnalyserRms = rms/);
+assert.match(source, /bargeEnergyDecision\(/);
+assert.match(source, /armCaptureMeter\(/);
+assert.match(source, /MIN_TRANSCRIPT_CHARS = 8/);
+const attachListenBody = source.match(/function attachListenRecorder\([^)]*\) \{([\s\S]*?)\n\}/)?.[1] || '';
+assert.match(attachListenBody, /armCaptureMeter\(/);
+assert.match(attachListenBody, /applyMicEchoCancellation\(/);
+assert.match(source, /SPHERE_IDLE_VOLUME = 0/);
+assert.match(source, /listenChunks\.push\(event\.data\)/);
+assert.match(pauseCaptureBody, /discardRecordingGeneration/);
+assert.match(source, /async function interruptAndListen\(/);
+const interruptListenBody = source.match(/async function interruptAndListen\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
+assert.doesNotMatch(interruptListenBody, /mediaRecorder\.stop\(\)/);
+assert.match(interruptListenBody, /continueBargeRecordingAsListen/);
+assert.doesNotMatch(interruptListenBody, /listenChunks\.length = 0/);
+const listenTimerBody = source.match(/function startListenTurnTimer\([^)]*\) \{([\s\S]*?)\n\}/)?.[1] || '';
+assert.doesNotMatch(listenTimerBody, /startSpherePulse/);
+assert.match(source, /MIN_RECORDING_BYTES = 400/);
+assert.match(source, /__jarvisSphereBridge/);
+assert.match(source, /bridge.ready = talking/);
+assert.match(source, /ready: talking/);
+assert.doesNotMatch(source, /bridge.ready = callActive/);
+assert.doesNotMatch(source, /ready: callActive/);
+assert.doesNotMatch(source, /callActive \? 0\.14/);
+assert.match(source, /SPHERE_IDLE_LEVELS/);
+assert.match(source, /startSpherePulse\(next\)/);
+assert.doesNotMatch(source, /track\.clone\(\)/);
+assert.doesNotMatch(source, /startCaptureProbe\(/);
+assert.doesNotMatch(source, /probe\.volume = 0/);
+assert.match(source, /audioWorklet\.addModule/);
+assert.match(source, /voice-meter/);
+assert.match(source, /listen-metrics/);
+assert.match(source, /function encodeWavPcm16\(/);
+assert.match(source, /createMediaRecorder\(/);
+assert.match(source, /recorder\.start\(250\)/);
+assert.match(source, /blob\.size < MIN_RECORDING_BYTES/);
+assert.doesNotMatch(source, /capturePeakRms < VOICE_RMS_THRESHOLD \|\| captureVoicedMs < MIN_VOICED_MS/);
+assert.match(source, /startPcmCapture\(/);
+assert.match(source, /startListenTurnTimer\(callGeneration\)/);
+assert.doesNotMatch(source, /await startSilenceWatch\(mediaStream, callGeneration\)/);
+assert.match(source, /MIN_TRANSCRIPT_CHARS/);
+assert.match(source, /orb\.style\.transform/);
+assert.match(source, /function startBrowserRecognition\(/);
+assert.doesNotMatch(source, /startBrowserRecognition\(\{\s*callGeneration,\s*track:/);
+assert.match(source, /webkitSpeechRecognition/);
+assert.match(source, /stopBrowserRecognition\(\)/);
 assert.doesNotMatch(source, /cueAudioContext|unlockVoiceCueAudio|closeVoiceCueAudio/);
 assert.match(source, /let playbackAudioContext = null/);
 assert.match(source, /const VOICE_CUE_GAIN = 0\.12/);
 assert.match(source, /source\.connect\(playbackAnalyser\)/);
 assert.match(source, /playVoiceCue\('call'\)/);
-assert.match(source, /playVoiceCue\('heard'\)/);
-assert.match(source, /await playVoiceCue\('thinking'\)/);
+assert.match(source, /heard: \[\[784/);
+assert.match(source, /thinking: \[\[440/);
 assert.match(source, /gain\.connect\(playbackAnalyser\)/);
-assert.match(source, /captureVoicedMs \+= VOICE_SAMPLE_INTERVAL_MS/);
-assert.match(source, /captureVoicedMs < MIN_VOICED_MS/);
-assert.match(source, /echoCancellation: true/);
-assert.match(source, /noiseSuppression: true/);
-assert.match(source, /autoGainControl: true/);
+assert.match(source, /startListenTurnTimer\(callGeneration\)/);
+assert.match(source, /echoCancellation: false/);
+assert.doesNotMatch(source, /echoCancellation: true/);
+assert.doesNotMatch(source, /getUserMedia\(\{ audio: true \}\)/);
 assert.match(source, /channelCount: 1/);
+assert.match(source, /outputChannelCount: \[1\]/);
+assert.match(source, /event\.data\?\.samples/);
+assert.doesNotMatch(source, /event\.data\?\.pcm/);
 assert.doesNotMatch(source, /startDirectWorkerTask|pendingWorkerText|requestsJarvisTarget/);
 assert.match(source, /event\.type !== 'progress' \|\| Boolean\(event\.spoken_text\)/);
 assert.match(source, /let voiceCallGeneration = 0/);
@@ -101,12 +181,12 @@ assert.match(source, /const endingSessionId = sessionId/);
 assert.match(source, /sessions\/\$\{encodeURIComponent\(endingSessionId\)\}\/interrupt/);
 assert.match(source, /if \(!isCurrentVoiceCall\(callGeneration\)\) \{\s*turnAudioPromise = Promise\.resolve\(\)/);
 assert.match(source, /if \(!turnAudioPromise && !isCurrentVoiceCall\(callGeneration\)\) turnAudioPromise = Promise\.resolve\(\)/);
-assert.match(source, /const text = await transcribe\(blob\);[\s\S]*?if \(!isCurrentVoiceCall\(callGeneration\)\) return;/);
+assert.match(source, /const text = browserText \|\| await transcribeBlob\(blob\);[\s\S]*?await handleHeardTurn\(text, callGeneration\)/);
 assert.match(source, /requestedStream\.getTracks\(\)\.forEach\(track => track\.stop\(\)\)/);
 assert.doesNotMatch(source, /let audioChunks = \[\]/);
-assert.match(source, /const recordingChunks = \[\]/);
-assert.match(source, /recordingChunks\.push\(event\.data\)/);
-assert.match(source, /new Blob\(recordingChunks/);
+assert.match(source, /let listenChunks = \[\]/);
+assert.match(source, /listenChunks\.push\(event\.data\)/);
+assert.match(source, /new Blob\(listenChunks/);
 assert.match(source, /streamTurn\(text, timings, turnStarted, callGeneration\)/);
 assert.match(source, /playVoiceTurnAudio\(event\.turn_id, timings, turnSessionId\)/);
 assert.match(source, /followWorkerTask\(event\.task_id, currentCall\)/);
@@ -114,7 +194,7 @@ assert.match(source, /taskId === activeWorkerTaskId[\s\S]*?task\?\.session_id ==
 assert.match(source, /event\.metadata\?\.codex_thread_id && eventBelongsToActiveVoiceTask/);
 assert.match(source, /'X-Tz-Offset': String\(-new Date\(\)\.getTimezoneOffset\(\)\)/);
 assert.match(source, /'X-Tz-Name': name/);
-assert.equal((source.match(/browserTimezoneHeaders\(\)/g) || []).length, 5);
+assert.equal((source.match(/browserTimezoneHeaders\(\)/g) || []).length, 6);
 assert.match(source, /postPlaybackState\(turnId, 'failed', timings, voiceSessionId\)/);
 assert.match(style, /\.jarvis-call-panel\[data-state="failed"\] \.jarvis-call-copy/);
 assert.match(source, /jarvis-agent-chip/);
@@ -171,7 +251,7 @@ const endCallBody = source.match(/function endCall\(\) \{([\s\S]*?)\n\}/)?.[1] |
 const stopPlaybackBody = source.match(/function stopPlaybackAudio\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
 const stopTracksBody = source.match(/function stopTracks\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
 const requestMicrophoneBody = source.match(/async function requestMicrophone\([^)]*\) \{([\s\S]*?)\n\}/)?.[1] || '';
-const recorderStopBody = source.match(/mediaRecorder\.onstop = async \(\) => \{([\s\S]*?)\n  \};/)?.[1] || '';
+const recorderStopBody = source.match(/recorder\.onstop = async \(\) => \{([\s\S]*?)\n  \};/)?.[1] || '';
 const setStatusBody = source.match(/function setStatus\([^)]*\) \{([\s\S]*?)\n\}/)?.[1] || '';
 assert.doesNotMatch(endCallBody, /workerStreams\.forEach|workerStreams\.clear|handledWorkerEventIds = new Set/);
 assert.doesNotMatch(endCallBody, /unmountOrganicSphere/);
@@ -182,12 +262,38 @@ assert.match(endCallBody, /setAudioSessionType\('auto'\)/);
 assert.match(stopTracksBody, /setAudioSessionType\(isActive \? 'playback' : 'auto'\)/);
 assert.match(requestMicrophoneBody, /setAudioSessionType\('play-and-record'\)/);
 assert.doesNotMatch(stopPlaybackBody, /closePlaybackAudio|playbackAudioContext\.close/);
+assert.match(stopPlaybackBody, /if \(!isActive\) stopSphereGraph\(\)/);
+assert.match(setStatusBody, /else if \(next === 'listening'\) \{\s*stopSphereGraph\(\);\s*postSphereLevels\(next, 0\);/);
+assert.match(source, /startBargeWatch\(callGeneration\)/);
+assert.match(source, /await interruptAndListen\(\)/);
+assert.match(source, /let voiceTurnEpoch = 0/);
+assert.match(source, /voiceTurnEpoch \+= 1/);
+assert.match(source, /turnEpoch !== voiceTurnEpoch/);
+assert.match(source, /barge_watching: bargeWatching/);
+assert.match(source, /setStatus\('speaking'\);\s*pauseCaptureForSpeech\(\)/);
+assert.match(source, /async function handleHeardTurn\([\s\S]*?setStatus\('thinking'\)/);
+assert.doesNotMatch(source, /await playVoiceCue\('thinking'\)/);
 assert.ok(
-  recorderStopBody.indexOf("await playVoiceCue('heard')") >= 0
-    && recorderStopBody.indexOf("await playVoiceCue('heard')") < recorderStopBody.indexOf('await transcribe(blob)')
-    && recorderStopBody.indexOf('await transcribe(blob)') < recorderStopBody.indexOf("await playVoiceCue('thinking')"),
-  'capture and thinking cues must announce their actual turn boundaries',
+  recorderStopBody.includes('handleHeardTurn')
+    && recorderStopBody.includes('transcribeBlob(blob)')
+    && recorderStopBody.includes("setStatus('transcribing')")
+    && recorderStopBody.includes('mediaRecorder !== recorder')
+    && !recorderStopBody.includes('stopTracks()'),
+  'recorder path must transcribe without tearing down the mic or orb, and must ignore stale onstop',
 );
+const resumeListenBody = source.match(/function resumeListeningIfReady\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
+assert.match(resumeListenBody, /startFreshListenTurn/);
+assert.doesNotMatch(resumeListenBody, /continueBargeRecordingAsListen/);
+assert.match(source, /function trimListenChunksToTail\(/);
+assert.match(source, /function startFreshListenTurn\(/);
+assert.match(source, /continueBargeRecordingAsListen\(callGeneration, \{ fromInterrupt: true \}\)/);
+assert.match(source, /trimListenChunksToTail\(8000\)/);
+assert.match(source, /applyMicEchoCancellation\(/);
+assert.doesNotMatch(source, /applyMicEchoCancellation\([^,]+, !bargeWatching\)/);
+assert.doesNotMatch(source, /applyMicEchoCancellation\([^,]+, true\)/);
+assert.match(source, /function pickAudioInput\(/);
+assert.match(source, /enumerateDevices/);
+assert.match(source, /deviceId === 'communications'/);
 assert.match(source, /isActive = false;\s*restoreActivityGroupsToChat\(\)/);
 assert.match(source, /if \(!continuedTasks\) chatSessionId = null/);
 assert.match(source, /loadDocument\(documentId, \{ side: 'left' \}\)/);
@@ -232,13 +338,17 @@ assert.match(index, /title="End voice — task continues" aria-label="End voice 
 assert.match(index, /id="jarvis-call-view-chat"[^>]*>View chat<\/button>/);
 assert.match(index, /<button[^>]*data-worker="hermes"[^>]*>\s*<span>Gordon<\/span><small>Hermes laptop · gated<\/small>\s*<\/button>/);
 assert.match(index, /<button[^>]*data-worker="pc-codex"[^>]*>\s*<span>Friday<\/span><small>Local workstation · checking<\/small>\s*<\/button>/);
-assert.match(index, /style\.css\?v=20260903T210000Z/);
+assert.match(index, /style\.css\?v=20260904T132000Z/);
 assert.match(index, /sessions\.js\?v=20260719T024058Z/);
-assert.match(index, /jarvisVoice\.js\?v=20260903T210000Z/);
+assert.match(index, /jarvisVoice\.js\?v=20260905T081200Z/);
 assert.match(index, /app\.js\?v=20260719T024058Z/);
 assert.match(appSource, /sessions\.js\?v=20260719T024058Z/);
-assert.match(serviceWorker, /CACHE_NAME = 'pandamonium-v372'/);
+assert.match(serviceWorker, /CACHE_NAME = 'pandamonium-v391'/);
+assert.match(source, /voiceMeterProcessor\.js\?v=20260905T081200Z/);
+assert.doesNotMatch(voiceMeter, /pcm: new Float32Array\(samples\)/);
+assert.match(voiceMeter, /samples: this\._count/);
 assert.match(index, /id="hamburger-btn"[^>]*aria-label="Toggle sidebar"[^>]*aria-controls="sidebar"/);
+assert.match(serviceWorker, /\/static\/js\/voiceMeterProcessor\.js/);
 assert.match(serviceWorker, /\/static\/js\/voiceOrbMedia\.js/);
 assert.match(serviceWorker, /\/static\/voice-orb-media\.json/);
 assert.doesNotMatch(serviceWorker, /motivational-abstract\.webm/);
@@ -433,8 +543,23 @@ const extensionName = { textContent: '' };
 const fakeDocument = {
   readyState: 'loading',
   documentElement: { dataset: {}, classList: makeClassList() },
-  body: { classList: makeClassList() },
+  body: { classList: makeClassList(), appendChild() {} },
   addEventListener() {},
+  createElement(tag) {
+    if (tag === 'audio') {
+      return {
+        setAttribute() {},
+        muted: false,
+        autoplay: false,
+        srcObject: null,
+        style: {},
+        play: async () => {},
+        pause() {},
+        remove() {},
+      };
+    }
+    return { setAttribute() {}, classList: makeClassList(), style: {} };
+  },
   getElementById(id) {
     if (id === 'chat-history') return chat;
     if (id === 'jarvis-activity-rail') return rail;

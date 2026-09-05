@@ -392,7 +392,8 @@ def setup_session_routes(
             # tts/whisper models first (e.g. text-embedding-ada-002), which
             # can't hold a conversation.
             _NON_CHAT = ("text-embedding", "embedding", "tts-", "whisper",
-                         "text-moderation", "moderation-", "dall-e", "rerank")
+                         "text-moderation", "moderation-", "dall-e", "rerank",
+                         "chatterbox", "kokoro")
             chat_ids = [m for m in ids if not any(p in m.lower() for p in _NON_CHAT)]
             model_to_use = (chat_ids or ids)[0]
         else:

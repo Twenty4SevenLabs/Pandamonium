@@ -63,8 +63,7 @@ test('Pandamonium call panel opens with a bounded microphone session and closes 
   await expect.poll(() => requests.prewarms).toBe(1);
 
   const constraints = await page.evaluate(() => window.__capturedMedia.constraints[0]);
-  expect(constraints.audio.echoCancellation).toBe(true);
-  expect(constraints.audio.noiseSuppression).toBe(true);
+  expect(constraints.audio).toBe(true);
   expect(constraints.video).toBeUndefined();
 
   await page.evaluate(() => window.jarvisVoice.endCall());

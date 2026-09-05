@@ -29,8 +29,9 @@ assert.match(html, /id="jarvis-call-orb"/);
 assert.match(html, /id="voice-worker-rail"/);
 assert.match(html, /src="\/static\/js\/jarvisVoice\.js/);
 
-assert.match(sw, /const CACHE_NAME = 'pandamonium-v372'/);
+assert.match(sw, /const CACHE_NAME = 'pandamonium-v391'/);
 assert.match(sw, /'\/static\/js\/jarvisVoice\.js'/);
+assert.match(sw, /'\/static\/js\/voiceMeterProcessor\.js'/);
 assert.match(sw, /'\/static\/js\/voiceOrbMedia\.js'/);
 assert.match(sw, /'\/static\/voice-orb-media\.json'/);
 assert.doesNotMatch(sw, /motivational-abstract\.webm/);

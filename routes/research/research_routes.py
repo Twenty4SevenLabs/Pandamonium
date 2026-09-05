@@ -78,6 +78,7 @@ logger = logging.getLogger(__name__)
 _NON_CHAT_MODEL = (
     "text-embedding", "embedding", "tts-", "whisper", "dall-e",
     "moderation", "rerank", "reranker", "clip", "stable-diffusion",
+    "chatterbox", "kokoro",
 )
 
 _RESEARCH_IMAGE_BLOCKLIST = {

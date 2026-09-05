@@ -600,6 +600,8 @@ _NON_CHAT_CONTAINS = (
     "topic-control", "calibration",
     "ai-synthetic-video", "cosmos-reason2",
     "bge", "llama-guard",
+    "flux", "stable-diffusion", "sdxl", "sd3", "hidream", "kolors",
+    "chatterbox", "kokoro",
 )
 _NON_CHAT_EXACT_PREFIXES = (
     "gpt-audio",  # gpt-audio, gpt-audio-mini etc. (not gpt-4o-audio-preview which is chat)
@@ -624,6 +626,20 @@ def _is_chat_model(model_id: str) -> bool:
         if substr in mid:
             return False
     return True
+
+
+def _is_image_generation_model(model_id: str) -> bool:
+    """True for diffusion / image models that cannot answer a voice chat turn."""
+    if not isinstance(model_id, str):
+        return False
+    mid = model_id.lower()
+    return any(
+        marker in mid
+        for marker in (
+            "flux", "stable-diffusion", "sdxl", "sd3", "dall-e",
+            "gpt-image", "chatgpt-image", "hidream", "kolors", "sora",
+        )
+    )
 
 
 def _delete_orphaned_provider_auth(db, auth_id: Optional[str], exclude_ep_id: Optional[str] = None) -> bool:

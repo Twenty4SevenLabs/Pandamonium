@@ -1132,6 +1132,23 @@ async def _startup_event():
 
     _startup_tasks.append(asyncio.create_task(_startup_mcp_connections()))
 
+    async def _startup_unsloth_endpoints():
+        try:
+            from core.database import SessionLocal as _UnslothSL
+            from src.unsloth_endpoints import ensure_unsloth_endpoints
+
+            db = _UnslothSL()
+            try:
+                seeded = ensure_unsloth_endpoints(db)
+                if seeded:
+                    logger.info("Seeded %s Unsloth Studio endpoint(s)", seeded)
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001 — UI must boot even if Studio is down
+            logger.warning("Unsloth endpoint seed failed (non-critical): %s", exc)
+
+    _startup_tasks.append(asyncio.create_task(_startup_unsloth_endpoints()))
+
     # Startup warmups are opt-in. They make later requests a little warmer, but
     # they also compete with the first seconds of real UI use on slow or busy
     # machines. Default to clear/idle startup and let requests warm what they use.
@@ -1319,6 +1336,15 @@ async def _startup_event():
     # removes the feature.
     from src.cookbook_serve_lifecycle import cookbook_serve_lifecycle_loop
     _startup_tasks.append(asyncio.create_task(cookbook_serve_lifecycle_loop()))
+
+    async def _preload_stt():
+        try:
+            await asyncio.to_thread(stt_service.preload)
+            logger.info("STT whisper preload complete")
+        except Exception as exc:
+            logger.warning("STT whisper preload failed: %s", exc)
+
+    _startup_tasks.append(asyncio.create_task(_preload_stt()))
 
     logger.info("Application startup complete")
 

@@ -8,6 +8,7 @@ var escapeHtml = uiModule.esc;
 
 // ── Model classification constants ──
 const NON_CHAT_PREFIXES = ['tts-', 'whisper-', 'text-embedding-', 'text-moderation-', 'moderation-', 'embedding'];
+const NON_CHAT_SUBSTRINGS = ['chatterbox', 'kokoro'];
 const NON_CHAT_SUFFIXES = ['deep-research', '-online'];
 const IMAGE_PREFIXES = ['dall-e-3', 'gpt-image', 'chatgpt-image'];
 const DEPRECATED_IMAGE = ['dall-e-2'];
@@ -17,6 +18,7 @@ function classifyModel(id) {
   if (DEPRECATED_IMAGE.some(p => lower.startsWith(p))) return 'other';
   if (IMAGE_PREFIXES.some(p => lower.startsWith(p))) return 'image';
   if (NON_CHAT_PREFIXES.some(p => lower.startsWith(p))) return 'other';
+  if (NON_CHAT_SUBSTRINGS.some(p => lower.includes(p))) return 'other';
   if (NON_CHAT_SUFFIXES.some(p => lower.endsWith(p) || lower.includes(p))) return 'other';
   return 'chat';
 }

@@ -396,6 +396,12 @@ class TestIsChatModel:
     @pytest.mark.parametrize("model_id", [
         "dall-e-3", "tts-1", "whisper-1", "text-embedding-3-small",
         "gpt-image-1", "sora-1",
+        "unsloth/FLUX.2-klein-4B",
+        "black-forest-labs/FLUX.1-schnell",
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        "sdxl-local",
+        "ResembleAI/chatterbox",
+        "mlx-community/chatterbox-turbo-fp16",
     ])
     def test_non_chat_models(self, model_id):
         assert _is_chat_model(model_id) is False

@@ -3,6 +3,7 @@
 # would otherwise be overwritten. Never list .env (handled separately).
 .env.example
 docker-compose.yml
+app.py
 routes/model_routes.py
 routes/voice_routes.py
 src/endpoint_resolver.py
@@ -10,4 +11,6 @@ src/llm_core.py
 src/model_discovery.py
 docker/host-proxmox.yml
 src/unsloth_client.py
+src/unsloth_endpoints.py
 tests/test_unsloth_client.py
+tests/test_unsloth_endpoints.py

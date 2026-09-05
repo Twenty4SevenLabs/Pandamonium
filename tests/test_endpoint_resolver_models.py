@@ -20,6 +20,14 @@ class TestFirstChatModel:
         models = ["text-embedding-ada-002", "whisper-large-v3", "gpt-4o"]
         assert _first_chat_model(models) == "gpt-4o"
 
+    def test_skips_chatterbox_tts_checkpoint(self):
+        models = ["ResembleAI/chatterbox", "Qwen3.5-9B"]
+        assert _first_chat_model(models) == "Qwen3.5-9B"
+
+    def test_skips_flux_image_models(self):
+        models = ["unsloth/FLUX.2-klein-4B", "Qwen3.8-27B"]
+        assert _first_chat_model(models) == "Qwen3.8-27B"
+
     def test_falls_back_to_first_when_all_non_chat(self):
         assert _first_chat_model(["whisper-large-v3"]) == "whisper-large-v3"
 

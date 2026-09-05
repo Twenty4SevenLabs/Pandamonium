@@ -119,10 +119,11 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
     except Exception as e:
         logger.error("[agent-run] %s failed: %s", session_id, e, exc_info=True)
         run.status = "error"
+        msg = str(e).strip() or "Agent run failed before completion."
         _publish(
             run,
             "event: error\n"
-            f"data: {json.dumps({'error': 'Agent run failed before completion.', 'status': 500})}\n\n",
+            f"data: {json.dumps({'error': msg, 'text': msg, 'status': 502})}\n\n",
         )
         _publish(run, "data: [DONE]\n\n")
     finally:

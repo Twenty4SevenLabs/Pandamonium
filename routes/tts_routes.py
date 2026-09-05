@@ -10,6 +10,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from src.voice_pcm import TTS_INFERENCE_LOCK, speech_text, stream_tts_pcm_segment
+from services.tts.tts_service import TTSError
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,8 @@ def setup_tts_routes(tts_service):
         
         except HTTPException:
             raise
+        except TTSError as e:
+            raise HTTPException(status_code=e.status, detail={"message": e.message})
         except Exception as e:
             logger.error(f"Synthesis error: {e}", exc_info=True)
             raise HTTPException(

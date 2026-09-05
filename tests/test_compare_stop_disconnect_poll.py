@@ -288,3 +288,23 @@ def test_compare_mode_branch_skips_agent_runs_in_source():
         "compare_mode must short-circuit to a direct (non-detached) "
         "StreamingResponse before normal streams are wrapped in agent_runs"
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_runs_publishes_exception_text_not_generic_500():
+    """Uncaught generator errors must show the real message, not 'Error 500'."""
+    session_id = "sess-unsloth-fail"
+    agent_runs._RUNS.pop(session_id, None)
+
+    async def boom():
+        if False:
+            yield ""
+        raise RuntimeError("Unsloth Studio could not load model 'Qwen3.8-27B-MLX-4bit'")
+
+    run = agent_runs.start(session_id, boom())
+    await run.task
+    joined = "".join(run.buffer)
+    assert "event: error" in joined
+    assert "Qwen3.8-27B-MLX-4bit" in joined
+    assert '"status": 502' in joined
+    assert "Agent run failed before completion" not in joined

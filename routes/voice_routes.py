@@ -59,7 +59,7 @@ VOICE_CONTEXT_LENGTH = int(os.getenv("ODYSSEUS_VOICE_CONTEXT_LENGTH", "32768"))
 VOICE_TTS_PREWARM_TIMEOUT_SECONDS = 30.0
 VOICE_SERVER_TTS_ERROR = (
     "Voice Orb requires server-generated TTS. "
-    "Enable an available local or endpoint TTS provider in Settings."
+    "Enable an available local, Fish Audio, or endpoint TTS provider in Settings."
 )
 VOICE_EVENT_HEARTBEAT_SECONDS = 5.0
 VOICE_FRAME_MAX_BYTES = 1024 * 1024
@@ -322,6 +322,23 @@ class VoiceDiagnosticCreate(BaseModel):
     timings: dict[str, Any] = Field(default_factory=dict)
 
 
+class VoiceListenMetrics(BaseModel):
+    rms: float = 0.0
+    peak: float = 0.0
+    voiced_ms: float = 0.0
+    context_state: str = ""
+    recorder_state: str = ""
+    analyser_rms: float = 0.0
+    track_muted: bool = False
+    track_enabled: bool = True
+    track_ready: str = ""
+    probe_playing: bool = False
+    browser_stt: bool = False
+    recorder_bytes: int = 0
+    barge_watching: bool = False
+    device_label: str = ""
+
+
 class VoicePlaybackUpdate(BaseModel):
     state: Literal["started", "completed", "interrupted", "failed"]
     timings: dict[str, Any] = Field(default_factory=dict)
@@ -446,7 +463,7 @@ def _server_tts_readiness(tts_service) -> tuple[bool, str]:
     except Exception:
         return False, "disabled"
     provider = settings.get("tts_provider", "disabled")
-    server_provider = provider == "local" or (
+    server_provider = provider in {"local", "fish"} or (
         isinstance(provider, str)
         and provider.startswith("endpoint:")
         and bool(provider.partition(":")[2].strip())
@@ -681,6 +698,66 @@ def _resolve_voice_runtime(owner: str, linked_session=None) -> tuple[str, str, d
     if not url or not model:
         raise HTTPException(status_code=503, detail="No default chat model is configured")
     return _with_reachable_llm(url, model, headers or {})
+
+
+def _first_chat_model_for_endpoint_url(url: str, owner: str) -> str:
+    """First chat-capable model on the endpoint that serves this chat URL."""
+    from src.endpoint_resolver import _endpoint_enabled_models, _first_chat_model
+    from src.unsloth_client import normalize_openai_base
+    from core.database import SessionLocal, ModelEndpoint
+
+    target = normalize_openai_base(url).lower()
+    if not target:
+        return ""
+    db = SessionLocal()
+    try:
+        rows = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()  # noqa: E712
+        for ep in rows:
+            ep_base = normalize_openai_base(getattr(ep, "base_url", "") or "").lower()
+            if not ep_base or ep_base != target:
+                continue
+            chat = _first_chat_model(_endpoint_enabled_models(ep)) or ""
+            if chat and not _cannot_converse(chat):
+                return chat
+        return ""
+    except Exception:
+        return ""
+    finally:
+        db.close()
+
+
+def _is_speech_synthesis_model(model: str) -> bool:
+    """True for TTS checkpoints that hang if loaded as a chat LLM (e.g. Chatterbox)."""
+    mid = str(model or "").lower()
+    return any(token in mid for token in ("chatterbox", "kokoro", "-tts", "tts-"))
+
+
+def _cannot_converse(model: str) -> bool:
+    """True for image/TTS checkpoints that hang Unsloth if used as chat LLMs."""
+    from routes.model_routes import _is_image_generation_model
+
+    return _is_image_generation_model(model) or _is_speech_synthesis_model(model)
+
+
+def _ensure_voice_chat_runtime(
+    url: str,
+    model: str,
+    headers: dict[str, str] | None,
+    owner: str,
+) -> tuple[str, str, dict[str, str]]:
+    """Image and TTS models cannot chat. Fall back to a chat LLM instead of a hung load."""
+    headers = dict(headers or {})
+    if not _cannot_converse(model):
+        return url, model, headers
+    logger.warning("Voice refusing non-chat model %s; falling back to a chat model", model)
+    resolved = resolve_endpoint("default", owner=owner or None)
+    fallback_url, fallback_model, fallback_headers = (resolved or (None, None, {}))[:3]
+    if fallback_url and fallback_model and not _cannot_converse(fallback_model):
+        return _with_reachable_llm(fallback_url, fallback_model, fallback_headers or {})
+    same_endpoint = _first_chat_model_for_endpoint_url(url, owner)
+    if same_endpoint and not _cannot_converse(same_endpoint):
+        return _with_reachable_llm(url, same_endpoint, headers)
+    raise RuntimeError("Select a chat model before starting voice. The current model cannot talk.")
 
 
 def _append_turn(session: dict, role: str, text: str, status: str, task_id: str | None = None) -> dict:
@@ -1764,7 +1841,7 @@ def _setup_provider_kind(value: Any) -> str:
         return "disabled"
     if provider.startswith("endpoint:"):
         return "endpoint"
-    if provider in {"browser", "local"}:
+    if provider in {"browser", "local", "fish"}:
         return provider
     return "configured"
 
@@ -3292,6 +3369,7 @@ async def _jarvis_events(chat_session_id: str, text: str, owner: str, voice_sess
             label = VOICE_TARGET_LABELS.get(selected_target, selected_target)
             raise RuntimeError(f"{label} voice endpoint is not connected")
         endpoint_url, model, headers = resolved
+    endpoint_url, model, headers = _ensure_voice_chat_runtime(endpoint_url, model, headers, owner)
     context_messages = chat_session.get_context_messages()
     messages = [{"role": "system", "content": _voice_system_prompt(voice_session)}, *context_messages]
     full_response = ""
@@ -3607,6 +3685,12 @@ def setup_voice_routes(session_manager=None, stt_service=None, tts_service=None)
                         detail={"message": "Select a configured model before starting voice"},
                     )
                 endpoint_url, model, headers = resolved
+                try:
+                    endpoint_url, model, headers = _ensure_voice_chat_runtime(
+                        endpoint_url, model, headers, owner,
+                    )
+                except RuntimeError as exc:
+                    raise HTTPException(status_code=409, detail={"message": str(exc)}) from exc
                 runtime_endpoint_url = endpoint_url
                 runtime_model = model
                 chat_session_id = str(uuid.uuid4())
@@ -4195,6 +4279,55 @@ def setup_voice_routes(session_manager=None, stt_service=None, tts_service=None)
             "label": payload.label[:80],
             "client": True,
             **_clean_client_timings(payload.timings),
+        })
+        session["updated_at"] = _now()
+        _save_state(state)
+        return {"ok": True}
+
+    @router.post("/sessions/{session_id}/listen-metrics")
+    async def add_listen_metrics(
+        session_id: str,
+        payload: VoiceListenMetrics,
+        owner: str = Depends(require_user),
+    ):
+        state = _load_state()
+        session = _owned_session(state, session_id, owner)
+        logger.info(
+            "voice listen-metrics session=%s rms=%.4f peak=%.4f analyser=%.4f voiced_ms=%.0f context=%s recorder=%s bytes=%s barge=%s device=%s track=%s muted=%s enabled=%s probe=%s browser_stt=%s",
+            session_id,
+            payload.rms,
+            payload.peak,
+            payload.analyser_rms,
+            payload.voiced_ms,
+            (payload.context_state or "")[:40],
+            (payload.recorder_state or "")[:40],
+            payload.recorder_bytes,
+            payload.barge_watching,
+            (payload.device_label or "")[:80],
+            (payload.track_ready or "")[:20],
+            payload.track_muted,
+            payload.track_enabled,
+            payload.probe_playing,
+            payload.browser_stt,
+        )
+        _append_diagnostic(session, {
+            "label": "listen_metrics",
+            "client": True,
+            **_clean_client_timings({
+                "rms": payload.rms,
+                "peak": payload.peak,
+                "voiced_ms": payload.voiced_ms,
+                "context_state": payload.context_state,
+                "recorder_state": payload.recorder_state,
+                "analyser_rms": payload.analyser_rms,
+                "track_muted": payload.track_muted,
+                "track_enabled": payload.track_enabled,
+                "track_ready": payload.track_ready,
+                "probe_playing": payload.probe_playing,
+                "browser_stt": payload.browser_stt,
+                "recorder_bytes": payload.recorder_bytes,
+                "device_label": payload.device_label,
+            }),
         })
         session["updated_at"] = _now()
         _save_state(state)

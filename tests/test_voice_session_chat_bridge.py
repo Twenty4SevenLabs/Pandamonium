@@ -248,6 +248,42 @@ def test_voice_session_accepts_client_timing_diagnostics(monkeypatch, tmp_path):
     assert "raw_audio" not in diagnostic
 
 
+def test_voice_session_accepts_listen_metrics(monkeypatch, tmp_path, caplog):
+    manager = FakeSessionManager()
+    monkeypatch.setattr(voice_routes, "VOICE_STATE_FILE", tmp_path / "voice_sessions.json")
+
+    app = FastAPI()
+    app.include_router(voice_routes.setup_voice_routes(manager, FakeServerTTS()))
+    client = TestClient(app)
+
+    created = client.post("/api/voice/sessions", json={"mode": "jarvis_call"}).json()
+    with caplog.at_level("INFO", logger="routes.voice_routes"):
+        response = client.post(
+            f"/api/voice/sessions/{created['id']}/listen-metrics",
+            json={
+                "rms": 0.0123,
+                "peak": 0.0456,
+                "voiced_ms": 840,
+                "context_state": "running",
+                "recorder_state": "recording",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert "voice listen-metrics" in caplog.text
+    assert "rms=0.0123" in caplog.text
+    state = json.loads((tmp_path / "voice_sessions.json").read_text())
+    diagnostic = state["sessions"][created["id"]]["diagnostics"][-1]
+    assert diagnostic["label"] == "listen_metrics"
+    assert diagnostic["client"] is True
+    assert diagnostic["rms"] == 0.01
+    assert diagnostic["peak"] == 0.05
+    assert diagnostic["voiced_ms"] == 840.0
+    assert diagnostic["context_state"] == "running"
+    assert diagnostic["recorder_state"] == "recording"
+
+
 def test_voice_session_requires_server_tts_at_start_and_use(monkeypatch, tmp_path):
     settings = {"tts_enabled": True, "tts_provider": "endpoint:test-tts"}
     tts = FakeServerTTS()
@@ -285,6 +321,27 @@ def test_voice_session_requires_server_tts_at_start_and_use(monkeypatch, tmp_pat
     assert state["sessions"][created.json()["id"]]["turns"] == []
 
 
+def test_voice_session_accepts_fish_as_server_tts(monkeypatch, tmp_path):
+    settings = {"tts_enabled": True, "tts_provider": "fish"}
+    tts = FakeServerTTS()
+    manager = FakeSessionManager()
+    monkeypatch.setattr(voice_routes, "load_settings", lambda: settings)
+    monkeypatch.setattr(voice_routes, "VOICE_STATE_FILE", tmp_path / "voice_sessions.json")
+    app = FastAPI()
+    app.include_router(voice_routes.setup_voice_routes(manager, tts))
+    client = TestClient(app)
+
+    created = client.post("/api/voice/sessions", json={})
+    assert created.status_code == 200
+    status = client.get("/api/voice/status").json()
+    assert status["server_tts_ready"] is True
+    assert status["server_tts_error"] is None
+
+    tts.available = False
+    assert client.post("/api/voice/sessions", json={}).status_code == 503
+    assert client.get("/api/voice/status").json()["server_tts_ready"] is False
+
+
 def test_voice_num_predict_stays_short_unless_detail_requested():
     assert voice_routes._num_predict_for_text("Who are you?") == 1200
     assert voice_routes._num_predict_for_text("Explain this in detail.") == 2400
@@ -318,6 +375,124 @@ def test_spoken_text_policy_uses_a_human_fallback_for_an_artifact_without_a_summ
     spoken = asyncio.run(voice_routes._select_spoken_text("Create a Python script", response))
 
     assert spoken == "I finished the script. It's in the chat for you to review."
+
+
+def test_ensure_voice_chat_runtime_replaces_chatterbox_with_default_chat(monkeypatch):
+    monkeypatch.setattr(
+        voice_routes,
+        "resolve_endpoint",
+        lambda *_args, **_kwargs: (
+            "http://192.168.1.2:8888/v1/chat/completions",
+            "Qwen3.5-9B",
+            {"Authorization": "Bearer selected"},
+        ),
+    )
+    url, model, headers = voice_routes._ensure_voice_chat_runtime(
+        "http://192.168.1.2:8888/v1/chat/completions",
+        "ResembleAI/chatterbox",
+        {},
+        "jason",
+    )
+    assert model == "Qwen3.5-9B"
+    assert url == "http://192.168.1.2:8888/v1/chat/completions"
+    assert headers == {"Authorization": "Bearer selected"}
+    monkeypatch.setattr(
+        voice_routes,
+        "resolve_endpoint",
+        lambda *_args, **_kwargs: (
+            "http://192.168.1.2:8888/v1/chat/completions",
+            "Qwen3.8-27B",
+            {"Authorization": "Bearer selected"},
+        ),
+    )
+    url, model, headers = voice_routes._ensure_voice_chat_runtime(
+        "http://192.168.1.2:8888/v1/chat/completions",
+        "unsloth/FLUX.2-klein-4B",
+        {},
+        "jason",
+    )
+    assert model == "Qwen3.8-27B"
+    assert url == "http://192.168.1.2:8888/v1/chat/completions"
+    assert headers == {"Authorization": "Bearer selected"}
+
+
+def test_ensure_voice_chat_runtime_keeps_qwen(monkeypatch):
+    monkeypatch.setattr(
+        voice_routes,
+        "resolve_endpoint",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not fall back")),
+    )
+    url, model, headers = voice_routes._ensure_voice_chat_runtime(
+        "http://llm.test/v1/chat/completions",
+        "Qwen3.8-27B",
+        {"Authorization": "Bearer keep"},
+        "jason",
+    )
+    assert (url, model, headers) == (
+        "http://llm.test/v1/chat/completions",
+        "Qwen3.8-27B",
+        {"Authorization": "Bearer keep"},
+    )
+
+
+def test_ensure_voice_chat_runtime_uses_same_endpoint_when_default_is_unset(monkeypatch):
+    monkeypatch.setattr(
+        voice_routes,
+        "resolve_endpoint",
+        lambda *_args, **_kwargs: (None, None, {}),
+    )
+    monkeypatch.setattr(
+        voice_routes,
+        "_first_chat_model_for_endpoint_url",
+        lambda _url, _owner: "unsloth/Qwen3-14B-GGUF:UD-Q4_K_XL",
+    )
+    url, model, headers = voice_routes._ensure_voice_chat_runtime(
+        "http://192.168.1.2:8888/v1/chat/completions",
+        "unsloth/FLUX.2-klein-4B",
+        {"Authorization": "Bearer m1"},
+        "jason",
+    )
+    assert model == "unsloth/Qwen3-14B-GGUF:UD-Q4_K_XL"
+    assert url == "http://192.168.1.2:8888/v1/chat/completions"
+    assert headers == {"Authorization": "Bearer m1"}
+
+
+def test_jarvis_events_does_not_send_flux_to_the_brain(monkeypatch):
+    captured = {}
+
+    class LinkedSession:
+        endpoint_url = "http://192.168.1.2:8888/v1/chat/completions"
+        model = "unsloth/FLUX.2-klein-4B"
+        headers = {}
+
+        def get_context_messages(self):
+            return [{"role": "user", "content": "Hello"}]
+
+    class Manager:
+        def get_session(self, session_id):
+            assert session_id == "chat-flux"
+            return LinkedSession()
+
+    async def fake_stream(endpoint_url, selected_model, messages, **kwargs):
+        captured.update(endpoint_url=endpoint_url, model=selected_model)
+        yield 'data: {"delta":"Chat model online."}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(voice_routes, "_SESSION_MANAGER", Manager())
+    monkeypatch.setattr(voice_routes, "stream_agent_loop", fake_stream)
+    monkeypatch.setattr(
+        voice_routes,
+        "resolve_endpoint",
+        lambda *_args, **_kwargs: (
+            "http://192.168.1.2:8888/v1/chat/completions",
+            "Qwen3.8-27B",
+            {},
+        ),
+    )
+
+    events = asyncio.run(_collect_voice_events("chat-flux", "jarvis"))
+    assert captured["model"] == "Qwen3.8-27B"
+    assert events[-1]["diagnostics"]["model"] == "Qwen3.8-27B"
 
 
 @pytest.mark.parametrize(

@@ -38,11 +38,12 @@ def setup_stt_routes(stt_service):
 
             text = stt_service.transcribe(audio_bytes)
             if text is None:
-                raise HTTPException(
-                    status_code=500,
-                    detail={"message": "Transcription failed"}
-                )
-
+                # Audio decode failure (e.g. invalid/truncated WebM from a barge-in
+                # recorder that was stopped mid-stream).  Return empty text so the
+                # voice pipeline discards the turn gracefully instead of crashing.
+                logger.warning("STT transcription returned None (decode/silence), bytes=%d", len(audio_bytes))
+                return {"text": ""}
+            logger.info("STT transcribe chars=%s bytes=%s", len(text or ""), len(audio_bytes))
             return {"text": text}
 
         except HTTPException:

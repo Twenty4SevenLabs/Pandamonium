@@ -77,6 +77,7 @@ services:
       - GOOGLE_PSE_CX=${GOOGLE_PSE_CX:-}
       - TAVILY_API_KEY=${TAVILY_API_KEY:-}
       - SERPER_API_KEY=${SERPER_API_KEY:-}
+      - FISH_AUDIO_API_KEY=${FISH_AUDIO_API_KEY:-}
       # PUID / PGID — the user/group the container drops to before
       # running uvicorn (entrypoint also chowns /app/data + /app/logs
       # to match, so bind-mounted files stay editable from the host).
@@ -87,6 +88,11 @@ services:
       # Find yours with:  id -u  /  id -g
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
+    security_opt:
+      # docker-default AppArmor profile on Proxmox LXC blocks AF_UNIX socket
+      # creation for non-root users, causing Python asyncio (uvicorn) to crash
+      # on startup with PermissionError: [Errno 13] on socketpair().
+      - apparmor:unconfined
     depends_on:
       searxng:
         condition: service_healthy

@@ -1,14 +1,35 @@
 # services/stt/stt_service.py
-"""Multi-provider Speech-to-Text service — dispatches to local Whisper, OpenAI-compatible API, or browser."""
+"""Multi-provider Speech-to-Text service — dispatches to local Whisper, OpenAI-compatible API, Fish ASR, or browser."""
 
 import io
 import logging
+import os
 import httpx
 import tempfile
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from services.tts.tts_service import FISH_API_KEY_MIN_LEN, _normalize_fish_api_key
+
 logger = logging.getLogger(__name__)
+
+FISH_ASR_URL = "https://api.fish.audio/v1/asr"
+
+
+def _fish_asr_error_message(response) -> str:
+    detail = ""
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            detail = str(body.get("message") or body.get("detail") or body.get("error") or "")
+    except Exception:
+        detail = (getattr(response, "text", None) or "")[:240]
+    status = getattr(response, "status_code", None) or 500
+    if status == 401:
+        return "Fish rejected the API key while listening. Paste the full key from fish.audio/app/api-keys."
+    if detail:
+        return f"Fish Audio ASR failed ({status}): {detail}"
+    return f"Fish Audio ASR failed ({status})"
 
 
 def _normalize_transcript(text: Optional[str]) -> Optional[str]:
@@ -26,11 +47,13 @@ class STTService:
       "disabled"        — no STT
       "browser"         — client-side Web Speech API (no server transcription)
       "local"           — faster-whisper on CPU/GPU
+      "fish"            — Fish Audio ASR (same API key as Fish TTS)
       "endpoint:<id>"   — OpenAI-compatible /audio/transcriptions via ModelEndpoint
     """
 
     def __init__(self):
         self._whisper_model = None  # lazy-init
+        self._fish_asr_unpaid = False
 
     # ── Settings ──
 
@@ -42,21 +65,46 @@ class STTService:
             "stt_provider": saved.get("stt_provider", "disabled"),
             "stt_model": saved.get("stt_model", "base"),
             "stt_language": saved.get("stt_language", ""),
+            "tts_provider": saved.get("tts_provider", "disabled"),
+            "fish_api_key": saved.get("fish_api_key", ""),
         }
+
+    def _fish_api_key(self, settings: dict | None = None) -> str:
+        saved = settings if settings is not None else self._load_settings()
+        key = _normalize_fish_api_key(str(saved.get("fish_api_key") or ""))
+        if len(key) >= FISH_API_KEY_MIN_LEN:
+            return key
+        return _normalize_fish_api_key(os.getenv("FISH_AUDIO_API_KEY") or "")
+
+    def _resolved_provider(self, settings: dict | None = None) -> str:
+        saved = settings if settings is not None else self._load_settings()
+        provider = str(saved.get("stt_provider") or "disabled")
+        enabled = saved.get("stt_enabled") is not False
+        if provider == "browser":
+            return "browser"
+        if enabled and provider not in ("disabled", "browser"):
+            return provider
+        if self._fish_api_key(saved) and (
+            saved.get("tts_provider") == "fish" or provider == "fish"
+        ):
+            return "fish"
+        if not enabled:
+            return "disabled"
+        return provider
 
     @property
     def available(self) -> bool:
         settings = self._load_settings()
-        if settings.get("stt_enabled") is False:
-            return False
-        provider = settings["stt_provider"]
+        provider = self._resolved_provider(settings)
         if provider == "disabled":
             return False
         if provider == "browser":
             return True  # handled client-side
         if provider == "local":
             return self._get_whisper() is not None
-        if provider.startswith("endpoint:"):
+        if provider == "fish":
+            return bool(self._fish_api_key(settings))
+        if isinstance(provider, str) and provider.startswith("endpoint:"):
             return True  # assume reachable
         return False
 
@@ -94,6 +142,10 @@ class STTService:
                 return None
         return self._whisper_model
 
+    def preload(self) -> None:
+        """Load Whisper at startup so the first voice turn is not a cold download."""
+        self._get_whisper()
+
     def _transcribe_local(self, audio_bytes: bytes, language: str = "") -> Optional[str]:
         model = self._get_whisper()
         if not model:
@@ -101,16 +153,42 @@ class STTService:
         tmp_path = None
         try:
             # Write to temp file (faster-whisper needs a file path or file-like)
-            with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+            suffix = ".wav" if audio_bytes[:4] == b"RIFF" else ".webm"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                 tmp.write(audio_bytes)
                 tmp_path = tmp.name
 
-            kwargs = {}
+            kwargs = {
+                "beam_size": 1,
+                "vad_filter": True,
+                "condition_on_previous_text": False,
+                "vad_parameters": {
+                    "threshold": 0.35,
+                    "min_speech_duration_ms": 250,
+                    "min_silence_duration_ms": 400,
+                    "speech_pad_ms": 200,
+                },
+            }
             if language:
                 kwargs["language"] = language
 
             segments, info = model.transcribe(tmp_path, **kwargs)
             text = " ".join(seg.text.strip() for seg in segments)
+            duration_after_vad = float(getattr(info, "duration_after_vad", 0) or 0)
+            if not text.strip():
+                if duration_after_vad < 0.25:
+                    logger.info(
+                        "Local STT skip no-VAD retry (silence) bytes=%s vad=%.2f lang=%s",
+                        len(audio_bytes),
+                        duration_after_vad,
+                        getattr(info, "language", ""),
+                    )
+                    return ""
+                kwargs["vad_filter"] = False
+                kwargs.pop("vad_parameters", None)
+                segments, info = model.transcribe(tmp_path, **kwargs)
+                text = " ".join(seg.text.strip() for seg in segments)
+                logger.info("Local STT retry without VAD: %s chars", len(text))
 
             logger.info(f"Local STT: {len(text)} chars, lang={info.language}, prob={info.language_probability:.2f}")
             return text
@@ -158,13 +236,61 @@ class STTService:
             logger.error(f"API STT transcription failed: {e}")
             return None
 
+    def _transcribe_fish(self, audio_bytes: bytes, language: str = "") -> Optional[str]:
+        api_key = self._fish_api_key()
+        if not api_key:
+            raise RuntimeError("No Fish Audio API key. Paste the key in Settings → Voice.")
+        if self._fish_asr_unpaid:
+            local = self._transcribe_local(audio_bytes, language)
+            if local:
+                return local
+            logger.warning("Fish ASR unpaid; local Whisper returned no text")
+            return ""
+        headers = {"Authorization": f"Bearer {api_key}"}
+        is_wav = audio_bytes[:4] == b"RIFF"
+        filename = "speech.wav" if is_wav else "speech.webm"
+        mime = "audio/wav" if is_wav else "audio/webm"
+        files = {"audio": (filename, io.BytesIO(audio_bytes), mime)}
+        data = {"ignore_timestamps": "true"}
+        if language:
+            data["language"] = language
+        try:
+            timeout = float(os.getenv("PANDAMONIUM_FISH_ASR_TIMEOUT", "60"))
+            response = httpx.post(
+                FISH_ASR_URL,
+                headers=headers,
+                files=files,
+                data=data,
+                timeout=timeout,
+            )
+            if response.status_code == 402:
+                self._fish_asr_unpaid = True
+                logger.warning("Fish ASR returned 402 (no API credit); trying local Whisper")
+                local = self._transcribe_local(audio_bytes, language)
+                if local:
+                    return local
+                logger.warning("Fish ASR unpaid; local Whisper returned no text")
+                return ""
+            if response.status_code >= 400:
+                raise RuntimeError(_fish_asr_error_message(response))
+            try:
+                payload = response.json()
+            except Exception:
+                payload = {}
+            text = payload.get("text", "") if isinstance(payload, dict) else ""
+            logger.info("Fish Audio ASR: %s chars", len(text or ""))
+            return text
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.error("Fish Audio ASR failed: %s", exc)
+            raise RuntimeError(f"Fish Audio ASR failed: {exc}") from exc
+
     # ── Public interface ──
 
     def transcribe(self, audio_bytes: bytes) -> Optional[str]:
         settings = self._load_settings()
-        if settings.get("stt_enabled") is False:
-            return None
-        provider = settings["stt_provider"]
+        provider = self._resolved_provider(settings)
         model = settings["stt_model"]
         language = settings.get("stt_language", "")
 
@@ -173,7 +299,9 @@ class STTService:
 
         if provider == "local":
             transcript = self._transcribe_local(audio_bytes, language)
-        elif provider.startswith("endpoint:"):
+        elif provider == "fish":
+            transcript = self._transcribe_fish(audio_bytes, language)
+        elif isinstance(provider, str) and provider.startswith("endpoint:"):
             endpoint_id = provider.split(":", 1)[1]
             transcript = self._transcribe_api(audio_bytes, endpoint_id, model, language)
         else:
@@ -183,14 +311,10 @@ class STTService:
 
     def get_stats(self) -> Dict[str, Any]:
         settings = self._load_settings()
-        provider = settings["stt_provider"]
-        stt_enabled = settings.get("stt_enabled", False)
-        # If toggle is off, report as disabled
-        effective_provider = provider if stt_enabled else "disabled"
-
+        provider = self._resolved_provider(settings)
         stats = {
-            "available": self.available and stt_enabled,
-            "provider": effective_provider,
+            "available": self.available,
+            "provider": provider,
             "model": settings["stt_model"],
             "language": settings.get("stt_language", ""),
         }
@@ -200,7 +324,9 @@ class STTService:
             stats["model_loaded"] = whisper is not None
         elif provider == "browser":
             stats["model"] = "Browser (Web Speech API)"
-        elif provider.startswith("endpoint:"):
+        elif provider == "fish":
+            stats["model"] = "Fish Audio ASR"
+        elif isinstance(provider, str) and provider.startswith("endpoint:"):
             stats["endpoint_id"] = provider.split(":", 1)[1]
 
         return stats

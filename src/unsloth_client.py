@@ -243,9 +243,81 @@ def _configured_unsloth_bases() -> List[str]:
     out = []
     for raw in urls:
         norm = normalize_openai_base(raw).lower()
-        if norm and norm not in out:
-            out.append(norm)
+        if not norm or norm in out:
+            continue
+        try:
+            port = urlparse(norm).port
+        except Exception:
+            port = None
+        if port == 1234:
+            continue
+        out.append(norm)
     return out
+
+
+def _unsloth_label_for_host(host: str) -> str:
+    host = (host or "").lower().rstrip(".")
+    if host in _M1_HOSTS:
+        return "Unsloth Studio (M1)"
+    if host in _M2_HOSTS:
+        return "Unsloth Studio (M2)"
+    if host in _A1_HOSTS:
+        return "Unsloth Studio (A1)"
+    if host in _IMAC_HOSTS:
+        return "Unsloth Studio (iMac)"
+    if host in _MINI_HOSTS:
+        return "Unsloth Studio (Mac mini)"
+    if host in _LAPTOP_HOSTS:
+        return "Unsloth Studio (247Laptop)"
+    return f"Unsloth Studio ({host or 'node'})"
+
+
+def unsloth_endpoint_id(base_url: str) -> str:
+    parsed = urlparse(normalize_openai_base(base_url))
+    host = (parsed.hostname or "host").replace(".", "-")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return f"unsloth-{host}-{port}"[:64]
+
+
+def unsloth_studio_targets() -> List[Dict[str, str]]:
+    """Docker-reachable Unsloth Studio /v1 URLs to register as Added Models."""
+    seen: List[str] = []
+    targets: List[Dict[str, str]] = []
+
+    def _add(raw: str) -> None:
+        rewritten = rewrite_unsloth_url(raw.strip())
+        norm = normalize_openai_base(rewritten)
+        if not norm:
+            return
+        parsed = urlparse(norm if "://" in norm else f"http://{norm}")
+        port = parsed.port
+        if port == 1234:
+            return
+        if port is not None and port not in _UNSLOTH_PORTS:
+            return
+        key = norm.lower()
+        if key in seen:
+            return
+        seen.append(key)
+        host = (parsed.hostname or "").lower()
+        targets.append(
+            {
+                "id": unsloth_endpoint_id(norm),
+                "name": _unsloth_label_for_host(host),
+                "base_url": norm,
+            }
+        )
+
+    for base in _configured_unsloth_bases():
+        _add(base)
+    known = (
+        _M1_HOSTS | _M2_HOSTS | _A1_HOSTS | _IMAC_HOSTS | _MINI_HOSTS | _LAPTOP_HOSTS
+    )
+    for host in os.getenv("LLM_HOSTS", "").split(","):
+        host = host.strip()
+        if host and host.lower() in known:
+            _add(f"http://{host}:8888/v1")
+    return targets
 
 
 def is_unsloth_endpoint(base_url: str) -> bool:
@@ -355,6 +427,50 @@ def _is_downloaded_record(item: Any) -> bool:
     return True
 
 
+def _looks_like_filesystem_path(model_id: str) -> bool:
+    n = (model_id or "").strip().replace("\\", "/")
+    if not n:
+        return False
+    if n.startswith("/"):
+        return True
+    if len(n) >= 3 and n[1] == ":" and n[2] == "/":
+        return True
+    return n.startswith("//")
+
+
+def _local_fs_path(item: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(item, dict):
+        return None
+    for key in ("path", "id"):
+        val = item.get(key)
+        if isinstance(val, str) and _looks_like_filesystem_path(val):
+            return val.strip()
+    return None
+
+
+def _picker_id_from_local_record(item: Any) -> Optional[str]:
+    """Hub-style or display id for the model picker — never a raw folder path."""
+    if isinstance(item, str) and item.strip():
+        raw = item.strip()
+        if _looks_like_filesystem_path(raw):
+            return raw.rsplit("/", 1)[-1] or raw
+        return raw
+    if not isinstance(item, dict):
+        return None
+    mid = item.get("id") or item.get("model_id") or item.get("repo_id")
+    hub = item.get("model_id") or item.get("repo_id")
+    display = item.get("display_name")
+    if isinstance(mid, str) and _looks_like_filesystem_path(mid):
+        if isinstance(hub, str) and hub.strip() and not _looks_like_filesystem_path(hub):
+            return hub.strip()
+        if isinstance(display, str) and display.strip():
+            return display.strip()
+        return mid.replace("\\", "/").rsplit("/", 1)[-1] or mid
+    if isinstance(mid, str) and mid.strip():
+        return mid.strip()
+    return None
+
+
 def _extract_downloaded_local_ids(payload: Any) -> List[str]:
     """IDs from ``/api/models/local`` that are fully present on disk."""
     if not isinstance(payload, dict):
@@ -366,14 +482,9 @@ def _extract_downloaded_local_ids(payload: Any) -> List[str]:
     for item in items:
         if not _is_downloaded_record(item):
             continue
-        if isinstance(item, str) and item:
-            out.append(item)
-            continue
-        if not isinstance(item, dict):
-            continue
-        mid = item.get("id") or item.get("model_id") or item.get("repo_id")
-        if isinstance(mid, str) and mid:
-            out.append(mid)
+        picker = _picker_id_from_local_record(item)
+        if picker and picker not in out:
+            out.append(picker)
     return out
 
 
@@ -510,20 +621,44 @@ def get_inference_status(openai_base: str, api_key: Optional[str] = None) -> Dic
     return data if isinstance(data, dict) else {}
 
 
+def _normalize_model_ref(model_id: str) -> str:
+    return (model_id or "").strip().replace("\\", "/").rstrip("/").lower()
+
+
+def _model_repo_ref(model_id: str) -> str:
+    """Repo/folder identity with GGUF quant stripped and paths normalized."""
+    repo, _quant = parse_unsloth_model_id(_normalize_model_ref(model_id))
+    return repo.replace("\\", "/").rstrip("/")
+
+
 def _active_model_matches(status: Dict[str, Any], model_id: str) -> bool:
+    """True when Studio's active_model is the same GGUF/MLX the picker requested.
+
+    Unsloth status often reports an LM Studio folder
+    (``/Users/…/lmstudio-community/Qwen3.8-27B-MLX-4bit``) while ``/v1/models``
+    lists the short id ``Qwen3.8-27B-MLX-4bit``. Treat path suffixes and final
+    path segments as the same model so we do not POST ``/api/inference/load``
+    (which Studio then resolves as a missing Hugging Face ``unsloth/…`` repo).
+    """
     active = (status.get("active_model") or "").strip()
-    if not active:
+    requested = (model_id or "").strip()
+    if not active or not requested:
         return False
-    requested = model_id.strip()
-    if active.lower() == requested.lower():
+    if _normalize_model_ref(active) == _normalize_model_ref(requested):
         return True
-    req_repo, req_quant = parse_unsloth_model_id(requested)
-    act_repo, act_quant = parse_unsloth_model_id(active)
-    if req_repo.lower() != act_repo.lower():
+    _, req_quant = parse_unsloth_model_id(requested)
+    _, act_quant = parse_unsloth_model_id(active)
+    if req_quant and act_quant and req_quant.lower() != act_quant.lower():
         return False
-    if req_quant and act_quant:
-        return req_quant.lower() == act_quant.lower()
-    return True
+    act_repo = _model_repo_ref(active)
+    req_repo = _model_repo_ref(requested)
+    if not act_repo or not req_repo:
+        return False
+    if act_repo == req_repo:
+        return True
+    if act_repo.endswith("/" + req_repo) or req_repo.endswith("/" + act_repo):
+        return True
+    return act_repo.rsplit("/", 1)[-1] == req_repo.rsplit("/", 1)[-1]
 
 
 def _wait_for_active_model(
@@ -561,6 +696,90 @@ def _wait_for_active_model(
     return _active_model_matches(get_inference_status(openai_base, api_key), model_id)
 
 
+def _record_aliases(item: Dict[str, Any]) -> List[str]:
+    out: List[str] = []
+    for key in ("id", "path", "model_id", "repo_id", "display_name"):
+        val = item.get(key)
+        if isinstance(val, str) and val.strip() and val.strip() not in out:
+            out.append(val.strip())
+    return out
+
+
+def _prefer_lmstudio_filesystem(item: Dict[str, Any], requested: str) -> bool:
+    """True when POST /api/inference/load must use a local folder, not a hub id.
+
+    Short /v1 ids and LM Studio records must not be sent as Hugging Face
+    ``unsloth/<leaf>`` — that repo often does not exist (401/500).
+    Hub GGUF ids (``unsloth/foo-GGUF:QUANT``) stay hub ids.
+    """
+    fs = _local_fs_path(item)
+    if not fs:
+        return False
+    source = str(item.get("source") or "").lower()
+    if source == "lmstudio":
+        return True
+    if "/.lmstudio/" in fs.replace("\\", "/").lower():
+        return True
+    req = (requested or "").strip().replace("\\", "/")
+    return "/" not in req and ":" not in req
+
+
+def _resolve_load_id_from_catalog(payload: Any, model_id: str) -> Optional[str]:
+    """Return a local filesystem path when the catalog has a matching LM Studio folder."""
+    requested = (model_id or "").strip()
+    if not requested:
+        return None
+    if _looks_like_filesystem_path(requested):
+        return requested
+    req_repo, _req_quant = parse_unsloth_model_id(requested)
+    items = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, dict) or not _is_downloaded_record(item):
+            continue
+        aliases = _record_aliases(item)
+        if not aliases:
+            continue
+        matched = requested in aliases or req_repo in aliases
+        if not matched:
+            matched = any(
+                _active_model_matches({"active_model": alias}, requested)
+                for alias in aliases
+            )
+        if not matched:
+            continue
+        if _prefer_lmstudio_filesystem(item, requested):
+            fs = _local_fs_path(item)
+            if fs:
+                return fs
+    return None
+
+
+def resolve_studio_load_id(
+    openai_base: str,
+    model_id: str,
+    api_key: Optional[str] = None,
+) -> str:
+    """Map a picker / session id to the Studio load path when a local folder exists."""
+    requested = (model_id or "").strip()
+    if not requested or _looks_like_filesystem_path(requested):
+        return requested
+    try:
+        key = resolve_unsloth_api_key(api_key, openai_base)
+        root = studio_api_root(rewrite_unsloth_url(openai_base))
+        budget = float(os.getenv("UNSLOTH_DISCOVERY_TIMEOUT_SEC", "15"))
+        data = _get_json(f"{root}/api/models/local", key, timeout=budget)
+    except Exception as exc:
+        logger.debug("Unsloth local catalog for load resolve failed: %s", exc)
+        return requested
+    resolved = _resolve_load_id_from_catalog(data, requested)
+    if resolved and resolved != requested:
+        logger.info("Unsloth load id %s resolved to local path %s", requested, resolved)
+        return resolved
+    return requested
+
+
 def load_model(
     openai_base: str,
     model_id: str,
@@ -570,7 +789,8 @@ def load_model(
 ) -> Dict[str, Any]:
     key = resolve_unsloth_api_key(api_key, openai_base)
     root = studio_api_root(rewrite_unsloth_url(openai_base))
-    model_path, gguf_variant = parse_unsloth_model_id(model_id)
+    resolved = resolve_studio_load_id(openai_base, model_id, api_key)
+    model_path, gguf_variant = parse_unsloth_model_id(resolved)
     payload: Dict[str, Any] = {"model_path": model_path}
     if gguf_variant:
         payload["gguf_variant"] = gguf_variant
@@ -618,6 +838,13 @@ def ensure_model_loaded(
     if not is_unsloth_endpoint(openai_base):
         return True
     if not model_id:
+        return False
+    mid = model_id.lower()
+    if any(marker in mid for marker in (
+        "flux", "stable-diffusion", "sdxl", "sd3", "dall-e", "gpt-image", "hidream",
+        "chatterbox", "kokoro",
+    )):
+        logger.warning("Refusing to load non-chat model %s on Unsloth chat runtime", model_id)
         return False
     try:
         return _ensure_model_loaded_inner(openai_base, model_id, api_key)

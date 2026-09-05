@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 _NON_CHAT_MODEL = (
     "text-embedding", "embedding", "tts-", "whisper", "dall-e",
     "moderation", "rerank", "reranker", "clip", "stable-diffusion",
+    "flux", "sdxl", "sd3", "gpt-image", "hidream",
+    "chatterbox", "kokoro",
 )
 
 

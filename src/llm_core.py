@@ -2147,8 +2147,13 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     f"Unsloth Studio could not load model '{model}'. "
                     "Check that the model is downloaded in Studio."
                 )
-    except RuntimeError:
-        raise
+    except RuntimeError as exc:
+        # FastAPI StreamingResponse turns an uncaught generator exception
+        # into HTTP 500. Yield an SSE error instead so the chat UI shows
+        # the Unsloth message rather than a generic "Error 500".
+        msg = str(exc)
+        yield f'event: error\ndata: {json.dumps({"error": msg, "text": msg, "status": 502})}\n\n'
+        return
     except Exception as exc:
         logger.warning("Unsloth pre-load skipped: %s", exc)
     target_url = _stream_target_url(url)

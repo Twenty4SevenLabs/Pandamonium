@@ -2327,7 +2327,7 @@ async function _openResultInChat(entry) {
       // and an endpoint may list one first (e.g. text-embedding-ada-002).
       const _isChatModel = (m) => {
         const l = (m || '').toLowerCase();
-        return !!l && !['text-embedding', 'embedding', 'tts-', 'whisper', 'text-moderation', 'moderation-', 'dall-e', 'rerank'].some(p => l.includes(p));
+        return !!l && !['text-embedding', 'embedding', 'tts-', 'whisper', 'text-moderation', 'moderation-', 'dall-e', 'rerank', 'chatterbox', 'kokoro'].some(p => l.includes(p));
       };
       const online = items.find(it => !it.offline && (it.models || []).some(_isChatModel))
         || items.find(it => !it.offline && (it.models || []).length);

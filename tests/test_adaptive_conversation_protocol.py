@@ -27,3 +27,13 @@ def test_conversation_is_adaptive_without_a_user_mode_switch():
     assert "fd.append('mode', 'adaptive')" in chat_js
     assert "initModeToggle" not in app_js
     assert "set_mode agent/chat" not in agent_loop
+
+
+def test_direct_low_signal_failure_does_not_fake_a_hey_reply():
+    """Load/stream failure on a greeting must surface as an error, not 'Hey.'"""
+    agent_loop = (ROOT / "src" / "agent_loop.py").read_text(encoding="utf-8")
+    assert 'fallback = "Hey."' not in agent_loop
+    marker = "direct low-signal path failed"
+    assert marker in agent_loop
+    failed_block = agent_loop.split(marker, 1)[1][:800]
+    assert "event: error" in failed_block

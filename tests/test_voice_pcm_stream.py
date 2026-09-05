@@ -83,6 +83,20 @@ def test_speech_text_skips_display_markup_urls_and_opaque_ids():
     assert speech_text(display) == "Plugins MAD MCP Portal Docs"
 
 
+def test_speech_text_expands_clock_times_for_tts():
+    assert speech_text("It's 2:51 AM on Saturday, September 5, 2026 (America/Chicago).") == (
+        "It's two fifty-one AM on Saturday, September 5, 2026 (America/Chicago)."
+    )
+    assert speech_text("It's 2.51 AM") == "It's two fifty-one AM"
+    assert speech_text("Meet at 14:30.") == "Meet at two thirty PM."
+    assert speech_text("Call at 2:00 PM.") == "Call at two o'clock PM."
+    assert speech_text("Alarm at 9:05 a.m.") == "Alarm at nine oh five AM."
+    assert speech_text("Noon is 12:00 PM.") == "Noon is twelve o'clock PM."
+    assert speech_text("Midnight is 00:15.") == "Midnight is twelve fifteen AM."
+    assert speech_text("UTC-05:00 stays an offset.") == "UTC-05:00 stays an offset."
+    assert speech_text("https://example.com:443/setup") == ""
+
+
 def test_speech_turn_exposes_finished_sentences_before_completion():
     async def exercise():
         turn = voice_routes._SpeechTurn("session", "turn")
@@ -242,3 +256,27 @@ def test_tts_routes_send_only_clean_spoken_text_to_the_provider():
 
     assert response.status_code == 200
     assert tts.text == "Portal"
+
+
+def test_tts_routes_expand_clock_times_sent_to_the_provider():
+    class FakeTTS:
+        available = True
+
+        def __init__(self):
+            self.text = ""
+
+        def synthesize(self, text, **_kwargs):
+            self.text = text
+            return b"ID3audio"
+
+    tts = FakeTTS()
+    app = FastAPI()
+    app.include_router(tts_routes.setup_tts_routes(tts))
+
+    response = TestClient(app).post(
+        "/api/tts/synthesize",
+        json={"text": "It's 2:51 AM on Saturday."},
+    )
+
+    assert response.status_code == 200
+    assert tts.text == "It's two fifty-one AM on Saturday."

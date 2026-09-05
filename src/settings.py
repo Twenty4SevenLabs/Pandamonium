@@ -68,6 +68,7 @@ DEFAULT_SETTINGS = {
         "Friday": "friday_chatterbox",
     },
     "tts_speed": "1",
+    "fish_api_key": "",
     "stt_enabled": False,
     "stt_provider": "disabled",
     "stt_model": "base",
