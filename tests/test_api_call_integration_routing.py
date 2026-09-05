@@ -45,7 +45,7 @@ def _schema_names_sent(tools):
         REPRO,
         "check my home assistant lights",
         "fetch the latest unread from miniflux via the api_call tool",
-        "call my gitea integration to list repos",
+        "call my gitlab integration to list repos",
     ],
 )
 def test_integration_prompts_are_not_low_signal(prompt):

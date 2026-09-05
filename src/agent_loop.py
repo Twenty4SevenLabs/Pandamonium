@@ -354,7 +354,7 @@ _DOMAIN_RULES = {
 - Lead with connected MCP providers, installed extensions/plugins, and configured API integrations. Summarize capability names into useful groups. Keep core workspace functions separate and expand them only when asked.
 - Preserve the inventory's status exactly. A configured or enabled integration is unverified until a live operation succeeds; never describe inventory presence alone as confirmed access or reachability.
 - Report MAD MCP Portal or ORACLE only when the inventory says they are present; never infer availability from documentation.
-- To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
+- To query or control a configured service integration (Home Assistant, Miniflux, GitLab, Linkding, Jellyfin, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
 }
 
@@ -1178,7 +1178,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     # "integrations" domain seeds api_call deterministically (see
     # _DOMAIN_TOOL_MAP), independent of embedding retrieval.
     if has(r"\bapi[ _]call\b", r"\bintegrations?\b",
-           r"\b(?:home ?assistant|miniflux|gitea|linkding|jellyfin)\b"):
+           r"\b(?:home ?assistant|miniflux|gitlab|linkding|jellyfin)\b"):
         domains.add("integrations")
     if (
         has(r"\b(?:tools?|integrations?|plugins?|capabilities)\b")
@@ -2901,14 +2901,37 @@ async def stream_agent_loop(
                     yield chunk
         except Exception as _direct_err:
             logger.warning("[agent] direct low-signal path failed: %s", _direct_err)
-            fallback = "Hey."
-            direct_response += fallback
-            yield f"data: {json.dumps({'delta': fallback})}\n\n"
+            yield f'event: error\ndata: {json.dumps({"error": str(_direct_err), "status": 502})}\n\n'
+            record_operational_event(
+                request_id=_action_request_id,
+                session_id=session_id,
+                operator_id=operator_identity(owner),
+                actor=f"engine:{direct_actual_model}",
+                component="engine",
+                event_type="response",
+                status="failed",
+                duration=time.monotonic() - _request_trace_started,
+                error=_direct_err,
+            )
+            yield "data: [DONE]\n\n"
+            return
 
         if not direct_response.strip():
-            fallback = "Hey."
-            direct_response = fallback
-            yield f"data: {json.dumps({'delta': fallback})}\n\n"
+            empty_err = "Model returned no text"
+            yield f'event: error\ndata: {json.dumps({"error": empty_err, "status": 502})}\n\n'
+            record_operational_event(
+                request_id=_action_request_id,
+                session_id=session_id,
+                operator_id=operator_identity(owner),
+                actor=f"engine:{direct_actual_model}",
+                component="engine",
+                event_type="response",
+                status="failed",
+                duration=time.monotonic() - _request_trace_started,
+                error=empty_err,
+            )
+            yield "data: [DONE]\n\n"
+            return
 
         duration = time.time() - direct_start
         metrics = {

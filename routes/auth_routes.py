@@ -864,7 +864,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         # Fall back to detecting from name if preset is missing.
         health_paths = {
             "miniflux": "/v1/me",
-            "gitea": "/api/v1/version",
+            "gitlab": "/api/v1/version",
             "linkding": "/api/tags/",
             "homeassistant": "/api/",
             "home assistant": "/api/",

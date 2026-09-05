@@ -53,7 +53,7 @@ ASSISTANT_ALWAYS_AVAILABLE = frozenset({
     "manage_memory", "web_search", "read_file",
     "create_document", "update_document",
     "resolve_contact", "search_chats",
-    "api_call",  # For Miniflux/Gitea/Linkding/etc. integrations
+    "api_call",  # For Miniflux/GitLab/Linkding/etc. integrations
     # Core UI control (toggles, open panels, switch model/mode, themes).
     # Always available so vague follow-ups ("now make it playful", "make it
     # darker") that don't repeat a theme/UI keyword still keep the tool in
@@ -94,7 +94,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "manage_endpoints": "Endpoint management: list, add, delete, enable, or disable model API endpoints.",
     "manage_mcp": "MCP server management: list, add, delete, reconnect servers, or list available tools.",
     "manage_webhooks": "Webhook management: list, add, delete, enable, or disable webhooks.",
-    "api_call": "Call a configured API integration by name (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, RSS reader, git forge, bookmark manager, smart home, or any other registered service). Make a GET/POST/PUT/PATCH/DELETE request to the integration's endpoint path, with an optional JSON body. Use whenever the user asks to query or control one of their connected integrations/services.",
+    "api_call": "Call a configured API integration by name (Home Assistant, Miniflux, GitLab, Linkding, Jellyfin, RSS reader, git forge, bookmark manager, smart home, or any other registered service). Make a GET/POST/PUT/PATCH/DELETE request to the integration's endpoint path, with an optional JSON body. Use whenever the user asks to query or control one of their connected integrations/services.",
     "manage_tokens": "API token management: list, create, or delete API access tokens.",
     "manage_documents": "List, read, delete, or tidy documents in the editor panel. action='list' returns clickable rows (most-recent first) so the user can open any doc by clicking. action='read' (aka view/open/get) with document_id returns the content; supports offset=<N> + limit=<N> to page through large docs (response includes next_offset when more remains, so you can keep calling with offset=next_offset). action='delete' with document_id removes a doc (only way to delete). Use this for ANY 'show/read/list/open my documents/docs/files/notes' request — never shell or curl.",
     "manage_books": "Read the authenticated owner's private Books library. action=list returns book title, filename, pages, indexing status, chunk count, and OCR/needs-attention state. action=search semantically searches full indexed book text and returns source title, page, chunk, and excerpt. Use for any 'my Books library', OCR/status, or book-content question. Never use grep, shell, filesystem paths, or manage_documents for Books.",
@@ -435,7 +435,7 @@ class ToolIndex:
         # keyword-fallback paths (not just the deterministic domain seed) when a
         # user names a connected service.
         frozenset({"api_call", "api call", "integration", "integrations",
-                   "home assistant", "homeassistant", "miniflux", "gitea",
+                   "home assistant", "homeassistant", "miniflux", "gitlab",
                    "linkding", "jellyfin"}):
             {"api_call"},
         # Managing EXISTING research in the Library — open/read/find/delete.

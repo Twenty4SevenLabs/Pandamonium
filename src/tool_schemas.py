@@ -664,7 +664,7 @@ FUNCTION_TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "integration": {"type": "string", "description": "Integration name or ID (e.g. 'Miniflux', 'Gitea')"},
+                    "integration": {"type": "string", "description": "Integration name or ID (e.g. 'Miniflux', 'GitLab')"},
                     "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "description": "HTTP method"},
                     "path": {"type": "string", "description": "API endpoint path (e.g. '/v1/entries?status=unread&limit=20')"},
                     "body": {"type": "object", "description": "JSON request body (for POST/PUT/PATCH)"}

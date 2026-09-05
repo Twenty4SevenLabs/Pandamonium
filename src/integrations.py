@@ -44,21 +44,21 @@ INTEGRATION_PRESETS: Dict[str, Dict[str, Any]] = {
             "  PUT /v1/entries/{id}/bookmark — toggle bookmark"
         ),
     },
-    "gitea": {
-        "name": "Gitea",
+    "gitlab": {
+        "name": "GitLab",
         "auth_type": "header",
-        "auth_header": "Authorization",
+        "auth_header": "PRIVATE-TOKEN",
         "description": (
-            "Gitea git forge API (v1). Auth header value format: 'token YOUR_TOKEN'. Key endpoints:\n"
-            "  GET /api/v1/repos/search — search repositories\n"
-            "  GET /api/v1/repos/{owner}/{repo} — get repo details\n"
-            "  GET /api/v1/repos/{owner}/{repo}/issues — list issues\n"
-            "  POST /api/v1/repos/{owner}/{repo}/issues — create issue {\"title\": \"...\"}\n"
-            "  GET /api/v1/repos/{owner}/{repo}/pulls — list pull requests\n"
-            "  GET /api/v1/repos/{owner}/{repo}/commits — list commits\n"
-            "  GET /api/v1/user/repos — list your repos\n"
-            "  GET /api/v1/orgs — list organizations\n"
-            "  GET /api/v1/repos/{owner}/{repo}/contents/{filepath} — get file content"
+            "GitLab API (v4). Auth header: PRIVATE-TOKEN YOUR_TOKEN. Key endpoints:\n"
+            "  GET /api/v4/projects — list/search projects\n"
+            "  GET /api/v4/projects/:id — get project\n"
+            "  GET /api/v4/projects/:id/issues — list issues\n"
+            "  POST /api/v4/projects/:id/issues — create issue\n"
+            "  GET /api/v4/projects/:id/merge_requests — list merge requests\n"
+            "  POST /api/v4/projects/:id/merge_requests — create merge request\n"
+            "  GET /api/v4/projects/:id/repository/commits — list commits\n"
+            "  GET /api/v4/groups — list groups\n"
+            "  GET /api/v4/projects/:id/repository/files/:file_path — get file"
         ),
     },
     "linkding": {
@@ -382,7 +382,7 @@ async def execute_api_call(
     preset = (integration.get("preset") or integration.get("name", "")).lower()
     strip_suffixes = {
         "miniflux": ["/v1"],
-        "gitea": ["/api/v1", "/api"],
+        "gitlab": ["/api/v4", "/api"],
         "linkding": ["/api"],
         "homeassistant": ["/api"],
     }
@@ -435,7 +435,7 @@ async def execute_api_call(
             header_defaults = {
                 "miniflux": "X-Auth-Token",
                 "linkding": "Authorization",
-                "gitea": "Authorization",
+                "gitlab": "PRIVATE-TOKEN",
             }
             header_name = header_defaults.get(preset, "Authorization")
         headers[header_name] = api_key
