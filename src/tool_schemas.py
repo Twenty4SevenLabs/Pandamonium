@@ -103,6 +103,30 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "hermes_agent",
+            "description": "Gateway-level Hermes agent messaging on vm-hermes. List specialist profiles (hermes-bert, hermes-amy, …), send one-shot chat to a profile (`HERMES_PROFILE` + `hermes chat`), or deliver to external channels via `hermes send`. Prefer hermes-messaging MCP (conversations_list, messages_send) when connected for platform threads; use this tool for direct specialist profile chat or when MCP is down.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["profiles_list", "gateway_list", "send_targets", "message", "send", "raw"],
+                        "description": "profiles_list/gateway_list/send_targets are read-only discovery; message targets a Hermes profile slug; send targets telegram/discord/slack via hermes send",
+                    },
+                    "profile": {"type": "string", "description": "Hermes profile slug for message (e.g. hermes-bert, hermes-amy, default)"},
+                    "message": {"type": "string", "description": "Text for message or send"},
+                    "target": {"type": "string", "description": "Platform target for send (e.g. telegram:Jason, discord:#general)"},
+                    "platform": {"type": "string", "description": "Optional platform filter for send_targets"},
+                    "command": {"type": "string", "description": "Full remote shell command when action=raw"},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "python",
             "description": "Execute Python code to compute a result or test something. Prefer a dedicated tool whenever one fits the job (reading, writing, or searching files); use python only for computation, data processing, or scripting no dedicated tool covers.",
             "parameters": {
@@ -1498,6 +1522,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     elif tool_type == "hermes_ssh":
         content = args.get("command", "")
     elif tool_type == "hermes_kanban":
+        content = json.dumps(args) if args else "{}"
+    elif tool_type == "hermes_agent":
         content = json.dumps(args) if args else "{}"
     elif tool_type == "python":
         content = args.get("code", "")

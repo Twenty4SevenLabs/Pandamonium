@@ -371,7 +371,8 @@ _DOMAIN_RULES = {
 ## Hermes / Kanban (vm-hermes)
 - **Pandamonium (Panda)** manages the Kanban board slug `pandamonium`. You issue cards; Hermes specialists execute cards assigned to their profile. **Morpheus (`default`)** still decomposes parent cards only.
 - vm-hermes (`192.168.1.192`, user `openclaw1`) is fully reachable via `hermes_ssh`, `hermes_kanban`, and Hermes MCP. Never claim SSH or Hermes CLI is unavailable.
-- **Three control paths** (use in this order): (1) Hermes MCP `kanban_*` when connected; (2) native `hermes_kanban` for CLI ops MCP lacks (archive, dispatch, promote) or when MCP is down — default board `pandamonium`, title is **positional** (never `--title`); (3) `hermes_ssh` for gateway, profiles, sudo, and other VM admin.
+- **Four control paths** (use in this order): (1) Hermes MCP `kanban_*` when connected; (2) Hermes messaging MCP (`conversations_list`, `messages_send`, `channels_list`) for platform threads; (3) native `hermes_kanban` / `hermes_agent` for CLI gaps (archive, dispatch, one-shot profile chat) or when MCP is down — default board `pandamonium`, title is **positional** (never `--title`); (4) `hermes_ssh` for gateway, profiles, sudo, and other VM admin.
+- Use `hermes_agent` action=profiles_list then action=message with profile=`hermes-bert` (etc.) to chat with specialist agents at the gateway. Use `hermes_agent` action=send_targets then action=send for Telegram/Discord delivery.
 - MCP kanban tools accept an explicit `board` arg — they do **not** inherit a prior `hermes kanban boards switch` from a separate SSH call.
 - `hermes_ssh` auto-sets `HERMES_KANBAN_BOARD=pandamonium` and fixes common `create --title` mistakes.
 - Examples: `hermes_kanban` action=archive task_ids=[t_abc]; `hermes kanban list --status ready`; `hermes gateway restart`.
@@ -403,7 +404,7 @@ _DOMAIN_TOOL_MAP = {
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"manage_mcp", "api_call"},
-    "hermes": {"hermes_ssh", "hermes_kanban", "bash"},
+    "hermes": {"hermes_ssh", "hermes_kanban", "hermes_agent", "bash"},
     "workers": {"get_runtime_status", "start_agent_task", "read_agent_task"},
     "platform": {"get_runtime_status", "manage_mcp", "start_agent_task", "read_agent_task"},
 }
@@ -448,6 +449,15 @@ NEVER pipe multi-line Python through `python -c "..."` — shell quoting eats re
 {"action": "create", "title": "My task", "body": "Details", "assignee": "default", "created_by": "pandamonium"}
 ```
 Structured Hermes Kanban CLI on vm-hermes (default board `pandamonium`). Title is positional — never `--title`. Actions: list, show, create, complete, archive, comment, block, boards_list, dispatch, raw. Prefer Hermes MCP `kanban_*` when connected; use this for archive/dispatch or MCP gaps.""",
+
+    "hermes_agent": """\
+```hermes_agent
+{"action": "profiles_list"}
+```
+```hermes_agent
+{"action": "message", "profile": "hermes-bert", "message": "Status on card t_abc?"}
+```
+Gateway agent messaging on vm-hermes. `profiles_list` → all Hermes profiles; `message` → one-shot chat with a specialist profile; `send_targets` + `send` → Telegram/Discord via `hermes send`. Prefer hermes-messaging MCP when connected.""",
 
     "python": """\
 ```python
@@ -3252,7 +3262,7 @@ async def stream_agent_loop(
         if "ui" in (_intent.get("domains") or set()):
             _relevant_tools.add("ui_control")
         if "hermes" in (_intent.get("domains") or set()):
-            _relevant_tools.update({"hermes_ssh", "hermes_kanban", "bash"})
+            _relevant_tools.update({"hermes_ssh", "hermes_kanban", "hermes_agent", "bash"})
 
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.

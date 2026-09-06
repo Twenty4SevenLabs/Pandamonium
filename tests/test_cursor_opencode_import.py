@@ -83,7 +83,8 @@ class CursorOpenCodeImportTests(unittest.TestCase):
         self.assertEqual(messaging["command"], "ssh")
         self.assertIn("/app/.ssh/id_ed25519", args)
         remote = args[-1]
-        self.assertIn("hermes mcp serve", remote)
+        self.assertIn("hermes mcp serve --accept-hooks", remote)
+        self.assertIn("HERMES_REDACT_SECRETS=true", remote)
         self.assertNotIn("hermes_tools_mcp_server", remote)
 
     def test_stdio_secret_placeholders_are_env_refs(self):

@@ -1133,7 +1133,10 @@ async def _startup_event():
     logger.info("Application starting up...")
     try:
         from src.ssh_cookbook import ensure_ssh_cookbook
+        from src.hermes_mcp_sync import sync_hermes_mcp_servers
+
         ensure_ssh_cookbook()
+        sync_hermes_mcp_servers()
     except Exception as exc:
         logger.warning("SSH cookbook setup failed (non-critical): %s", exc)
     webhook_manager.set_loop(asyncio.get_running_loop())

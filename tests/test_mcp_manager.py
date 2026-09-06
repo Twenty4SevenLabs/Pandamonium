@@ -161,6 +161,16 @@ def test_hermes_mcp_connection_error_includes_ssh_hint():
     assert "hermes_tools_mcp_server" in msg
 
 
+def test_hermes_messaging_mcp_connection_error_mentions_serve():
+    msg = _format_mcp_connection_error(
+        "hermes-messaging",
+        "ssh",
+        ["-T", "bash", "-lc", "hermes mcp serve --accept-hooks"],
+        RuntimeError("Connection closed"),
+    )
+    assert "hermes mcp serve --accept-hooks" in msg
+
+
 def test_ensure_connected_returns_tools_when_session_live():
     mgr = McpManager()
     mgr._connections["srv1"] = {"status": "connected", "name": "hermes"}

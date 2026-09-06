@@ -160,13 +160,27 @@ def _format_mcp_connection_error(name: str, command: str = "", args: Optional[Li
             "(Aikido Settings → Integrations → MCP Server). Browser sign-in cannot run inside Docker."
         )
 
-    if command == "ssh" or "hermes mcp serve" in lower_command or "hermes_tools_mcp_server" in lower_command:
+    if "hermes_tools_mcp_server" in lower_command:
         return (
             f"{raw_error}\n\n"
-            "Hermes MCP is reached over SSH to 192.168.1.192 using "
-            "/app/.ssh/id_ed25519. Confirm that key is authorized as openclaw1 "
-            "and that the remote command is hermes_tools_mcp_server (kanban tools), "
-            "not hermes mcp serve (messaging)."
+            "Hermes Kanban MCP is reached over SSH to 192.168.1.192 using "
+            "/app/.ssh/id_ed25519 (non-interactive: ssh -T). Confirm the cookbook "
+            "key is authorized as openclaw1 and the remote command is "
+            "agent.transports.hermes_tools_mcp_server."
+        )
+    if command == "ssh" and "hermes mcp serve" in lower_command:
+        return (
+            f"{raw_error}\n\n"
+            "Hermes messaging MCP is reached over SSH to 192.168.1.192 using "
+            "/app/.ssh/id_ed25519 with `hermes mcp serve --accept-hooks`. Confirm "
+            "the cookbook key is authorized as openclaw1 and the gateway service is "
+            "running (`hermes gateway status` on vm-hermes)."
+        )
+    if command == "ssh":
+        return (
+            f"{raw_error}\n\n"
+            "SSH MCP transport failed for 192.168.1.192. Confirm /app/.ssh/id_ed25519 "
+            "is authorized as openclaw1 and known_hosts is populated."
         )
 
     return raw_error

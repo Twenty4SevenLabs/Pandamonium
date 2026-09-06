@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 from .subprocess_tools import BashTool, PythonTool, HermesSshTool
 from .hermes_kanban_tool import HermesKanbanTool
+from .hermes_agent_tool import HermesAgentTool
 from .web_tools import WebSearchTool, WebFetchTool
 from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
@@ -40,6 +41,7 @@ TOOL_HANDLERS = {
     "python": PythonTool().execute,
     "hermes_ssh": HermesSshTool().execute,
     "hermes_kanban": HermesKanbanTool().execute,
+    "hermes_agent": HermesAgentTool().execute,
     "web_search": WebSearchTool().execute,
     "web_fetch": WebFetchTool().execute,
     "read_file": ReadFileTool().execute,

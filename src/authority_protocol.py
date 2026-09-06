@@ -90,7 +90,7 @@ _DEFAULT_EFFECT_BY_CAPABILITY = {
             "update_plan", "ask_user", "trigger_research", "start_agent_task", "manage_bg_jobs",
             "bash", "python", "download_model", "serve_model", "serve_preset", "adopt_served_model",
             "manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks",
-            "hermes_ssh", "hermes_kanban",
+            "hermes_ssh", "hermes_kanban", "hermes_agent",
         }
     },
     **{
@@ -354,6 +354,13 @@ def action_effect_for(call: Mapping[str, Any]) -> str:
             return "reversible_write"
         return "reversible_write"
     if name in {"hermes_ssh", "hermes_kanban"}:
+        return "reversible_write"
+    if name == "hermes_agent":
+        agent_action = str(arguments.get("action") or "").lower()
+        if agent_action in {"profiles_list", "gateway_list", "send_targets"}:
+            return "read"
+        if agent_action == "send":
+            return "external_publication_or_communication"
         return "reversible_write"
     selector = " ".join(
         str(arguments.get(key) or "").lower()
