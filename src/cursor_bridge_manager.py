@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -57,6 +58,37 @@ PC_IDE_TOKEN_FILE = Path(
 )
 BRIDGE_SCRIPT = Path(__file__).resolve().parents[1] / "services" / "cursor-bridge" / "cursor_bridge_service.py"
 BRIDGE_PROCESS: subprocess.Popen[str] | None = None
+
+
+def _port_holder_pid(port: int) -> int | None:
+    try:
+        output = subprocess.check_output(
+            ["ss", "-ltnp", f"sport = :{port}"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    match = re.search(r"pid=(\d+)", output)
+    return int(match.group(1)) if match else None
+
+
+def _stop_pid(pid: int) -> None:
+    try:
+        os.kill(pid, 15)
+    except OSError:
+        return
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.1)
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
 
 
 def _load_settings() -> dict[str, Any]:
@@ -189,6 +221,21 @@ def bootstrap_api_key_from_env() -> bool:
     return False
 
 
+def _default_cursor_workspaces_json() -> str:
+    for env_name in ("PANDAMONIUM_CURSOR_WORKSPACES_JSON", "ODYSSEUS_CURSOR_WORKSPACES_JSON"):
+        raw = os.getenv(env_name, "").strip()
+        if raw:
+            return raw
+    candidates = (
+        Path("/mnt/dev-env/projects/pandamonium"),
+        Path(__file__).resolve().parents[1],
+    )
+    for path in candidates:
+        if path.is_dir():
+            return json.dumps({"pandamonium": str(path.resolve())})
+    return json.dumps({"pandamonium": str(candidates[-1].resolve())})
+
+
 def bridge_env() -> dict[str, str]:
     env = os.environ.copy()
     api_key = configured_api_key()
@@ -207,9 +254,9 @@ def bridge_env() -> dict[str, str]:
         env["PANDAMONIUM_CURSOR_BRIDGE_HOME"] = bridge_home
         env["HOME"] = bridge_home
     env.setdefault("PANDAMONIUM_CURSOR_SETTING_SOURCES", "project,user,plugins")
-    if not env.get("ODYSSEUS_CURSOR_WORKSPACES_JSON"):
-        default_root = Path(__file__).resolve().parents[1]
-        env["ODYSSEUS_CURSOR_WORKSPACES_JSON"] = json.dumps({"pandamonium": str(default_root)})
+    workspaces_json = _default_cursor_workspaces_json()
+    env["ODYSSEUS_CURSOR_WORKSPACES_JSON"] = workspaces_json
+    env["PANDAMONIUM_CURSOR_WORKSPACES_JSON"] = workspaces_json
     return env
 
 
@@ -434,6 +481,11 @@ def ensure_bridge_process() -> None:
         return
     if BRIDGE_PROCESS and BRIDGE_PROCESS.poll() is None:
         return
+    port = int(os.getenv("ODYSSEUS_CURSOR_BRIDGE_PORT", "8050"))
+    holder = _port_holder_pid(port)
+    if holder and (BRIDGE_PROCESS is None or BRIDGE_PROCESS.poll() is not None or BRIDGE_PROCESS.pid != holder):
+        _stop_pid(holder)
+        time.sleep(0.3)
     python = sys.executable
     env = bridge_env()
     BRIDGE_PROCESS = subprocess.Popen(

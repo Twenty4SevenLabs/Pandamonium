@@ -25,14 +25,19 @@ if str(ROOT) not in sys.path:
 
 _GUARD_PATH = Path(__file__).resolve().parent / "subscription_guard.py"
 _SETTINGS_PATH = Path(__file__).resolve().parent / "agent_settings.py"
+_CANVAS_PATH = Path(__file__).resolve().parent / "canvas_bridge.py"
 _GUARD_SPEC = importlib.util.spec_from_file_location("cursor_subscription_guard", _GUARD_PATH)
 _SETTINGS_SPEC = importlib.util.spec_from_file_location("cursor_bridge_agent_settings", _SETTINGS_PATH)
+_CANVAS_SPEC = importlib.util.spec_from_file_location("cursor_bridge_canvas", _CANVAS_PATH)
 assert _GUARD_SPEC and _GUARD_SPEC.loader
 assert _SETTINGS_SPEC and _SETTINGS_SPEC.loader
+assert _CANVAS_SPEC and _CANVAS_SPEC.loader
 _guard = importlib.util.module_from_spec(_GUARD_SPEC)
 _settings = importlib.util.module_from_spec(_SETTINGS_SPEC)
+_canvas = importlib.util.module_from_spec(_CANVAS_SPEC)
 _GUARD_SPEC.loader.exec_module(_guard)
 _SETTINGS_SPEC.loader.exec_module(_settings)
+_CANVAS_SPEC.loader.exec_module(_canvas)
 REQUIRED_MODEL = _guard.REQUIRED_MODEL
 SubscriptionGuardError = _guard.SubscriptionGuardError
 assert_agent_options = _guard.assert_agent_options
@@ -41,7 +46,11 @@ title_from_prompt = _guard.title_from_prompt
 validate_startup_models = _guard.validate_startup_models
 build_agent_options = _settings.build_agent_options
 build_send_options = _settings.build_send_options
+ensure_sdk_agent_store = _settings.ensure_sdk_agent_store
 capabilities_summary = _settings.capabilities_summary
+resolve_canvas_path = _canvas.resolve_canvas_path
+detect_canvas_path_from_event = _canvas.detect_canvas_path_from_event
+build_canvas_open_payload = _canvas.build_canvas_open_payload
 
 try:
     from core.atomic_io import atomic_write_json
@@ -257,6 +266,8 @@ class BridgeState:
     guard_failed: str | None = None
     active_runs: dict[str, asyncio.Task] = field(default_factory=dict)
     run_events: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    canvas_open_paths: dict[str, set[str]] = field(default_factory=dict)
+    canvas_open_global: set[str] = field(default_factory=set)
     agent_handles: dict[str, Any] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -268,8 +279,38 @@ async def _ensure_client() -> Any:
     if STATE.guard_failed:
         raise HTTPException(status_code=503, detail=STATE.guard_failed)
     if STATE.client is None:
+        await _maybe_launch_client()
+    if STATE.client is None:
         raise HTTPException(status_code=503, detail="cursor_bridge_not_ready")
     return STATE.client
+
+
+async def _maybe_launch_client() -> None:
+    if STATE.client is not None or STATE.guard_failed:
+        return
+    api_key = str(STATE.api_key or os.getenv("CURSOR_API_KEY", "")).strip()
+    if not api_key:
+        return
+    STATE.api_key = api_key
+    if not WORKSPACES:
+        STATE.guard_failed = "cursor_workspaces_not_configured"
+        return
+    default_cwd = WORKSPACES.get(DEFAULT_WORKSPACE) or next(iter(WORKSPACES.values()))
+    try:
+        ensure_sdk_agent_store(default_cwd)
+        from cursor_sdk import AsyncClient
+
+        client = await AsyncClient.launch_bridge(
+            workspace=default_cwd,
+            allow_api_key_env_fallback=False,
+        )
+        await validate_startup_models(client, api_key)
+        STATE.client = client
+    except SubscriptionGuardError as exc:
+        STATE.guard_failed = exc.reason
+    except Exception:
+        # Transient startup failures should not block registry reads; retry on next send.
+        STATE.client = None
 
 
 def _public_agent(row: dict[str, Any]) -> dict[str, Any]:
@@ -343,6 +384,34 @@ def _events_to_assistant_blocks(events: list[dict[str, Any]]) -> list[dict[str, 
     return mod.events_to_parity_blocks(events)
 
 
+def _canvas_paths_for_row(row: dict[str, Any], run_id: str = "") -> list[str]:
+    workspace = str(row.get("workspace") or DEFAULT_WORKSPACE)
+    cwd = _resolve_cwd(workspace)
+    found: set[str] = set()
+    for msg in row.get("messages") or []:
+        if not isinstance(msg, dict):
+            continue
+        for path in _canvas.collect_canvas_paths_from_blocks(list(msg.get("blocks") or []), cwd=cwd or ""):
+            found.add(path)
+    if run_id:
+        for event in STATE.run_events.get(run_id, []):
+            if event.get("type") == "canvas_open":
+                raw = str(event.get("path") or "")
+                resolved = resolve_canvas_path(raw, cwd=cwd or "")
+                if resolved:
+                    found.add(str(resolved))
+    canvas_dir = _canvas.canvas_dir_for_cwd(cwd or "")
+    if canvas_dir.is_dir():
+        cutoff = int(row.get("updated_at") or 0) - 900
+        for path in canvas_dir.glob("*.canvas.tsx"):
+            try:
+                if path.stat().st_mtime >= cutoff:
+                    found.add(str(path.resolve()))
+            except OSError:
+                continue
+    return sorted(found)
+
+
 def _session_payload(row: dict[str, Any]) -> dict[str, Any]:
     messages = list(row.get("messages") or [])
     run_id = str(row.get("run_id") or "")
@@ -364,6 +433,7 @@ def _session_payload(row: dict[str, Any]) -> dict[str, Any]:
         "sdk_agent_id": row.get("sdk_agent_id"),
         "message_count": len(messages),
         "messages": messages,
+        "canvas_paths": _canvas_paths_for_row(row, run_id),
     }
 
 
@@ -373,6 +443,26 @@ async def _append_event(run_id: str, event: dict[str, Any]) -> None:
         bucket.append(event)
         if len(bucket) > 500:
             del bucket[: len(bucket) - 500]
+
+
+async def _maybe_emit_canvas_open(agent_id: str, run_id: str, event: dict[str, Any]) -> None:
+    registry = _load_registry()
+    row = registry.get(agent_id) or {}
+    workspace = str(row.get("workspace") or DEFAULT_WORKSPACE)
+    cwd = _resolve_cwd(workspace)
+    path = detect_canvas_path_from_event(event, cwd=cwd or "")
+    if not path:
+        return
+    path_key = str(path)
+    async with STATE.lock:
+        seen = STATE.canvas_open_paths.setdefault(str(run_id), set())
+        if path_key in seen or path_key in STATE.canvas_open_global:
+            return
+        seen.add(path_key)
+        STATE.canvas_open_global.add(path_key)
+    public_url = os.getenv("APP_PUBLIC_URL", "").strip()
+    payload = build_canvas_open_payload(path, app_public_url=public_url)
+    await _append_event(str(run_id), payload)
 
 
 async def _update_registry(agent_id: str, **changes: Any) -> dict[str, Any]:
@@ -398,6 +488,7 @@ async def _consume_run(agent_id: str, run: Any) -> None:
                 continue
             event["created_at"] = int(time.time())
             await _append_event(str(run_id), event)
+            await _maybe_emit_canvas_open(agent_id, str(run_id), event)
         result = await run.wait()
         status = getattr(result, "status", None) or (result.get("status") if isinstance(result, dict) else "finished")
         terminal = "failed" if status == "error" else "idle"
@@ -415,6 +506,7 @@ async def _consume_run(agent_id: str, run: Any) -> None:
     finally:
         async with STATE.lock:
             STATE.active_runs.pop(str(run_id), None)
+            STATE.canvas_open_paths.pop(str(run_id), None)
 
 
 @asynccontextmanager
@@ -430,6 +522,7 @@ async def lifespan(_app: FastAPI):
         return
     default_cwd = WORKSPACES.get(DEFAULT_WORKSPACE) or next(iter(WORKSPACES.values()))
     try:
+        ensure_sdk_agent_store(default_cwd)
         from cursor_sdk import AsyncClient
 
         client = await AsyncClient.launch_bridge(
@@ -440,8 +533,8 @@ async def lifespan(_app: FastAPI):
         STATE.client = client
     except SubscriptionGuardError as exc:
         STATE.guard_failed = exc.reason
-    except Exception as exc:
-        STATE.guard_failed = str(exc)[:240]
+    except Exception:
+        STATE.client = None
     try:
         yield
     finally:
@@ -497,13 +590,13 @@ async def list_agents(
         items = [row for row in items if row.get("workspace") == workspace]
     if source == "bridge":
         items = [row for row in items if row.get("source") == "bridge"]
-    client = await _ensure_client()
+    await _maybe_launch_client()
     sdk_items: list[dict[str, Any]] = []
     target_workspace = workspace or DEFAULT_WORKSPACE
     cwd = _resolve_cwd(target_workspace)
-    if cwd:
+    if STATE.client is not None and cwd:
         try:
-            listed = await client.agents.list(runtime="local", cwd=cwd, api_key=STATE.api_key)
+            listed = await STATE.client.agents.list(runtime="local", cwd=cwd, api_key=STATE.api_key)
             raw_items = getattr(listed, "items", None) or []
             for info in raw_items:
                 agent_id = getattr(info, "agent_id", None) or getattr(info, "id", None)
@@ -529,7 +622,10 @@ async def list_agents(
     for row in sdk_items:
         merged[row["agent_id"]] = row
     ordered = sorted(merged.values(), key=lambda row: int(row.get("updated_at") or 0), reverse=True)
-    return {"items": ordered}
+    return {
+        "items": ordered,
+        "connected": STATE.client is not None and not STATE.guard_failed,
+    }
 
 
 @app.post("/agents")
@@ -540,6 +636,10 @@ async def create_agent(payload: dict[str, Any], authorization: str | None = Head
     cwd = _resolve_cwd(workspace)
     if not cwd:
         raise HTTPException(status_code=400, detail="unknown_workspace")
+    try:
+        ensure_sdk_agent_store(cwd)
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail=f"cursor_agent_store_not_writable: {exc}") from exc
     prompt = str(payload.get("prompt") or "").strip()
     if not prompt or len(prompt) > 50_000:
         raise HTTPException(status_code=400, detail="invalid_prompt")
@@ -584,6 +684,10 @@ async def resume_agent_endpoint(
     cwd = _resolve_cwd(workspace, str(payload.get("cwd") or ""))
     if not cwd:
         raise HTTPException(status_code=400, detail="unknown_workspace")
+    try:
+        ensure_sdk_agent_store(cwd)
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail=f"cursor_agent_store_not_writable: {exc}") from exc
     options = assert_agent_options(build_agent_options(api_key=STATE.api_key, cwd=cwd, model=REQUIRED_MODEL))
     title = str(payload.get("title") or "Cursor agent").strip()[:120]
     source = str(payload.get("source") or "ide")
@@ -632,6 +736,10 @@ async def send_agent(agent_id: str, payload: dict[str, Any], authorization: str 
     cwd = _resolve_cwd(workspace)
     if not cwd:
         raise HTTPException(status_code=400, detail="unknown_workspace")
+    try:
+        ensure_sdk_agent_store(cwd)
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail=f"cursor_agent_store_not_writable: {exc}") from exc
     options = assert_agent_options(build_agent_options(api_key=STATE.api_key, cwd=cwd, model=REQUIRED_MODEL))
     pending_context = row.get("pending_context") if isinstance(row.get("pending_context"), list) else None
     prompt_to_send = prompt
@@ -735,6 +843,21 @@ async def delete_agent(agent_id: str, authorization: str | None = Header(default
     payload["dismissed_agent_ids"] = sorted(dismissed)
     atomic_write_json(str(SETTINGS_FILE), payload, indent=2)
     return {"removed": True, "agent_id": agent_id}
+
+
+@app.post("/canvas/open")
+async def open_canvas(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _require_auth(authorization)
+    raw_path = str(payload.get("path") or "").strip()
+    cwd = str(payload.get("cwd") or "").strip()
+    if not cwd:
+        workspace = str(payload.get("workspace") or DEFAULT_WORKSPACE)
+        cwd = _resolve_cwd(workspace)
+    path = resolve_canvas_path(raw_path, cwd=cwd or "")
+    if not path:
+        raise HTTPException(status_code=404, detail="canvas_not_found")
+    public_url = os.getenv("APP_PUBLIC_URL", "").strip()
+    return build_canvas_open_payload(path, app_public_url=public_url)
 
 
 @app.post("/agents/{agent_id}/runs/{run_id}/cancel")

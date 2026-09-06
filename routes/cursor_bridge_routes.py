@@ -342,4 +342,21 @@ def setup_cursor_bridge_routes() -> APIRouter:
         response.raise_for_status()
         return response.json()
 
+    @router.post("/canvas/open")
+    async def open_canvas(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+        if not is_configured():
+            raise HTTPException(status_code=503, detail="cursor_bridge_not_configured")
+        await ensure_bridge_online()
+        raw_path = str(body.get("path") or "").strip()
+        if not raw_path:
+            raise HTTPException(status_code=400, detail="path_required")
+        workspace = str(body.get("workspace") or "pandamonium").strip()
+        cwd = workspace_cwd_from_slug(workspace) or body.get("cwd")
+        payload = {"path": raw_path, "cwd": cwd or "", "workspace": workspace}
+        response = await bridge_request("POST", "/canvas/open", json_body=payload)
+        if response.status_code >= 400:
+            detail = response.json().get("detail") if response.headers.get("content-type", "").startswith("application/json") else response.text
+            raise HTTPException(status_code=response.status_code, detail=detail)
+        return response.json()
+
     return router

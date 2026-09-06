@@ -1,3 +1,11 @@
+import {
+  extractCanvasPathsFromText,
+  handleCanvasOpenEvent,
+  registerCanvasPaths,
+  renderCanvasActionsBar,
+  renderCanvasArtifactActions,
+} from './cursorCanvas.js';
+
 const byId = (id) => document.getElementById(id);
 
 const overlayState = {
@@ -7,7 +15,45 @@ const overlayState = {
   streamAbort: null,
   liveStreamEvents: [],
   sending: false,
+  sessionLoaded: false,
+  canvasPaths: [],
+  processedCanvasOpens: new Set(),
 };
+
+function rememberCanvasPaths(paths, meta = {}) {
+  const incoming = registerCanvasPaths(paths, meta);
+  if (!incoming.length) return overlayState.canvasPaths;
+  const merged = new Set([...(overlayState.canvasPaths || []), ...incoming]);
+  overlayState.canvasPaths = [...merged];
+  renderCanvasHeaderActions();
+  return overlayState.canvasPaths;
+}
+
+function renderCanvasHeaderActions() {
+  const host = byId('cursor-agent-overlay-canvas-actions');
+  if (!host) return;
+  host.replaceChildren();
+  const bar = renderCanvasActionsBar(overlayState.canvasPaths, { title: 'Canvas' });
+  if (bar) host.append(bar);
+  host.hidden = !bar;
+}
+
+function appendCanvasButtonsFromText(container, text) {
+  const paths = extractCanvasPathsFromText(text);
+  if (!paths.length) return;
+  rememberCanvasPaths(paths);
+  const bar = renderCanvasActionsBar(paths, { title: 'Canvas' });
+  if (bar) container.append(bar);
+}
+
+function processCanvasOpenPayload(payload) {
+  if (String(payload?.type || '') !== 'canvas_open') return;
+  const path = String(payload?.path || '').trim();
+  if (!path || overlayState.processedCanvasOpens.has(path)) return;
+  overlayState.processedCanvasOpens.add(path);
+  rememberCanvasPaths([path], payload);
+  handleCanvasOpenEvent({ ...payload, path });
+}
 
 function normalizeStreamEvent(raw) {
   if (!raw || typeof raw !== 'object') return null;
@@ -292,6 +338,7 @@ function renderTextBlock(block) {
   body.className = 'cursor-overlay-block-body cursor-overlay-reply-text';
   body.textContent = String(block.text || '');
   el.append(body);
+  appendCanvasButtonsFromText(el, block.text);
   return el;
 }
 
@@ -301,6 +348,20 @@ function renderBlock(block) {
     return null;
   }
   if (type === 'text') return renderTextBlock(block);
+  if (type === 'artifact') {
+    const el = document.createElement('div');
+    el.className = 'cursor-overlay-block cursor-overlay-block-artifact';
+    const body = document.createElement('div');
+    body.className = 'cursor-overlay-block-body';
+    const label = String(block.name || 'artifact');
+    const url = String(block.url || block.path || '');
+    body.textContent = url ? `${label}: ${url}` : label;
+    el.append(body);
+    const canvasActions = renderCanvasArtifactActions({ ...block, path: url, url });
+    if (canvasActions) el.append(canvasActions);
+    if (url) rememberCanvasPaths([url], block);
+    return el;
+  }
   const el = document.createElement('div');
   el.className = `cursor-overlay-block cursor-overlay-block-${type}`;
   const body = document.createElement('div');
@@ -362,7 +423,9 @@ function renderPanel(messages, liveBlocks = null) {
   if (!rows.length && !liveBlocks?.length) {
     const empty = document.createElement('div');
     empty.className = 'cursor-overlay-empty';
-    empty.textContent = 'Loading session…';
+    empty.textContent = overlayState.sessionLoaded
+      ? 'No messages yet. Send a prompt to start.'
+      : 'Loading session…';
     panel.appendChild(empty);
     return;
   }
@@ -384,6 +447,7 @@ function setHeader(session) {
 }
 
 async function loadSession(agentId, agent) {
+  overlayState.sessionLoaded = false;
   const query = sessionQuery(agent, agentId);
   const session = await readJson(await fetch(`/api/cursor/agents/${encodeURIComponent(agentId)}/session${query}`, {
     credentials: 'same-origin',
@@ -397,6 +461,16 @@ async function loadSession(agentId, agent) {
     mirror_url: session?.mirror_url || agent?.mirror_url,
   };
   overlayState.messages = Array.isArray(session.messages) ? session.messages : [];
+  overlayState.sessionLoaded = true;
+  rememberCanvasPaths(session.canvas_paths || [], session);
+  for (const message of overlayState.messages) {
+    if (message?.role !== 'assistant') continue;
+    for (const block of message.blocks || []) {
+      if (block?.type === 'text') rememberCanvasPaths(extractCanvasPathsFromText(block.text));
+      const url = block?.url || block?.path;
+      if (url) rememberCanvasPaths([url], block);
+    }
+  }
   setHeader(overlayState.agent);
   renderPanel(overlayState.messages, null);
   return session;
@@ -444,6 +518,9 @@ async function streamRun(agentId, runId, agent) {
       for (const line of lines) {
         const payload = parseSsePayload(line.trim());
         if (!payload) continue;
+        if (String(payload.type || '') === 'canvas_open') {
+          processCanvasOpenPayload(payload);
+        }
         overlayState.liveStreamEvents.push(payload);
         renderLive();
       }
@@ -451,6 +528,9 @@ async function streamRun(agentId, runId, agent) {
     if (sseBuffer.trim()) {
       const payload = parseSsePayload(sseBuffer.trim());
       if (payload) {
+        if (String(payload.type || '') === 'canvas_open') {
+          processCanvasOpenPayload(payload);
+        }
         overlayState.liveStreamEvents.push(payload);
         renderLive();
       }
@@ -540,6 +620,10 @@ export function closeCursorAgentOverlay() {
   overlayState.agent = null;
   overlayState.messages = [];
   overlayState.liveStreamEvents = [];
+  overlayState.sessionLoaded = false;
+  overlayState.canvasPaths = [];
+  overlayState.processedCanvasOpens = new Set();
+  renderCanvasHeaderActions();
 }
 
 export async function openCursorAgentOverlay(agentId, agent, runId = null) {
@@ -547,6 +631,8 @@ export async function openCursorAgentOverlay(agentId, agent, runId = null) {
   if (!overlay) return;
   overlayState.agentId = agentId;
   overlayState.agent = agent || null;
+  overlayState.canvasPaths = [];
+  overlayState.processedCanvasOpens = new Set();
   overlay.hidden = false;
   document.body.classList.add('cursor-agent-overlay-open');
   renderPanel([], '');

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from unittest.mock import AsyncMock, patch
 
@@ -40,3 +41,11 @@ async def test_list_ide_mirror_agents_merges_multiple_hosts():
     shared = next(row for row in items if row["agent_id"] == "shared")
     assert shared["title"] == "from-b"
     assert shared["mirror_url"] == "http://b:8051"
+
+
+def test_default_cursor_workspaces_json_prefers_dev_env(monkeypatch):
+    monkeypatch.delenv("PANDAMONIUM_CURSOR_WORKSPACES_JSON", raising=False)
+    monkeypatch.delenv("ODYSSEUS_CURSOR_WORKSPACES_JSON", raising=False)
+    payload = json.loads(mgr._default_cursor_workspaces_json())
+    assert payload["pandamonium"] == "/mnt/dev-env/projects/pandamonium"
+

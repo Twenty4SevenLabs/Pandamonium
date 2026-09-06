@@ -231,9 +231,15 @@ async function refreshAgents() {
     renderAgentList([]);
     return;
   }
-  const response = await fetch('/api/cursor/agents?source=all', { credentials: 'same-origin', headers: { Accept: 'application/json' } });
-  const payload = await readJson(response);
-  state.agents = Array.isArray(payload.items) ? payload.items : [];
+  try {
+    const response = await fetch('/api/cursor/agents?source=all', { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+    const payload = await readJson(response);
+    state.agents = Array.isArray(payload.items) ? payload.items : [];
+  } catch (_error) {
+    // Keep the last known list visible while the sidecar reconnects.
+    if (!state.agents.length) renderAgentList([]);
+    return;
+  }
   renderAgentList(state.agents);
   if (state.selectedAgentId) {
     const selected = state.agents.find((row) => row.agent_id === state.selectedAgentId);

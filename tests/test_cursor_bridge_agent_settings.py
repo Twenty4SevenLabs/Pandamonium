@@ -63,3 +63,20 @@ def test_build_agent_options_includes_setting_sources_and_mcp(tmp_path: Path, mo
     assert "lightpanda" in options["mcp_servers"]
     send_opts = mod.build_send_options()
     assert "lightpanda" in send_opts["mcp_servers"]
+
+
+def test_cursor_project_slug_for_dev_env_project(monkeypatch):
+    mod = _load_module()
+    monkeypatch.setattr(mod, "bridge_home", lambda: Path("/home/labsadmin"))
+    assert mod.cursor_project_slug("/mnt/dev-env/projects/pandamonium") == "mnt-dev-env-projects-pandamonium"
+
+
+def test_ensure_sdk_agent_store_creates_writable_dir(tmp_path: Path, monkeypatch):
+    mod = _load_module()
+    project = Path("/mnt/dev-env/projects/pandamonium")
+    monkeypatch.setattr(mod, "bridge_home", lambda: tmp_path / "home")
+    store = mod.ensure_sdk_agent_store(str(project))
+    assert store.is_dir()
+    assert store.name == "sdk-agent-store"
+    assert store.parent.name == "mnt-dev-env-projects-pandamonium"
+

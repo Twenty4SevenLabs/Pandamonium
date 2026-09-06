@@ -43171,6 +43171,39 @@ body.cursor-agent-overlay-open .chat-container {
   line-height: 1.35;
   max-height: 160px;
 }
+.cursor-overlay-canvas-actions {
+  margin-top: 8px;
+}
+.cursor-overlay-canvas-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.cursor-overlay-canvas-bar-label,
+.cursor-agent-overlay-canvas-actions .cursor-overlay-canvas-bar-label {
+  font-size: 12px;
+  color: var(--fg);
+  opacity: 0.85;
+  margin-right: 4px;
+}
+.cursor-agent-overlay-canvas-actions {
+  margin-top: 8px;
+}
+.cursor-overlay-canvas-open-btn {
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
 .cursor-overlay-block-body {
   white-space: pre-wrap;
   word-break: break-word;

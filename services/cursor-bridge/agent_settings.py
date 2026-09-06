@@ -22,6 +22,31 @@ def bridge_home() -> Path:
     return Path.home()
 
 
+def cursor_project_slug(cwd: str) -> str:
+    root = Path(str(cwd or "")).expanduser().resolve()
+    dev_env_projects = Path("/mnt/dev-env/projects")
+    if root.is_relative_to(dev_env_projects):
+        return f"mnt-dev-env-projects-{root.name}"
+    if root == Path("/mnt/dev-env"):
+        return "mnt-dev-env"
+    if root.name:
+        return root.name.replace("/", "-")
+    return ""
+
+
+def sdk_agent_store_dir(cwd: str) -> Path:
+    slug = cursor_project_slug(cwd)
+    if not slug:
+        return bridge_home() / ".cursor" / "projects" / "sdk-agent-store"
+    return bridge_home() / ".cursor" / "projects" / slug / "sdk-agent-store"
+
+
+def ensure_sdk_agent_store(cwd: str) -> Path:
+    store_dir = sdk_agent_store_dir(cwd)
+    store_dir.mkdir(parents=True, exist_ok=True)
+    return store_dir
+
+
 def cursor_config_dir() -> Path:
     override = os.getenv("PANDAMONIUM_CURSOR_CONFIG_DIR", "").strip()
     if override:
