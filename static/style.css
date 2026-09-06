@@ -42806,6 +42806,7 @@ html.jarvis-voice-minimized .extension-surface-panel.is-open {
   cursor: pointer;
 }
 .cursor-bridge-connect-error { color: #ff6b6b; font-size: 11px; margin-top: 6px; min-height: 1.2em; }
+.cursor-bridge-capabilities { font-size: 10px; opacity: 0.68; margin: 8px 0 0; line-height: 1.4; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 #cursor-agent-list { display: flex; flex-direction: column; gap: 2px; padding: 0 4px 8px; }
 .cursor-agent-empty { font-size: 11px; opacity: 0.6; padding: 8px 10px; }
 .cursor-agent-row {

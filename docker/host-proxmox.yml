@@ -7,6 +7,9 @@ services:
       - seccomp:unconfined
     volumes:
       - /mnt/dev-env:/mnt/dev-env:rw
+      - /home/labsadmin/.cursor:/home/labsadmin/.cursor:ro
+      - /home/labsadmin/.agents:/home/labsadmin/.agents:ro
+      - /home/labsadmin/.local/bin:/home/labsadmin/.local/bin:ro
     extra_hosts:
       - "m1.tail61d527.ts.net:192.168.1.2"
       - "m2.tail61d527.ts.net:192.168.1.191"
@@ -23,6 +26,8 @@ services:
       - PANDAMONIUM_CURSOR_BRIDGE_URLS=http://127.0.0.1:8050,http://192.168.1.2:8050,http://192.168.1.90:8050
       - PANDAMONIUM_PC_CURSOR_BRIDGE_URL=http://pc-cursor-bridge:8051
       - PANDAMONIUM_PC_CURSOR_BRIDGE_URLS=http://pc-cursor-bridge:8051,http://192.168.1.2:8051,http://192.168.1.90:8051
+      - PANDAMONIUM_CURSOR_BRIDGE_HOME=/home/labsadmin
+      - PANDAMONIUM_CURSOR_SETTING_SOURCES=project,user,plugins
     ports: !override
       - "127.0.0.1:7080:7000"
 

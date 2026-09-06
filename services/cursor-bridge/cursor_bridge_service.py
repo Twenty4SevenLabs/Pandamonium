@@ -24,16 +24,24 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 _GUARD_PATH = Path(__file__).resolve().parent / "subscription_guard.py"
+_SETTINGS_PATH = Path(__file__).resolve().parent / "agent_settings.py"
 _GUARD_SPEC = importlib.util.spec_from_file_location("cursor_subscription_guard", _GUARD_PATH)
+_SETTINGS_SPEC = importlib.util.spec_from_file_location("cursor_bridge_agent_settings", _SETTINGS_PATH)
 assert _GUARD_SPEC and _GUARD_SPEC.loader
+assert _SETTINGS_SPEC and _SETTINGS_SPEC.loader
 _guard = importlib.util.module_from_spec(_GUARD_SPEC)
+_settings = importlib.util.module_from_spec(_SETTINGS_SPEC)
 _GUARD_SPEC.loader.exec_module(_guard)
+_SETTINGS_SPEC.loader.exec_module(_settings)
 REQUIRED_MODEL = _guard.REQUIRED_MODEL
 SubscriptionGuardError = _guard.SubscriptionGuardError
 assert_agent_options = _guard.assert_agent_options
 assert_no_cloud_url = _guard.assert_no_cloud_url
 title_from_prompt = _guard.title_from_prompt
 validate_startup_models = _guard.validate_startup_models
+build_agent_options = _settings.build_agent_options
+build_send_options = _settings.build_send_options
+capabilities_summary = _settings.capabilities_summary
 
 try:
     from core.atomic_io import atomic_write_json
@@ -154,13 +162,7 @@ async def _prepare_ide_fork(
     source: str = "ide",
 ) -> dict[str, Any]:
     client = await _ensure_client()
-    options = assert_agent_options(
-        {
-            "api_key": STATE.api_key,
-            "model": REQUIRED_MODEL,
-            "local": {"cwd": cwd, "setting_sources": []},
-        }
-    )
+    options = assert_agent_options(build_agent_options(api_key=STATE.api_key, cwd=cwd, model=REQUIRED_MODEL))
     agent = await client.create_agent(options)
     sdk_id = getattr(agent, "agent_id", None) or getattr(agent, "id", None)
     if not sdk_id:
@@ -453,12 +455,14 @@ app = FastAPI(title="Pandamonium Cursor Bridge", lifespan=lifespan)
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+    caps = capabilities_summary()
     return {
         "ok": STATE.client is not None and not STATE.guard_failed,
         "protocol": BRIDGE_PROTOCOL,
         "model_lock": REQUIRED_MODEL,
         "uptime_seconds": int(time.time() - STARTED_AT),
         "guard_failed": STATE.guard_failed,
+        "capabilities": caps,
     }
 
 
@@ -466,6 +470,7 @@ async def health() -> dict[str, Any]:
 async def status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _require_auth(authorization)
     registry = _load_registry()
+    caps = capabilities_summary()
     return {
         "configured": bool(STATE.api_key),
         "connected": STATE.client is not None and not STATE.guard_failed,
@@ -474,6 +479,7 @@ async def status(authorization: str | None = Header(default=None)) -> dict[str, 
         "agent_count": len(registry),
         "guard_failed": STATE.guard_failed,
         "protocol": BRIDGE_PROTOCOL,
+        "capabilities": caps,
     }
 
 
@@ -538,13 +544,7 @@ async def create_agent(payload: dict[str, Any], authorization: str | None = Head
     if not prompt or len(prompt) > 50_000:
         raise HTTPException(status_code=400, detail="invalid_prompt")
     title = str(payload.get("title") or title_from_prompt(prompt)).strip()[:120]
-    options = assert_agent_options(
-        {
-            "api_key": STATE.api_key,
-            "model": REQUIRED_MODEL,
-            "local": {"cwd": cwd, "setting_sources": []},
-        }
-    )
+    options = assert_agent_options(build_agent_options(api_key=STATE.api_key, cwd=cwd, model=REQUIRED_MODEL))
     try:
         agent = await client.create_agent(options)
         agent_id = getattr(agent, "agent_id", None) or getattr(agent, "id", None)
@@ -559,7 +559,7 @@ async def create_agent(payload: dict[str, Any], authorization: str | None = Head
             error=None,
         )
         await _append_message(str(agent_id), "user", [{"type": "text", "text": prompt}])
-        run = await agent.send(prompt)
+        run = await agent.send(prompt, build_send_options())
         run_id = getattr(run, "run_id", None) or getattr(run, "id", None)
         task = asyncio.create_task(_consume_run(str(agent_id), run))
         async with STATE.lock:
@@ -584,13 +584,7 @@ async def resume_agent_endpoint(
     cwd = _resolve_cwd(workspace, str(payload.get("cwd") or ""))
     if not cwd:
         raise HTTPException(status_code=400, detail="unknown_workspace")
-    options = assert_agent_options(
-        {
-            "api_key": STATE.api_key,
-            "model": REQUIRED_MODEL,
-            "local": {"cwd": cwd, "setting_sources": []},
-        }
-    )
+    options = assert_agent_options(build_agent_options(api_key=STATE.api_key, cwd=cwd, model=REQUIRED_MODEL))
     title = str(payload.get("title") or "Cursor agent").strip()[:120]
     source = str(payload.get("source") or "ide")
     messages = payload.get("messages") if isinstance(payload.get("messages"), list) else None
@@ -638,13 +632,7 @@ async def send_agent(agent_id: str, payload: dict[str, Any], authorization: str 
     cwd = _resolve_cwd(workspace)
     if not cwd:
         raise HTTPException(status_code=400, detail="unknown_workspace")
-    options = assert_agent_options(
-        {
-            "api_key": STATE.api_key,
-            "model": REQUIRED_MODEL,
-            "local": {"cwd": cwd, "setting_sources": []},
-        }
-    )
+    options = assert_agent_options(build_agent_options(api_key=STATE.api_key, cwd=cwd, model=REQUIRED_MODEL))
     pending_context = row.get("pending_context") if isinstance(row.get("pending_context"), list) else None
     prompt_to_send = prompt
     if pending_context:
@@ -655,14 +643,14 @@ async def send_agent(agent_id: str, payload: dict[str, Any], authorization: str 
         if agent is None:
             agent = await _resume_sdk_agent(client, agent_id, options)
         try:
-            run = await agent.send(prompt_to_send)
+            run = await agent.send(prompt_to_send, build_send_options())
         except AgentNotFoundError:
             if not row.get("forked"):
                 raise
             agent = await _refork_ide_agent(agent_id, row, cwd=cwd)
             if agent is None:
                 raise
-            run = await agent.send(prompt_to_send)
+            run = await agent.send(prompt_to_send, build_send_options())
         run_id = getattr(run, "run_id", None) or getattr(run, "id", None)
         await _append_message(agent_id, "user", [{"type": "text", "text": prompt}])
         await _update_registry(

@@ -20,6 +20,22 @@ function relativeTime(unix) {
   return `${Math.floor(seconds / 86400)}d`;
 }
 
+function setCapabilitiesLine(status) {
+  const line = byId('cursor-bridge-capabilities');
+  if (!line) return;
+  const caps = status?.capabilities;
+  if (!caps || status?.connected !== true) {
+    line.hidden = true;
+    line.textContent = '';
+    return;
+  }
+  const mcpCount = Array.isArray(caps.mcp_servers) ? caps.mcp_servers.length : 0;
+  const skillCount = Number(caps.skill_count || 0);
+  const sources = Array.isArray(caps.setting_sources) ? caps.setting_sources.join(', ') : '';
+  line.hidden = false;
+  line.textContent = `Skills ${skillCount} · MCP ${mcpCount}${sources ? ` · ${sources}` : ''}`;
+}
+
 function setStatusPill(status) {
   const pill = byId('cursor-bridge-sidebar-status');
   if (!pill) return;
@@ -27,6 +43,7 @@ function setStatusPill(status) {
   const configured = status?.configured === true;
   pill.dataset.state = connected ? 'connected' : configured ? 'warning' : 'disconnected';
   pill.setAttribute('aria-label', connected ? 'Connected' : configured ? 'Reconnect needed' : 'Disconnected');
+  setCapabilitiesLine(status);
 }
 
 function persistSectionExpanded() {

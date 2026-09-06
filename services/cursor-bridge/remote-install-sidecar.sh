@@ -15,7 +15,7 @@ BRIDGE_TOKEN="$HOME_DIR/.config/jarvis/cursor-bridge-token"
 STATE_DIR="$HOME_DIR/.local/share/pandamonium/cursor-bridge-state"
 
 mkdir -p "$INSTALL_DIR" "$(dirname "$BRIDGE_TOKEN")" "$STATE_DIR" "$WORKSPACE_PATH"
-install -m 644 "$SRC_DIR/cursor_bridge_service.py" "$SRC_DIR/subscription_guard.py" "$INSTALL_DIR/"
+install -m 644 "$SRC_DIR/cursor_bridge_service.py" "$SRC_DIR/subscription_guard.py" "$SRC_DIR/agent_settings.py" "$INSTALL_DIR/"
 if [[ -f "$SRC_DIR/stream_events.py" ]]; then
   install -m 644 "$SRC_DIR/stream_events.py" "$INSTALL_DIR/"
 fi

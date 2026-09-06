@@ -198,6 +198,15 @@ def bridge_env() -> dict[str, str]:
     env["ODYSSEUS_CURSOR_BRIDGE_STATE_DIR"] = str(BRIDGE_DIR)
     env.setdefault("ODYSSEUS_CURSOR_BRIDGE_HOST", "127.0.0.1")
     env.setdefault("ODYSSEUS_CURSOR_BRIDGE_PORT", "8050")
+    bridge_home = (
+        os.getenv("PANDAMONIUM_CURSOR_BRIDGE_HOME")
+        or os.getenv("ODYSSEUS_CURSOR_BRIDGE_HOME")
+        or ""
+    ).strip()
+    if bridge_home:
+        env["PANDAMONIUM_CURSOR_BRIDGE_HOME"] = bridge_home
+        env["HOME"] = bridge_home
+    env.setdefault("PANDAMONIUM_CURSOR_SETTING_SOURCES", "project,user,plugins")
     if not env.get("ODYSSEUS_CURSOR_WORKSPACES_JSON"):
         default_root = Path(__file__).resolve().parents[1]
         env["ODYSSEUS_CURSOR_WORKSPACES_JSON"] = json.dumps({"pandamonium": str(default_root)})
