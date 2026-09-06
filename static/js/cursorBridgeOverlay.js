@@ -201,42 +201,133 @@ function blockText(blocks) {
     .join('\n\n');
 }
 
-function renderBlock(block) {
-  const type = String(block?.type || 'text');
+function toolActivityLabel(block) {
+  const name = String(block?.summary || block?.name || 'Tool');
+  if (block?.type === 'shell') {
+    const text = String(block?.text || '').trim();
+    return text ? `Shell ${text.split('\n')[0].slice(0, 120)}` : 'Shell';
+  }
+  return name;
+}
+
+function partitionAssistantBlocks(blocks) {
+  const text = [];
+  const thinking = [];
+  const activity = [];
+  const visible = [];
+  for (const block of Array.isArray(blocks) ? blocks : []) {
+    const type = String(block?.type || '');
+    if (type === 'text') text.push(block);
+    else if (type === 'thinking') thinking.push(block);
+    else if (type === 'tool' || type === 'shell') activity.push(block);
+    else if (type === 'error' || type === 'artifact') visible.push(block);
+  }
+  return { text, thinking, activity, visible };
+}
+
+function renderActivityItem(block) {
+  const item = document.createElement('div');
+  item.className = 'cursor-overlay-activity-item';
+  const title = document.createElement('div');
+  title.className = 'cursor-overlay-activity-item-title';
+  title.textContent = toolActivityLabel(block);
+  if (block?.status === 'running') title.dataset.state = 'running';
+  item.append(title);
+  const detail = document.createElement('pre');
+  detail.className = 'cursor-overlay-activity-item-detail';
+  if (block?.type === 'shell') {
+    detail.textContent = String(block.text || '');
+  } else {
+    detail.textContent = JSON.stringify({ input: block.input, output: block.output }, null, 2);
+  }
+  item.append(detail);
+  return item;
+}
+
+function renderCollapsedGroup(className, summaryText, blocks, renderItem) {
+  if (!blocks.length) return null;
+  const wrap = document.createElement('details');
+  wrap.className = className;
+  wrap.open = false;
+  const summary = document.createElement('summary');
+  summary.textContent = summaryText;
+  if (blocks.some((block) => block?.status === 'running')) summary.dataset.state = 'running';
+  const list = document.createElement('div');
+  list.className = `${className}-list`;
+  blocks.forEach((block) => list.append(renderItem(block)));
+  wrap.append(summary, list);
+  return wrap;
+}
+
+function renderThinkingGroup(blocks) {
+  if (!blocks.length) return null;
+  const combined = blocks.map((block) => String(block.text || '').trim()).filter(Boolean).join('\n\n');
+  if (!combined) return null;
+  return renderCollapsedGroup(
+    'cursor-overlay-thinking-box',
+    blocks.length > 1 ? `Thinking (${blocks.length})` : 'Thinking',
+    [{ text: combined }],
+    (block) => {
+      const item = document.createElement('div');
+      item.className = 'cursor-overlay-thinking-body';
+      item.textContent = String(block.text || '');
+      return item;
+    },
+  );
+}
+
+function renderActivityGroup(blocks) {
+  if (!blocks.length) return null;
+  const running = blocks.some((block) => block?.status === 'running');
+  const label = running
+    ? `Tool activity (${blocks.length})…`
+    : `Tool activity (${blocks.length})`;
+  return renderCollapsedGroup('cursor-overlay-activity-box', label, blocks, renderActivityItem);
+}
+
+function renderTextBlock(block) {
   const el = document.createElement('div');
-  el.className = `cursor-overlay-block cursor-overlay-block-${type}`;
-  if (type === 'thinking') {
-    const details = document.createElement('details');
-    details.open = false;
-    const summary = document.createElement('summary');
-    summary.textContent = 'Thinking';
-    const body = document.createElement('div');
-    body.className = 'cursor-overlay-block-body';
-    body.textContent = String(block.text || '');
-    details.append(summary, body);
-    el.append(details);
-    return el;
-  }
-  if (type === 'tool') {
-    const details = document.createElement('details');
-    const summary = document.createElement('summary');
-    summary.textContent = String(block.summary || block.name || 'Tool');
-    if (block.status === 'running') summary.dataset.state = 'running';
-    const body = document.createElement('pre');
-    body.className = 'cursor-overlay-block-body';
-    body.textContent = JSON.stringify({ input: block.input, output: block.output }, null, 2);
-    details.append(summary, body);
-    el.append(details);
-    return el;
-  }
-  if (type === 'usage' || type === 'status') {
-    return null;
-  }
+  el.className = 'cursor-overlay-block cursor-overlay-block-text';
   const body = document.createElement('div');
-  body.className = 'cursor-overlay-block-body';
-  body.textContent = type === 'text' ? String(block.text || '') : blockText([block]);
+  body.className = 'cursor-overlay-block-body cursor-overlay-reply-text';
+  body.textContent = String(block.text || '');
   el.append(body);
   return el;
+}
+
+function renderBlock(block) {
+  const type = String(block?.type || 'text');
+  if (type === 'usage' || type === 'status' || type === 'thinking' || type === 'tool' || type === 'shell') {
+    return null;
+  }
+  if (type === 'text') return renderTextBlock(block);
+  const el = document.createElement('div');
+  el.className = `cursor-overlay-block cursor-overlay-block-${type}`;
+  const body = document.createElement('div');
+  body.className = 'cursor-overlay-block-body';
+  body.textContent = blockText([block]);
+  el.append(body);
+  return el;
+}
+
+function renderAssistantBody(blocks) {
+  const body = document.createElement('div');
+  body.className = 'cursor-overlay-msg-body';
+  const { text, thinking, activity, visible } = partitionAssistantBlocks(blocks);
+  const thinkingBox = renderThinkingGroup(thinking);
+  const activityBox = renderActivityGroup(activity);
+  if (thinkingBox) body.append(thinkingBox);
+  if (activityBox) body.append(activityBox);
+  if (text.length) {
+    text.forEach((block) => body.append(renderTextBlock(block)));
+  } else if (!thinkingBox && !activityBox && !visible.length) {
+    body.textContent = '';
+  }
+  visible.forEach((block) => {
+    const node = renderBlock(block);
+    if (node) body.append(node);
+  });
+  return body;
 }
 
 function renderMessage(message, liveBlocks = null) {
@@ -246,25 +337,20 @@ function renderMessage(message, liveBlocks = null) {
   const label = document.createElement('div');
   label.className = 'cursor-overlay-msg-role';
   label.textContent = role === 'user' ? 'You' : 'Agent';
-  const body = document.createElement('div');
-  body.className = 'cursor-overlay-msg-body';
   const blocks = message?.live && Array.isArray(liveBlocks) ? liveBlocks : (Array.isArray(message?.blocks) ? message.blocks : []);
   if (role === 'user') {
+    const body = document.createElement('div');
+    body.className = 'cursor-overlay-msg-body';
     const text = blocks
       .filter((block) => String(block?.type || '') === 'text')
       .map((block) => String(block.text || '').trim())
       .filter(Boolean)
       .join('\n\n');
     body.textContent = text || '(empty message)';
-  } else if (blocks.length) {
-    blocks.forEach((block) => {
-      const node = renderBlock(block);
-      if (node) body.append(node);
-    });
+    wrap.append(label, body);
   } else {
-    body.textContent = blockText(blocks);
+    wrap.append(label, renderAssistantBody(blocks));
   }
-  wrap.append(label, body);
   return wrap;
 }
 

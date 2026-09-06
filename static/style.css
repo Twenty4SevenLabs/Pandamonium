@@ -43081,26 +43081,100 @@ body.cursor-agent-overlay-open .chat-container {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cursor-overlay-reply-text {
+  font-size: 14px;
+  line-height: 1.55;
+}
+.cursor-overlay-thinking-box,
+.cursor-overlay-activity-box {
+  border: 1px solid color-mix(in srgb, var(--border) 85%, var(--fg));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 88%, var(--fg));
+  overflow: hidden;
+}
+.cursor-overlay-thinking-box > summary,
+.cursor-overlay-activity-box > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  opacity: 0.72;
+  padding: 7px 10px;
+  user-select: none;
+}
+.cursor-overlay-thinking-box > summary::-webkit-details-marker,
+.cursor-overlay-activity-box > summary::-webkit-details-marker {
+  display: none;
+}
+.cursor-overlay-thinking-box > summary::before,
+.cursor-overlay-activity-box > summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 1em;
+  margin-right: 4px;
+  transition: transform 0.12s ease;
+}
+.cursor-overlay-thinking-box[open] > summary::before,
+.cursor-overlay-activity-box[open] > summary::before {
+  transform: rotate(90deg);
+}
+.cursor-overlay-thinking-box > summary[data-state='running'],
+.cursor-overlay-activity-box > summary[data-state='running'] {
+  opacity: 1;
+  color: color-mix(in srgb, var(--accent) 70%, var(--fg));
+}
+.cursor-overlay-thinking-box-list,
+.cursor-overlay-activity-box-list {
+  border-top: 1px solid var(--border);
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+.cursor-overlay-thinking-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.45;
+  opacity: 0.88;
+}
+.cursor-overlay-activity-item {
+  border: 1px solid color-mix(in srgb, var(--border) 90%, transparent);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.12);
+}
+.cursor-overlay-activity-item-title {
+  font-size: 12px;
+  line-height: 1.4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.cursor-overlay-activity-item-title[data-state='running'] {
+  color: color-mix(in srgb, var(--accent) 75%, var(--fg));
+}
+.cursor-overlay-activity-item-detail {
+  margin: 6px 0 0;
+  padding: 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.18);
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.35;
+  max-height: 160px;
 }
 .cursor-overlay-block-body {
   white-space: pre-wrap;
   word-break: break-word;
   font-size: 13px;
   line-height: 1.5;
-}
-.cursor-overlay-block-tool summary,
-.cursor-overlay-block-thinking summary {
-  cursor: pointer;
-  font-size: 12px;
-  opacity: 0.85;
-}
-.cursor-overlay-block-tool pre {
-  margin: 8px 0 0;
-  padding: 8px;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.2);
-  overflow: auto;
-  font-size: 11px;
 }
 .cursor-agent-overlay-compose {
   border-top: 1px solid var(--border);
