@@ -18,4 +18,14 @@ Session `7e4f9647` (2026-09-05 ~07:59–08:01 UTC). Time pronunciation was alrea
 3. On barge-in, keep ~8s of pre-interrupt audio, not 2s.
 4. Headset leak still must not barge: `bargeEnergyDecision` leak-vs-speech tests stay.
 
+## TTS self-interrupt loop (session `ab782db8`, 2026-09-06 ~00:25 UTC)
+
+Chatterbox returned full WAV clips (`API TTS: N bytes from http://192.168.1.181:8030/v1`). Resemble’s API is clip-complete, not a streaming barge protocol. The four-word cutoff was the Voice Orb client:
+
+- Desk mic (`Default - External Microphone`) stays open during TTS. Headset playback leaked at analyser RMS `0.031` after a quiet `0.003` baseline.
+- Old barge floor `0.03` + `BARGE_IN_MS = 180` + `BARGE_GRACE_MS = 400` treated that leak as the user talking, posted `/interrupt`, then Whisper transcribed the agent’s own line (`…brain model on slough 1359B GJUF…`).
+- Loop: interrupt → echo STT → LLM → more TTS → interrupt.
+
+Client policy now: floor `0.045`, voiced `550ms`, grace `900ms`; do not re-arm grace on every TTS chunk; drop Whisper text that matches `lastSpokenPlain`. Tap-orb interrupt stays. Do not change Chatterbox `:8030`.
+
 Chat copy is unchanged. Spoken clocks still expand in `speech_text()`.

@@ -1900,6 +1900,8 @@ function initializeEventListeners() {
     for (const legacyKey of [`${stateKey}_chat`, `${stateKey}_agent`]) {
       if (Object.prototype.hasOwnProperty.call(state, legacyKey)) return !!state[legacyKey];
     }
+    // Shell is on by default for the cluster operator; web stays opt-in.
+    if (stateKey === 'bash') return true;
     return false;
   }
 
@@ -1935,6 +1937,11 @@ function initializeEventListeners() {
   (function initAdaptiveConversation() {
     const state = loadToggleState();
     delete state.mode;
+    // One-time: shell was previously off by default; enable for cluster ops.
+    if (state.bash === false && !state._bashDefault20260906) {
+      state.bash = true;
+      state._bashDefault20260906 = true;
+    }
     saveToggleState(state);
     applyAdaptiveToolPrefs();
     try { workspaceModule.applyMode('adaptive'); } catch (_) {}

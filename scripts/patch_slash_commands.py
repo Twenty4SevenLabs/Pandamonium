@@ -13,11 +13,11 @@ async function _cmdKanbanParent(args, ctx) {
   const title = args.join(' ').trim();
   if (!title) { slashReply('Usage: /kanban parent <title>'); return true; }
   const msg = [
-    `Create one Hermes Kanban parent card assigned to Morpheus (default) for: ${title}`,
+    `Operate Hermes Kanban for: ${title}`,
     '',
-    'Follow hermes-orchestrator skill and AGENTS.md session protocol.',
-    'Confirm /mnt/dev-env is mounted. Include Superpowers spec paths, GitLab URL, taste skill if UI, success criteria.',
-    'Do not implement project code unless an exception applies.',
+    'Create one parent card. Morpheus (default) decomposes only; complete that parent as soon as children are linked.',
+    'Confirm /mnt/dev-env is mounted. Include Superpowers spec/plan paths, GitLab URL, taste skill if UI, success criteria.',
+    'Dispatch named specialists for parallel work. You may also implement with read/write coding tools — assign those cards to pandamonium and complete them in this session.',
   ].join('\\n');
   if (!_submitComposedMessage(msg)) slashReply('Could not submit kanban dispatch prompt.');
   return true;
@@ -47,7 +47,7 @@ COMMANDS_BLOCK = '''
     help: 'Hermes Kanban dispatch helpers',
     default: 'parent',
     subs: {
-      parent: { handler: _cmdKanbanParent, help: 'Create Morpheus parent card', usage: '/kanban parent <title>' },
+      parent: { handler: _cmdKanbanParent, help: 'Create Kanban parent and operate the board', usage: '/kanban parent <title>' },
     },
   },
   trinity: {

@@ -51,7 +51,7 @@ Import the Cursor personality bundle (already consolidated in OpenCode) into Pan
 
 ### Known follow-ups (manual)
 
-- OAuth once: prisma-remote, neon, figma, gitlab
-- Hermes MCP over SSH may need host-key / connection tuning
-- GitLab MCP TLS: set `NODE_EXTRA_CA_CERTS` in `.env`
-- Restart Pandamonium after `slashCommands.js` change
+- OAuth once in the Panda UI: prisma-remote, neon, figma (HTTP + Tailscale redirect)
+- Set env keys for unattended auth: `GITLAB_TOKEN`, `GITHUB_TOKEN`, `CONTEXT7_API_KEY`, `AIKIDO_API_KEY`, `NEON_API_KEY`
+- Authorize `/app/.ssh` on `openclaw1@192.168.1.192` if Hermes MCP still fails after the LAN-IP SSH fix
+- 2026-09-05: imported MCP transports/env expansion repaired — see `2026-09-05-imported-mcp-servers-fix-design.md`

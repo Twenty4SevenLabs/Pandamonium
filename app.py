@@ -1070,6 +1070,11 @@ app.router.lifespan_context = _lifespan
 async def _startup_event():
     global upload_cleanup_task
     logger.info("Application starting up...")
+    try:
+        from src.ssh_cookbook import ensure_ssh_cookbook
+        ensure_ssh_cookbook()
+    except Exception as exc:
+        logger.warning("SSH cookbook setup failed (non-critical): %s", exc)
     webhook_manager.set_loop(asyncio.get_running_loop())
     # Wipe any leftover incognito sessions from previous process — they're
     # ephemeral by design and must not survive a restart.

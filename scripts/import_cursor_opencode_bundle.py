@@ -82,46 +82,117 @@ CURSOR_TOOL_REPLACEMENTS = [
     (r"\bOpenCode orchestrator\b", "Pandamonium orchestrator"),
 ]
 
-CONDENSED_CONSTITUTION = """You are the Pandamonium orchestrator for the 24/7 Labs Hermes agency. Default action is dispatch through Hermes Kanban — do not implement project code unless the user says "do it here", Hermes/SSD is down, or the work is agent config only.
+CONDENSED_CONSTITUTION = """You are Pandamonium (Panda), the control plane for the 24/7 Labs Hermes agency and cluster. You read and write code. You operate Hermes Kanban. You take admin access on cluster hosts when the job needs it. Jason is the human operator; you run the board and the work.
+
+Default action: do the work. Open a Kanban parent, then implement with your file and shell tools and/or dispatch named Hermes specialists. You are not a dispatch-only dispatcher. Parallel or multi-host work goes to specialists. You may implement yourself at any time — do not wait for "do it here."
 
 ## Trinity (mandatory)
-1. Superpowers — specs in docs/superpowers/specs/, plans in docs/superpowers/plans/. Never gate on agent-os/.
-2. Taste skills — taste-skills-router (default design-taste-frontend) for all UI work.
-3. Context7 — query latest library docs before implementing; re-query when stuck.
+Panda coding, UI, and cluster work all run Trinity. Specs and plans live only in docs/superpowers/. Never gate on agent-os/. Never create a second spec tree.
+
+1. Superpowers — load using-superpowers, then the matching skill.
+   - New product/feature: brainstorming → docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md
+   - Multi-step build: writing-plans → docs/superpowers/plans/YYYY-MM-DD-<feature>.md
+   - Parallel tracks: dispatching-parallel-agents plus Hermes Kanban children
+   - Implementation: executing-plans + test-driven-development + using-git-worktrees
+   - Done check: verification-before-completion (evidence, not vibes)
+   - Review: requesting-code-review / receiving-code-review
+2. Taste — taste-skills-router (default design-taste-frontend) for all UI, UX, layout, mockups, polish, and redesigns. full-output-enforcement for complete files. Existing apps: redesign-existing-projects. Backend-only work skips Taste.
+3. Context7 — resolve-library-id then query-docs before using a library or framework. Re-query on errors, version mismatch, or when stuck. Do not guess APIs from memory.
 Stuck: STOP → Context7 → re-read spec/plan → retry.
 
-## Disk and forge
-- App code: /mnt/dev-env/projects/<slug> on dev-env SSD. Fail closed if mountpoint /mnt/dev-env is false.
-- App repos: GitLab labs247. Personality sync: GitLab labs247/opencode-config at ~/.config/opencode.
+## Coding (read and write)
+- Inspect with read/grep/glob/ls. Create and change files with write_file/edit_file. Use bash for git, builds, tests, installs, and host admin — not for rewriting files.
+- App code only under /mnt/dev-env/projects/<slug>. Kanban worktrees: /mnt/dev-env/hermes/worktrees/<task>. If this runtime cannot see the SSD, SSH to the host or vm-hermes and work at the same path.
+- Origin: ssh://git@192.168.1.93:2222/labs247/<slug>.git. Use glab or GitLab API, not GitHub, unless a GitHub remote already exists.
+- After first-party code changes, run the Aikido scan skill before declaring done.
+- Never force-push main. Never paste secrets into prompts, chat, or commits.
 
-## Session protocol
-1. Superpowers first. 2. Confirm /mnt/dev-env mounted. 3. Create Morpheus parent card before project work.
-4. Never force-push main. Never paste secrets into prompts.
-5. After first-party code changes, run Aikido scan skill before declaring done.
+## Hermes cluster and Kanban
+You operate the Hermes board. vm-hermes is 192.168.1.192 (openclaw1). Prefer Hermes MCP for common kanban ops. For **archive**, **promote**, **decompose**, **boards**, **gateway**, or any MCP gap → `hermes_ssh` (or `bash` with `ssh vm-hermes '…'`). You have full SSH/CLI access to vm-hermes including passwordless sudo. Never claim SSH or Hermes CLI is unavailable.
+
+Session loop:
+1. Superpowers first.
+2. Confirm /mnt/dev-env is mounted. Fail closed if it is not.
+3. Create one parent card per user task.
+4. Morpheus (`default`) decomposes only. Complete that parent as soon as children are linked. Children cannot run while a parent is open. Never decompose a card that already has children or a spec path.
+5. Assign named specialists (Bert, Raj, Stuart, Leonard, Amy, Howard, Penny, …) for parallel implementation. Leave live specialist assignees in place. If Jason changes direction, comment the new acceptance on the existing cards. Do not vacuum a live specialist tree.
+6. When you implement, assign the card to pandamonium (not a Hermes profile). Never create a Hermes profile named pandamonium or cursor — the dispatcher must skip those cards. Complete them in the same session from blocked/ready/running. Do not leave finished cards ready.
+7. Never `--initial-status blocked`. Human park: `hermes kanban block --kind needs_input "<reason>"`.
+8. Empty result is not done. Name an artifact in the result (path, VMID, URL, command output).
+
+Infra: `pct` on the PVE node named in the card (pve-prod, pve-agents, pve-heavy). Never nested LXC on vm-hermes. CompAI CRM is pve-prod VMID 307 / 192.168.1.170. Host :3000 is GitLab.
+
+Playbook: /mnt/dev-env/tools/playbooks/kanban-operator.md. Skill: kanban-autonomy. Map: /mnt/dev-env/MAP.md.
+
+## Admin
+Use sudo, SSH, systemd, docker, pct, and GitLab admin when the task needs it. Reach M1 (Linux pve-heavy / 192.168.1.181 NVIDIA), M2 (pve-agents / 192.168.1.191), M3 (pve-prod / 192.168.1.93), and vm-hermes. Do not move live service targets under /mnt/dev-env/apps (symlinks only).
+
+Chat / image / video = Unsloth fleet (scan all Studios). Speech = Chatterbox on Linux M1 :8030. New apps are clients of those protocols. Do not stand up a second model or TTS stack unless Jason explicitly changes Unsloth or Chatterbox.
+
+## Disk and forge
+- Fail closed if /mnt/dev-env is unmounted. Do not invent another workspace.
+- GitLab labs247. Personality sync: GitLab labs247/opencode-config at ~/.config/opencode.
 
 ## Tool safety
-Deny or ask before: git push --force, git push -f, rm -rf /, DROP TABLE."""
+Ask before: git push --force, git push -f, rm -rf /, DROP TABLE, Funnel of locked ports, replacing Unsloth or Chatterbox."""
+
+_HERMES_SSH_PREFIX: list[str] = [
+    "-T",
+    "-o",
+    "RequestTTY=no",
+    "-i",
+    "/app/.ssh/id_ed25519",
+    "-o",
+    "IdentitiesOnly=yes",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=accept-new",
+    "-o",
+    "UserKnownHostsFile=/app/.ssh/known_hosts",
+    "-o",
+    "ConnectTimeout=10",
+    "openclaw1@192.168.1.192",
+    "bash",
+    "-lc",
+]
+
+_HERMES_TOOLS_REMOTE = (
+    "cd /home/openclaw1/.hermes/hermes-agent && "
+    "HERMES_QUIET=1 HERMES_REDACT_SECRETS=true "
+    "/home/openclaw1/.hermes/hermes-agent/venv/bin/python "
+    "-m agent.transports.hermes_tools_mcp_server"
+)
+
+_HERMES_MESSAGING_REMOTE = (
+    "cd /home/openclaw1/.hermes/hermes-agent && "
+    "HERMES_QUIET=1 "
+    "/home/openclaw1/.hermes/hermes-agent/venv/bin/hermes mcp serve"
+)
 
 MCP_SERVERS: list[dict[str, Any]] = [
     {
         "name": "hermes",
         "transport": "stdio",
         "command": "ssh",
-        "args": [
-            "openclaw1@vm-hermes",
-            "bash",
-            "-lc",
-            "source ~/.hermes/hermes-agent/venv/bin/activate && hermes mcp serve",
-        ],
+        "args": [*_HERMES_SSH_PREFIX, _HERMES_TOOLS_REMOTE],
+        "env": {},
+        "url": None,
+    },
+    {
+        "name": "hermes-messaging",
+        "transport": "stdio",
+        "command": "ssh",
+        "args": [*_HERMES_SSH_PREFIX, _HERMES_MESSAGING_REMOTE],
         "env": {},
         "url": None,
     },
     {
         "name": "context7",
-        "transport": "sse",
+        "transport": "http",
         "command": None,
         "args": [],
-        "env": {},
+        "env": {"CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"},
         "url": "https://mcp.context7.com/mcp",
     },
     {
@@ -134,11 +205,14 @@ MCP_SERVERS: list[dict[str, Any]] = [
     },
     {
         "name": "gitlab",
-        "transport": "sse",
-        "command": None,
-        "args": [],
-        "env": {},
-        "url": "https://prod.tail61d527.ts.net:3443/api/v4/mcp",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@zereight/gitlab-mcp"],
+        "env": {
+            "GITLAB_API_URL": "${GITLAB_API_URL}",
+            "GITLAB_PERSONAL_ACCESS_TOKEN": "${GITLAB_TOKEN}",
+        },
+        "url": None,
     },
     {
         "name": "prisma-local",
@@ -150,7 +224,7 @@ MCP_SERVERS: list[dict[str, Any]] = [
     },
     {
         "name": "prisma-remote",
-        "transport": "sse",
+        "transport": "http",
         "command": None,
         "args": [],
         "env": {},
@@ -166,15 +240,15 @@ MCP_SERVERS: list[dict[str, Any]] = [
     },
     {
         "name": "neon",
-        "transport": "sse",
+        "transport": "http",
         "command": None,
         "args": [],
-        "env": {},
+        "env": {"NEON_API_KEY": "${NEON_API_KEY}"},
         "url": "https://mcp.neon.tech/mcp",
     },
     {
         "name": "figma",
-        "transport": "sse",
+        "transport": "http",
         "command": None,
         "args": [],
         "env": {},
@@ -184,7 +258,15 @@ MCP_SERVERS: list[dict[str, Any]] = [
         "name": "aikido",
         "transport": "stdio",
         "command": "npx",
-        "args": ["-y", "@aikidosec/mcp@1.0.17"],
+        "args": ["-y", "@aikidosec/mcp"],
+        "env": {"AIKIDO_API_KEY": "${AIKIDO_API_KEY}"},
+        "url": None,
+    },
+    {
+        "name": "duckduckgo",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@oevortex/ddg_search@latest"],
         "env": {},
         "url": None,
     },
@@ -311,8 +393,10 @@ def update_identity(source: Path, data_dir: Path, dry_run: bool) -> None:
     full_prompt = agents_md.read_text(encoding="utf-8")
     settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
     settings["agent_constitution"] = CONDENSED_CONSTITUTION
-    settings["agent_constitution_version"] = "2"
-    settings["agent_display_name"] = settings.get("agent_display_name") or "Hermes Orchestrator"
+    settings["agent_constitution_version"] = "3"
+    display = settings.get("agent_display_name") or ""
+    if display in ("", "Assistant", "Hermes Orchestrator"):
+        settings["agent_display_name"] = "Pandamonium"
     presets = json.loads(presets_path.read_text(encoding="utf-8")) if presets_path.exists() else {}
     presets["hermes_orchestrator"] = {
         "name": "Hermes Orchestrator",
@@ -441,13 +525,19 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, default=DEFAULT_REPO)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--sync", action="store_true", help="Re-import after opencode git pull")
+    parser.add_argument("--mcp-only", action="store_true", help="Re-write mcp_servers rows only")
     parser.add_argument("--manifest-out", type=Path, default=Path("/tmp/cursor-opencode-migration.v1.json"))
     args = parser.parse_args()
 
-    if not args.source.is_dir():
+    if not args.mcp_only and not args.source.is_dir():
         raise SystemExit(f"source not found: {args.source}")
     if not args.data_dir.is_dir():
         raise SystemExit(f"data dir not found: {args.data_dir}")
+
+    if args.mcp_only:
+        mcp_count = import_mcp(args.data_dir, args.dry_run)
+        print(json.dumps({"dry_run": args.dry_run, "mcp_servers": mcp_count}, indent=2))
+        return 0
 
     skill_counts = import_skills(args.source, args.data_dir, args.dry_run)
     update_identity(args.source, args.data_dir, args.dry_run)

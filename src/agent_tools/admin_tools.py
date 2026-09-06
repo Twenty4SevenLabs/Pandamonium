@@ -409,22 +409,8 @@ async def do_manage_mcp(content: str, owner: Optional[str] = None) -> Dict:
             try:
                 srv = db2.query(McpServer).filter(McpServer.id == sid).first()
                 if srv:
-                    _args = json.loads(srv.args) if srv.args else []
-                    _env = json.loads(srv.env) if srv.env else {}
-                    _connect_kwargs = dict(
-                        server_id=sid,
-                        name=srv.name,
-                        transport=srv.transport,
-                        command=srv.command,
-                        args=_args,
-                        env=_env,
-                        url=srv.url,
-                    )
-                    from src.mcp_manager import _static_http_headers
-                    _headers = _static_http_headers(getattr(srv, "oauth_tokens", None))
-                    if _headers:
-                        _connect_kwargs["headers"] = _headers
-                    await mcp.connect_server(**_connect_kwargs)
+                    from src.mcp_manager import _mcp_connect_kwargs
+                    await mcp.connect_server(**_mcp_connect_kwargs(srv))
                     st = mcp.get_server_status(sid)
                     return {"response": f"Reconnected '{srv.name}' ({st.get('tool_count', 0)} tools)", "exit_code": 0}
                 return {"error": f"Server {sid} not found", "exit_code": 1}

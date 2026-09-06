@@ -79,6 +79,7 @@ let bargeVoicedMs = 0;
 let bargeArmedAt = 0;
 let bargeInFlight = false;
 let bargeBaseline = 0;
+let lastSpokenPlain = '';
 let voiceTurnEpoch = 0;
 let playbackTailPromise = Promise.resolve();
 let browserTranscript = '';
@@ -117,10 +118,10 @@ const MIN_RECORDING_BYTES = 400;
 const CHUNK_VOICE_BYTES = 1000;
 const VOICE_SILENCE_MS = 1600;
 const MAX_TURN_MS = 5 * 60 * 1000;
-const BARGE_IN_MS = 180;
-const BARGE_RMS_THRESHOLD = 0.03;
+const BARGE_IN_MS = 550;
+const BARGE_RMS_THRESHOLD = 0.045;
 const BARGE_RMS_RATIO = 2.5;
-const BARGE_GRACE_MS = 400;
+const BARGE_GRACE_MS = 900;
 const VOICE_CUE_GAIN = 0.12;
 const VOICE_PREWARM_TIMEOUT_MS = 2500;
 const CALL_PANEL_TRANSITION_MS = 280;
@@ -437,13 +438,43 @@ async function ensureVoiceMeterWorklet(ctx) {
   if (!ctx?.audioWorklet?.addModule) return false;
   if (ctx._jarvisWorkletLoaded) return true;
   try {
-    await ctx.audioWorklet.addModule('/static/js/voiceMeterProcessor.js?v=20260905T081200Z');
+    await ctx.audioWorklet.addModule('/static/js/voiceMeterProcessor.js?v=20260906T003800Z');
     ctx._jarvisWorkletLoaded = true;
     return true;
   } catch (error) {
     console.warn('Jarvis voice meter worklet unavailable:', error);
     return false;
   }
+}
+
+function normalizeVoiceText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function transcriptLooksLikeTtsEcho(heard, spokenPlain) {
+  const a = normalizeVoiceText(heard);
+  const b = normalizeVoiceText(spokenPlain);
+  if (!a || !b || a.length < 12) return false;
+  if (b.includes(a) || a.includes(b.slice(0, Math.min(80, b.length)))) return true;
+  const heardTokens = a.split(' ');
+  const spokenTokens = b.split(' ');
+  let prefix = 0;
+  while (prefix < heardTokens.length && prefix < spokenTokens.length && heardTokens[prefix] === spokenTokens[prefix]) {
+    prefix += 1;
+  }
+  if (prefix >= 5) return true;
+  const heardWords = heardTokens.filter(word => word.length >= 3);
+  const spokenWords = new Set(spokenTokens.filter(word => word.length >= 3));
+  if (heardWords.length < 3 || spokenWords.size < 3) return false;
+  let hits = 0;
+  for (const word of heardWords) {
+    if (spokenWords.has(word)) hits += 1;
+  }
+  return hits / heardWords.length >= 0.55;
 }
 
 function bargeEnergyDecision(rms, baseline, voicedMs, sampleMs, now, armedAt) {
@@ -2288,6 +2319,7 @@ function enqueueSpeech(text, type = 'speech', source = 'jarvis', timings = {}) {
   if (!clean) return;
   const key = clean.toLowerCase().replace(/\s+/g, ' ');
   if (speechQueue.some(item => item.key === key) || currentSpeech?.key === key) return;
+  lastSpokenPlain = `${lastSpokenPlain} ${normalizeVoiceText(clean)}`.trim().slice(-800);
   speechQueue.push({ text: clean, type, source, key, timings });
   if (!speechPaused) processSpeechQueue().catch(handleError);
 }
@@ -2310,7 +2342,11 @@ function workerSpeech(event) {
 }
 
 function pauseCaptureForSpeech() {
-  if (bargeWatching && mediaRecorder?.state === 'recording') return;
+  if (bargeWatching) {
+    if (mediaRecorder?.state === 'recording') return;
+    startBargeWatch(voiceCallGeneration, { resetArm: false }).catch(handleError);
+    return;
+  }
   bargeWatching = true;
   bargeVoicedMs = 0;
   bargeBaseline = 0;
@@ -2326,17 +2362,19 @@ function pauseCaptureForSpeech() {
     try { mediaRecorder.stop(); } catch { /* already inactive */ }
     return;
   }
-  startBargeWatch(voiceCallGeneration).catch(handleError);
+  startBargeWatch(voiceCallGeneration, { resetArm: false }).catch(handleError);
 }
 
-async function startBargeWatch(callGeneration = voiceCallGeneration) {
+async function startBargeWatch(callGeneration = voiceCallGeneration, options = {}) {
   bargeWatching = true;
-  bargeVoicedMs = 0;
-  bargeBaseline = 0;
-  bargeArmedAt = Date.now() + BARGE_GRACE_MS;
-  listenChunks.length = 0;
-  captureHeardVoice = false;
-  captureVoicedMs = 0;
+  if (options.resetArm !== false) {
+    bargeVoicedMs = 0;
+    bargeBaseline = 0;
+    bargeArmedAt = Date.now() + BARGE_GRACE_MS;
+    listenChunks.length = 0;
+    captureHeardVoice = false;
+    captureVoicedMs = 0;
+  }
   if (mediaRecorder?.state === 'recording') return;
   if (!isCurrentVoiceCall(callGeneration) || !isActive) return;
   const stream = liveMicrophoneStream() || await requestMicrophone(callGeneration);
@@ -3145,6 +3183,13 @@ async function handleHeardTurn(text, callGeneration) {
     }, 400);
     return;
   }
+  if (transcriptLooksLikeTtsEcho(spoken, lastSpokenPlain)) {
+    setStatus('listening', 'Ignored playback leak.');
+    window.setTimeout(() => {
+      if (isCurrentVoiceCall(callGeneration)) startListening().catch(handleError);
+    }, 250);
+    return;
+  }
   const turnEpoch = ++voiceTurnEpoch;
   stopSpeechOrbPulse();
   try {
@@ -3243,14 +3288,16 @@ function attachListenRecorder(requestedStream, callGeneration) {
       captureVoicedMs = 0;
       stopBrowserRecognition().catch(() => {});
       if (bargeWatching && isCurrentVoiceCall(callGeneration) && isActive) {
-        startBargeWatch(callGeneration).catch(handleError);
+        startBargeWatch(callGeneration, { resetArm: false }).catch(handleError);
       }
       return;
     }
 
     if (bargeWatching) {
       window.setTimeout(() => {
-        if (isCurrentVoiceCall(callGeneration) && isActive) startBargeWatch(callGeneration).catch(handleError);
+        if (isCurrentVoiceCall(callGeneration) && isActive) {
+          startBargeWatch(callGeneration, { resetArm: false }).catch(handleError);
+        }
       }, 80);
       return;
     }
@@ -3608,6 +3655,7 @@ async function startCall() {
   speechPaused = false;
   speechQueue = [];
   currentSpeech = null;
+  lastSpokenPlain = '';
   brainTurnInProgress = false;
   activeWorkerTaskId = null;
   activeCodexThreadId = null;
@@ -3668,6 +3716,7 @@ function endCall() {
   speechPaused = true;
   speechQueue = [];
   currentSpeech = null;
+  lastSpokenPlain = '';
   setAgentWorkspaceActive(false);
   playbackToken += 1;
   clearTurnTimers();

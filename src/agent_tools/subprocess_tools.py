@@ -7,6 +7,7 @@ from src.constants import MAX_OUTPUT_CHARS
 
 DEFAULT_BASH_TIMEOUT = 60 * 60     # 1 hour
 DEFAULT_PYTHON_TIMEOUT = 60 * 60
+DEFAULT_HERMES_SSH_TIMEOUT = 60 * 60
 
 PROGRESS_INTERVAL_S = 2.0
 PROGRESS_TAIL_LINES = 12
@@ -149,5 +150,50 @@ class PythonTool:
         err = stderr.rstrip()
         if err:
             output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
+        output = _truncate(output, MAX_OUTPUT_CHARS)
+        return {"output": output or "(no output)", "exit_code": rc or 0}
+
+
+class HermesSshTool:
+    """Run a shell command on vm-hermes via non-interactive SSH (no TTY)."""
+
+    async def execute(self, content: str, ctx: dict) -> dict:
+        from src.ssh_cookbook import ensure_ssh_cookbook, hermes_ssh_argv
+        from src.tool_execution import agent_cwd, _truncate
+
+        remote = (content or "").strip()
+        if not remote:
+            return {"error": "hermes_ssh: empty command", "exit_code": 1}
+        progress_cb = ctx.get("progress_cb")
+        _subproc_env = ctx.get("subproc_env")
+        ensure_ssh_cookbook()
+        proc = await asyncio.create_subprocess_exec(
+            *hermes_ssh_argv(remote),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=_subproc_env,
+            cwd=agent_cwd(),
+        )
+        stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
+            proc,
+            timeout=DEFAULT_HERMES_SSH_TIMEOUT,
+            progress_cb=progress_cb,
+        )
+        if timed_out:
+            return {
+                "error": f"hermes_ssh: timed out after {DEFAULT_HERMES_SSH_TIMEOUT}s — process killed",
+                "exit_code": 124,
+                "stdout": _truncate(stdout, MAX_OUTPUT_CHARS),
+                "stderr": _truncate(stderr, MAX_OUTPUT_CHARS),
+            }
+        output = stdout.rstrip()
+        err = stderr.rstrip()
+        if err:
+            output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
+        from src.hermes_kanban_cli import cli_usage_hint
+
+        hint = cli_usage_hint(remote, rc or 0)
+        if hint:
+            output = (output + hint).strip() if output else hint.strip()
         output = _truncate(output, MAX_OUTPUT_CHARS)
         return {"output": output or "(no output)", "exit_code": rc or 0}

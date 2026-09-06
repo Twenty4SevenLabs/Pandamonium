@@ -5,10 +5,20 @@ services:
     privileged: true
     security_opt:
       - seccomp:unconfined
+    volumes:
+      - /mnt/dev-env:/mnt/dev-env:rw
     extra_hosts:
       - "m1.tail61d527.ts.net:192.168.1.2"
       - "m2.tail61d527.ts.net:192.168.1.191"
       - "247laptop.tail61d527.ts.net:192.168.1.98"
+      - "vm-hermes:192.168.1.192"
+    environment:
+      - NPM_CONFIG_CACHE=/app/data/.npm
+      - APP_PUBLIC_URL=${APP_PUBLIC_URL:-https://prod.tail61d527.ts.net:7080}
+      - OAUTH_REDIRECT_BASE_URL=${OAUTH_REDIRECT_BASE_URL:-https://prod.tail61d527.ts.net:7080}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-https://prod.tail61d527.ts.net:7080,http://127.0.0.1:7080}
+      - SECURE_COOKIES=${SECURE_COOKIES:-true}
+      - GITLAB_API_URL=${GITLAB_API_URL:-http://192.168.1.211/api/v4}
     ports: !override
       - "127.0.0.1:7080:7000"
 

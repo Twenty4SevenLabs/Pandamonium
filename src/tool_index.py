@@ -68,6 +68,8 @@ COLLECTION_NAME = "odysseus_tool_index"
 # These are richer than the system prompt one-liners — they're for embedding.
 BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "bash": "Run shell commands on the server. Install packages, git operations, builds, system info, process management. Prefer a dedicated tool whenever one fits the job (file read/write/edit, search, listing); use bash only for what no dedicated tool covers. Do not use for web lookup/search; use web_search or web_fetch when web tools are available.",
+    "hermes_ssh": "Non-interactive SSH to vm-hermes (192.168.1.192) as openclaw1 (ssh -T, no TTY). Full Hermes VM control: hermes kanban archive/create/complete/boards, gateway, profiles, dispatcher, sudo, bulk ops. Use hermes_kanban for structured Kanban CLI. Never claim SSH is unavailable.",
+    "hermes_kanban": "Structured Hermes Kanban CLI on vm-hermes (default board pandamonium). Correct create syntax, archive, dispatch, list, complete. Prefer Hermes MCP kanban_* when connected.",
     "python": "Execute Python code for computation, data processing, math, scripting, and parsing. Not for writing code for the user. Prefer a dedicated tool for reading, writing, or searching files; use python only for what no dedicated tool covers. Do not use for web lookup/search; use web_search or web_fetch when web tools are available.",
     "web_search": "Quick single web lookup for a fact, current event, latest/current information, or doc mid-task. Use this instead of bash/curl/python/requests for web searches. NOT for 'research X' / 'do research on X' requests — those are deep-research jobs (use trigger_research). web_search = one query; trigger_research = a full researched report in the sidebar.",
     "web_fetch": "Fetch and read the text content of a specific URL/website the user names (e.g. 'check example.com', 'open this link'). Use when you have a concrete URL; for open-ended lookups use web_search instead.",
@@ -375,6 +377,10 @@ class ToolIndex:
                    "delete session", "fork chat", "fork session",
                    "name the chats", "name my chats", "rename them"}):
             {"list_sessions", "manage_session"},
+        frozenset({"kanban", "hermes", "morpheus", "vm-hermes", "kanban board", "kanban card",
+                   "hermes kanban", "kanban archive", "archive card", "archive task",
+                   "archive kanban", "boards switch", "hermes gateway", "openclaw1"}):
+            {"hermes_ssh", "hermes_kanban", "bash"},
         frozenset({"recurring", "every day", "every hour", "every morning",
                    "every evening", "every night", "every week", "each morning",
                    "daily task", "background task", "scheduled task", "schedule a",

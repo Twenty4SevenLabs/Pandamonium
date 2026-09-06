@@ -19,7 +19,8 @@ from src.tool_utils import _truncate, get_mcp_manager, set_mcp_manager
 
 logger = logging.getLogger(__name__)
 
-from .subprocess_tools import BashTool, PythonTool
+from .subprocess_tools import BashTool, PythonTool, HermesSshTool
+from .hermes_kanban_tool import HermesKanbanTool
 from .web_tools import WebSearchTool, WebFetchTool
 from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
@@ -37,6 +38,8 @@ from .admin_tools import (
 TOOL_HANDLERS = {
     "bash": BashTool().execute,
     "python": PythonTool().execute,
+    "hermes_ssh": HermesSshTool().execute,
+    "hermes_kanban": HermesKanbanTool().execute,
     "web_search": WebSearchTool().execute,
     "web_fetch": WebFetchTool().execute,
     "read_file": ReadFileTool().execute,
@@ -74,7 +77,7 @@ SHELL_TIMEOUT = 60
 PYTHON_TIMEOUT = 30
 
 # Tool types that trigger execution
-TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
+TOOL_TAGS = {"bash", "python", "hermes_ssh", "hermes_kanban", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
              "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
              "create_document", "update_document", "edit_document",
              "search_chats",

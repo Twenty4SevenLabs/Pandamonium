@@ -2,7 +2,14 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from src.mcp_manager import _format_mcp_connection_error, _static_http_headers, McpManager
+from src.mcp_manager import (
+    _expand_env_placeholders,
+    _format_mcp_connection_error,
+    _http_headers_from_env,
+    _mcp_connect_kwargs,
+    _static_http_headers,
+    McpManager,
+)
 
 
 def test_playwright_mcp_connection_error_includes_install_hint():
@@ -17,6 +24,17 @@ def test_playwright_mcp_connection_error_includes_install_hint():
     assert "Browser MCP could not start" in msg
     assert "npx -y @playwright/mcp@latest --version" in msg
     assert "restart Pandamonium" in msg
+
+
+def test_aikido_mcp_connection_error_includes_api_key_hint():
+    msg = _format_mcp_connection_error(
+        "aikido",
+        "npx",
+        ["-y", "@aikidosec/mcp"],
+        RuntimeError("spawn failed"),
+    )
+    assert "spawn failed" in msg
+    assert "AIKIDO_API_KEY" in msg
 
 
 def test_generic_mcp_connection_error_preserves_original_error():
@@ -71,6 +89,56 @@ def test_http_transport_forwards_static_headers_without_changing_other_transport
     )
 
 
+def test_expand_env_placeholders_resolves_dollar_and_opencode_forms(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-fixture")
+    monkeypatch.setenv("CONTEXT7_API_KEY", "ctx-fixture")
+    monkeypatch.delenv("MISSING_TOKEN", raising=False)
+    expanded = _expand_env_placeholders(
+        {
+            "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}",
+            "CONTEXT7_API_KEY": "{env:CONTEXT7_API_KEY}",
+            "EMPTY": "${MISSING_TOKEN}",
+            "LITERAL": "plain",
+        }
+    )
+    assert expanded["GITHUB_PERSONAL_ACCESS_TOKEN"] == "gh-fixture"
+    assert expanded["CONTEXT7_API_KEY"] == "ctx-fixture"
+    assert expanded["LITERAL"] == "plain"
+    assert "EMPTY" not in expanded
+
+
+def test_http_headers_from_env_prefer_bearer_api_keys():
+    assert _http_headers_from_env({"CONTEXT7_API_KEY": "ctx-fixture"}) == {
+        "Authorization": "Bearer ctx-fixture"
+    }
+    assert _http_headers_from_env({"NEON_API_KEY": "neon-fixture"}) == {
+        "Authorization": "Bearer neon-fixture"
+    }
+    assert _http_headers_from_env({"AUTHORIZATION": "Bearer already"}) == {
+        "Authorization": "Bearer already"
+    }
+    assert _http_headers_from_env({"CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"}) is None
+    assert _http_headers_from_env({}) is None
+
+
+def test_mcp_connect_kwargs_expand_env_and_prefer_static_bearer(monkeypatch):
+    monkeypatch.setenv("CONTEXT7_API_KEY", "ctx-fixture")
+    srv = SimpleNamespace(
+        id="ctx",
+        name="context7",
+        transport="http",
+        command=None,
+        args="[]",
+        env='{"CONTEXT7_API_KEY":"${CONTEXT7_API_KEY}"}',
+        url="https://mcp.context7.com/mcp",
+        oauth_tokens='{"static_bearer_token":"stored-bearer"}',
+    )
+    kwargs = _mcp_connect_kwargs(srv)
+    assert kwargs["env"]["CONTEXT7_API_KEY"] == "ctx-fixture"
+    assert kwargs["headers"] == {"Authorization": "Bearer stored-bearer"}
+    assert kwargs["transport"] == "http"
+
+
 def test_static_http_headers_accept_only_bounded_bearer_storage():
     assert _static_http_headers('{"static_bearer_token":"fixture-token"}') == {
         "Authorization": "Bearer fixture-token"
@@ -79,6 +147,29 @@ def test_static_http_headers_accept_only_bounded_bearer_storage():
     assert _static_http_headers('{"static_bearer_token":42}') is None
     assert _static_http_headers('{"tokens":{"access_token":"oauth"}}') is None
     assert _static_http_headers('not-json') is None
+
+
+def test_hermes_mcp_connection_error_includes_ssh_hint():
+    msg = _format_mcp_connection_error(
+        "hermes",
+        "ssh",
+        ["-i", "/app/.ssh/id_ed25519", "openclaw1@192.168.1.192", "bash", "-lc", "hermes_tools_mcp_server"],
+        RuntimeError("Connection closed"),
+    )
+    assert "Connection closed" in msg
+    assert "hermes_tools_mcp_server" in msg
+
+
+def test_ensure_connected_returns_tools_when_session_live():
+    mgr = McpManager()
+    mgr._connections["srv1"] = {"status": "connected", "name": "hermes"}
+    mgr._sessions["srv1"] = object()
+    mgr._tools["srv1"] = [{"name": "kanban_list"}]
+
+    ok, err, tools = asyncio.run(mgr.ensure_connected("srv1"))
+    assert ok is True
+    assert err is None
+    assert tools and tools[0]["name"] == "kanban_list"
 
 
 def test_mcp_call_preserves_bounded_structured_content_for_native_consumers():

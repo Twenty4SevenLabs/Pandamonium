@@ -58,6 +58,17 @@ def create_dirs():
         print(f"  [ok] {os.path.relpath(d, BASE_DIR)}/")
 
 
+def setup_ssh_cookbook():
+    """Agent bash SSH config + Hermes host keys for vm-hermes CLI access."""
+    try:
+        from src.ssh_cookbook import ensure_ssh_cookbook
+
+        ensure_ssh_cookbook()
+        print("  [ok] SSH cookbook (agent config + Hermes known_hosts)")
+    except Exception as exc:
+        print(f"  [warn] SSH cookbook setup failed: {exc}")
+
+
 def init_database():
     """Create all SQLAlchemy tables."""
     sys.path.insert(0, BASE_DIR)
@@ -274,6 +285,9 @@ def main():
 
     print("1. Creating directories...")
     create_dirs()
+
+    print("\n1b. SSH cookbook (vm-hermes)...")
+    setup_ssh_cookbook()
 
     print("\n2. Environment file...")
     create_env()

@@ -55,7 +55,7 @@ _DESTRUCTIVE = frozenset(
 )
 _ADMINISTRATIVE = frozenset(
     {
-        "bash", "python", "download_model", "serve_model", "serve_preset", "adopt_served_model",
+        "bash", "python",
         "manage_settings", "manage_endpoints", "manage_mcp", "manage_tokens", "manage_webhooks",
         "vault_unlock",
     }
@@ -65,6 +65,36 @@ _PUBLIC_READS = frozenset({"web_search", "web_fetch", "get_runtime_status"})
 _EXTENSION_PERMISSION_MODES = frozenset(
     {"read_only", "bounded_write", "external_side_effect", "destructive", "controlled_administrative"}
 )
+
+_MCP_READONLY_TOOLS = frozenset({
+    "kanban_list", "kanban_show", "kanban_attachments",
+    "conversations_list", "conversation_get", "messages_read",
+    "attachments_fetch", "events_poll", "events_wait", "channels_list",
+    "permissions_list_open",
+})
+_MCP_EXTERNAL_TOOLS = frozenset({"messages_send", "permissions_respond"})
+_SUDO_COMMAND_RE = re.compile(r"\bsudo\b", re.I)
+
+
+def _mcp_tool_basename(name: str) -> str | None:
+    if not name.startswith("mcp__"):
+        return None
+    parts = name.split("__", 2)
+    if len(parts) < 3:
+        return None
+    return parts[2]
+
+
+def _shell_command_text(call: Mapping[str, Any]) -> str:
+    arguments = call.get("arguments")
+    if isinstance(arguments, Mapping):
+        for key in ("command", "script", "code", "content"):
+            value = arguments.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    if isinstance(arguments, str):
+        return arguments
+    return ""
 
 
 def _now() -> datetime:
@@ -154,6 +184,19 @@ def permission_mode_for(call: Mapping[str, Any]) -> str:
     action = str(arguments.get("action") or "").lower()
     method = str(arguments.get("method") or "").upper()
     target = str(call.get("target") or "")
+    mcp_tool = _mcp_tool_basename(name)
+    if mcp_tool is not None:
+        if mcp_tool in _MCP_READONLY_TOOLS or mcp_tool.startswith(("list_", "get_", "read_", "search_", "show_")):
+            return "read_only"
+        if mcp_tool in _MCP_EXTERNAL_TOOLS:
+            return "external_side_effect"
+        if mcp_tool.startswith("kanban_"):
+            return "bounded_write"
+        return "bounded_write"
+    if name in ("bash", "python") and _SUDO_COMMAND_RE.search(_shell_command_text(call)):
+        return "external_side_effect"
+    if name == "hermes_ssh" or name == "hermes_kanban":
+        return "bounded_write"
     if target.startswith("extension:"):
         policy = call.get("capability_policy") if isinstance(call.get("capability_policy"), Mapping) else {}
         declared = str(policy.get("permission_mode") or "")

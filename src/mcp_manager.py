@@ -18,6 +18,102 @@ from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
 
+MCP_CONNECT_TIMEOUT_SECONDS = 90
+_ENV_PLACEHOLDER = re.compile(
+    r"\$\{([A-Z_][A-Z0-9_]*)\}|\{env:([A-Z_][A-Z0-9_]*)\}"
+)
+_HTTP_ENV_BEARER_KEYS = (
+    "CONTEXT7_API_KEY",
+    "NEON_API_KEY",
+    "GITLAB_TOKEN",
+    "GITLAB_PERSONAL_ACCESS_TOKEN",
+)
+
+
+def _expand_env_placeholders(env: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Resolve ${VAR} / {env:VAR} MCP config placeholders from the process env.
+
+    Unresolved or empty values are omitted so a missing secret cannot override a
+    real value already present in the container environment.
+    """
+    if not isinstance(env, dict):
+        return {}
+    resolved: Dict[str, str] = {}
+    for key, value in env.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+
+        def _replace(match: re.Match) -> str:
+            name = match.group(1) or match.group(2)
+            return os.environ.get(name or "", "")
+
+        expanded = _ENV_PLACEHOLDER.sub(_replace, value).strip()
+        if not expanded or _ENV_PLACEHOLDER.search(expanded):
+            continue
+        resolved[key] = expanded
+    return resolved
+
+
+def _bounded_header_secret(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    token = value.strip()
+    if not token or len(token) > 4096 or any(ord(char) < 32 for char in token):
+        return None
+    if "${" in token or token.startswith("{env:"):
+        return None
+    return token
+
+
+def _http_headers_from_env(env: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """Build Streamable HTTP auth headers from expanded MCP env, never placeholders."""
+    if not isinstance(env, dict):
+        return None
+    auth = _bounded_header_secret(env.get("Authorization") or env.get("AUTHORIZATION"))
+    if auth:
+        if not auth.lower().startswith("bearer "):
+            auth = f"Bearer {auth}"
+        return {"Authorization": auth}
+    for key in _HTTP_ENV_BEARER_KEYS:
+        token = _bounded_header_secret(env.get(key))
+        if token:
+            return {"Authorization": f"Bearer {token}"}
+    return None
+
+
+def _mcp_connect_kwargs(srv: Any) -> Dict[str, Any]:
+    """Build connect_server kwargs from a persisted McpServer row."""
+    raw_env: Dict[str, Any] = {}
+    if getattr(srv, "env", None):
+        try:
+            parsed = json.loads(srv.env)
+            if isinstance(parsed, dict):
+                raw_env = parsed
+        except (TypeError, json.JSONDecodeError):
+            raw_env = {}
+    env = _expand_env_placeholders(raw_env)
+    try:
+        args = json.loads(srv.args) if getattr(srv, "args", None) else []
+        if not isinstance(args, list):
+            args = []
+    except (TypeError, json.JSONDecodeError):
+        args = []
+    kwargs: Dict[str, Any] = {
+        "server_id": srv.id,
+        "name": srv.name,
+        "transport": srv.transport,
+        "command": srv.command,
+        "args": args,
+        "env": env,
+        "url": srv.url,
+    }
+    headers = _static_http_headers(getattr(srv, "oauth_tokens", None)) or _http_headers_from_env(
+        env
+    )
+    if headers:
+        kwargs["headers"] = headers
+    return kwargs
+
 
 def _static_http_headers(oauth_tokens: Optional[str]) -> Optional[Dict[str, str]]:
     """Recover the one supported static HTTP credential from encrypted storage.
@@ -55,6 +151,22 @@ def _format_mcp_connection_error(name: str, command: str = "", args: Optional[Li
             "Browser MCP could not start. On fresh installs, cache the Playwright MCP package once before connecting:\n\n"
             "npx -y @playwright/mcp@latest --version\n\n"
             "Then restart Pandamonium and reconnect the Browser MCP server."
+        )
+
+    if "@aikidosec/mcp" in lower_command:
+        return (
+            f"{raw_error}\n\n"
+            "Aikido MCP needs AIKIDO_API_KEY in the Pandamonium environment "
+            "(Aikido Settings → Integrations → MCP Server). Browser sign-in cannot run inside Docker."
+        )
+
+    if command == "ssh" or "hermes mcp serve" in lower_command or "hermes_tools_mcp_server" in lower_command:
+        return (
+            f"{raw_error}\n\n"
+            "Hermes MCP is reached over SSH to 192.168.1.192 using "
+            "/app/.ssh/id_ed25519. Confirm that key is authorized as openclaw1 "
+            "and that the remote command is hermes_tools_mcp_server (kanban tools), "
+            "not hermes mcp serve (messaging)."
         )
 
     return raw_error
@@ -212,6 +324,9 @@ class McpManager:
         headers: Optional[Dict[str, str]] = None,
     ) -> bool:
         """Connect to an MCP server via stdio, SSE, or Streamable HTTP transport."""
+        env = _expand_env_placeholders(env)
+        if not headers:
+            headers = _http_headers_from_env(env)
         try:
             if transport == "stdio":
                 res = await self._connect_stdio(
@@ -263,10 +378,11 @@ class McpManager:
             from mcp.client.stdio import stdio_client
             from contextlib import AsyncExitStack
 
+            resolved_env = _expand_env_placeholders(env)
             server_params = StdioServerParameters(
                 command=command,
                 args=args,
-                env={**os.environ, **env} if env else None,
+                env={**os.environ, **resolved_env} if resolved_env else None,
             )
 
             loop = asyncio.get_running_loop()
@@ -564,6 +680,52 @@ class McpManager:
         for sid in ids:
             await self.disconnect_server(sid)
 
+    async def ensure_connected(self, server_id: str) -> Tuple[bool, Optional[str], Optional[List[Dict]]]:
+        """Ensure an MCP server is connected; reconnect from DB config when needed."""
+        conn = self._connections.get(server_id, {})
+        if conn.get("status") == "connected" and server_id in self._sessions:
+            return True, None, self._tools.get(server_id)
+
+        db = SessionLocal()
+        try:
+            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+            if not srv:
+                return False, f"Unknown MCP server: {server_id}", None
+            if not getattr(srv, "is_enabled", True):
+                return False, "MCP server is disabled", None
+            ok = await self.connect_server(**_mcp_connect_kwargs(srv))
+            if ok:
+                return True, None, self._tools.get(server_id)
+            err = self._connections.get(server_id, {}).get("error", "connect failed")
+            return False, str(err or "connect failed"), None
+        finally:
+            db.close()
+
+    def _is_reconnectable_stdio(self, server_id: str) -> bool:
+        """Builtin and SSH-tunneled stdio servers may be restarted after crashes."""
+        if self.is_builtin(server_id):
+            return True
+        conn = self._connections.get(server_id, {})
+        if conn.get("transport") != "stdio":
+            return False
+        name = str(conn.get("name") or "").lower()
+        return name.startswith("hermes")
+
+    async def _reconnect_server(self, server_id: str) -> bool:
+        """Tear down and reconnect a persisted MCP server."""
+        if self.is_builtin(server_id):
+            return await self._reconnect_builtin(server_id)
+
+        db = SessionLocal()
+        try:
+            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+            if not srv:
+                return False
+            await self.disconnect_server(server_id)
+            return await self.connect_server(**_mcp_connect_kwargs(srv))
+        finally:
+            db.close()
+
 
     async def connect_all_enabled(self):
         db = SessionLocal()
@@ -581,28 +743,16 @@ class McpManager:
 
 
     async def _connect_with_timeout(self, srv):
-        args = json.loads(srv.args) if srv.args else []
-        env = json.loads(srv.env) if srv.env else {}
-
         try:
             await asyncio.wait_for(
-                self.connect_server(
-                    server_id=srv.id,
-                    name=srv.name,
-                    transport=srv.transport,
-                    command=srv.command,
-                    args=args,
-                    env=env,
-                    url=srv.url,
-                    headers=_static_http_headers(getattr(srv, "oauth_tokens", None)),
-                ),
-                timeout=20,
+                self.connect_server(**_mcp_connect_kwargs(srv)),
+                timeout=MCP_CONNECT_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
             logger.warning("Timed out connecting to %s", srv.name)
             self._connections[srv.id] = {
                 "status": "timeout",
-                "error": "Timed out after 20 seconds",
+                "error": f"Timed out after {MCP_CONNECT_TIMEOUT_SECONDS} seconds",
                 "name": srv.name,
             }
 
@@ -627,7 +777,12 @@ class McpManager:
 
         session = self._sessions.get(server_id)
         if not session:
-            return {"error": f"MCP server not connected: {server_id}", "exit_code": 1}
+            ok, err, _ = await self.ensure_connected(server_id)
+            if ok:
+                session = self._sessions.get(server_id)
+            if not session:
+                detail = f" ({err})" if err else ""
+                return {"error": f"MCP server not connected: {server_id}{detail}", "exit_code": 1}
 
         try:
             call = self._do_call(
@@ -641,10 +796,10 @@ class McpManager:
         except asyncio.TimeoutError:
             return {"error": "MCP tool call timed out", "exit_code": 1}
         except Exception as e:
-            # Auto-reconnect for builtin servers whose subprocess may have died
-            if self.is_builtin(server_id):
+            # Auto-reconnect when the stdio subprocess may have died (builtins + Hermes SSH).
+            if self._is_reconnectable_stdio(server_id):
                 logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {e}")
-                reconnected = await self._reconnect_builtin(server_id)
+                reconnected = await self._reconnect_server(server_id)
                 if reconnected:
                     session = self._sessions.get(server_id)
                     if session:

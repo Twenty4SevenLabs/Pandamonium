@@ -71,6 +71,8 @@ _COMMON_TOOL_NAMES = {
     "generate_image",
     "glob",
     "grep",
+    "hermes_ssh",
+    "hermes_kanban",
     "list_cached_models",
     "list_cookbook_servers",
     "list_downloads",

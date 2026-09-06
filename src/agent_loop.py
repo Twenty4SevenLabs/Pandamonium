@@ -356,6 +356,15 @@ _DOMAIN_RULES = {
 - Report MAD MCP Portal or ORACLE only when the inventory says they are present; never infer availability from documentation.
 - To query or control a configured service integration (Home Assistant, Miniflux, GitLab, Linkding, Jellyfin, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
+    "hermes": """\
+## Hermes / Kanban (vm-hermes)
+- **Pandamonium (Panda)** manages the Kanban board slug `pandamonium`. You issue cards; Hermes specialists execute cards assigned to their profile. **Morpheus (`default`)** still decomposes parent cards only.
+- vm-hermes (`192.168.1.192`, user `openclaw1`) is fully reachable via `hermes_ssh`, `hermes_kanban`, and Hermes MCP. Never claim SSH or Hermes CLI is unavailable.
+- **Three control paths** (use in this order): (1) Hermes MCP `kanban_*` when connected; (2) native `hermes_kanban` for CLI ops MCP lacks (archive, dispatch, promote) or when MCP is down — default board `pandamonium`, title is **positional** (never `--title`); (3) `hermes_ssh` for gateway, profiles, sudo, and other VM admin.
+- MCP kanban tools accept an explicit `board` arg — they do **not** inherit a prior `hermes kanban boards switch` from a separate SSH call.
+- `hermes_ssh` auto-sets `HERMES_KANBAN_BOARD=pandamonium` and fixes common `create --title` mistakes.
+- Examples: `hermes_kanban` action=archive task_ids=[t_abc]; `hermes kanban list --status ready`; `hermes gateway restart`.
+- Report only what a tool result shows; do not narrate success without calling a Hermes tool.""",
 }
 
 _DOMAIN_TOOL_MAP = {
@@ -371,6 +380,7 @@ _DOMAIN_TOOL_MAP = {
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"manage_mcp", "api_call"},
+    "hermes": {"hermes_ssh", "hermes_kanban", "bash"},
 }
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
@@ -400,6 +410,18 @@ pip install openai-whisper
 ```
 SANDBOX LIMITS: stdin/stdout are pipes, so there is NO interactive terminal — `input()`, `curses`, `termios`, `pygame`, and `tkinter` will all fail. Don't try to RUN interactive terminal games or GUI apps here — verify syntax (`python -c "import py_compile; py_compile.compile('x.py')"`) and tell the user to run it themselves in their own terminal. For anything the USER should play/use interactively (games, UIs, demos), prefer a single self-contained HTML file with `<canvas>` + inline JS — save it via `create_document` with language="html" and tell the user to hit the Run / Preview button (▶) in the document editor toolbar; it renders inline in a sandboxed iframe so the game is playable right there. Works from any machine that can reach the Pandamonium UI — no need to copy files out.
 NEVER pipe multi-line Python through `python -c "..."` — shell quoting eats real newlines and `\\n` arrives as literal backslash-n, which Python parses as a line-continuation error on line 1. To run multi-line code, either use the dedicated `python` tool block above, or save to a file first with a quoted HEREDOC (`cat > /tmp/x.py << 'EOF' ... EOF`) and then `python /tmp/x.py`.""",
+
+    "hermes_ssh": """\
+```hermes_ssh
+<remote shell command>
+```
+**Native non-interactive tool** — runs `ssh -T` on vm-hermes (192.168.1.192) as openclaw1. Do **not** invoke via `bash`; call `hermes_ssh` directly. Full VM control: gateway, profiles, dispatcher, `~/.hermes`, `sudo`, and raw `hermes` CLI. For Kanban prefer `hermes_kanban` or Hermes MCP. Auto-sets board `pandamonium`. Never say SSH is unavailable.""",
+
+    "hermes_kanban": """\
+```hermes_kanban
+{"action": "create", "title": "My task", "body": "Details", "assignee": "default", "created_by": "pandamonium"}
+```
+Structured Hermes Kanban CLI on vm-hermes (default board `pandamonium`). Title is positional — never `--title`. Actions: list, show, create, complete, archive, comment, block, boards_list, dispatch, raw. Prefer Hermes MCP `kanban_*` when connected; use this for archive/dispatch or MCP gaps.""",
 
     "python": """\
 ```python
@@ -1169,6 +1191,12 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("files")
     if has(r"\b(endpoint|api token|mcp|webhook|preference|configure|config|setting)\b"):
         domains.add("settings")
+    if has(
+        r"\b(kanban|hermes|morpheus|vm-hermes|openclaw1|specialist|assignee|dispatcher|kanban card|kanban board)\b",
+        r"\barchive\b.{0,40}\b(kanban|card|task|board)\b",
+        r"\b(kanban|card|task|board)\b.{0,40}\barchive\b",
+    ):
+        domains.add("hermes")
     if has(r"\b(contact|contacts|phone|phone number|address book|vcard)\b"):
         domains.add("contacts")
     # API-integration intent — calling a configured service via the api_call
@@ -3093,6 +3121,8 @@ async def stream_agent_loop(
                 )
         if "ui" in (_intent.get("domains") or set()):
             _relevant_tools.add("ui_control")
+        if "hermes" in (_intent.get("domains") or set()):
+            _relevant_tools.update({"hermes_ssh", "hermes_kanban", "bash"})
 
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.

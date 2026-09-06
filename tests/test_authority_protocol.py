@@ -44,6 +44,11 @@ def test_permission_classes_and_new_capabilities_fail_closed(tmp_path):
     assert permission_mode_for(_call(name="write_file", arguments={"path": "a", "content": "b"})) == "bounded_write"
     assert permission_mode_for(_call(name="delete_email")) == "destructive"
     assert permission_mode_for(_call(name="bash", arguments={"command": "pwd"})) == "controlled_administrative"
+    assert permission_mode_for(_call(name="bash", arguments={"command": "sudo apt update"})) == "external_side_effect"
+    assert permission_mode_for(_call(name="hermes_ssh", arguments={"command": "hermes kanban list"})) == "bounded_write"
+    assert permission_mode_for(_call(name="mcp__hermes__kanban_list", arguments={})) == "read_only"
+    assert permission_mode_for(_call(name="mcp__hermes__kanban_create", arguments={"title": "x"})) == "bounded_write"
+    assert permission_mode_for(_call(name="mcp__hermes-messaging__messages_send", arguments={"text": "hi"})) == "external_side_effect"
     assert permission_mode_for(_call(name="api_call", arguments={"method": "GET", "path": "/health"})) == "read_only"
     assert permission_mode_for(_call(name="api_call", arguments={"method": "get", "path": "/health"})) == "read_only"
     assert permission_mode_for(_call(name="api_call", arguments={"method": "POST", "path": "/jobs"})) == "external_side_effect"
@@ -51,6 +56,13 @@ def test_permission_classes_and_new_capabilities_fail_closed(tmp_path):
     decision = store.decide(_call(name="new_plugin_mutation"), operator_id="leo", session_id="session-1")
     assert decision["decision"] == "deny"
     assert decision["policy_basis"] == "unclassified_capability"
+    kanban = store.decide(
+        _call(name="mcp__hermes__kanban_create", arguments={"title": "Smoke"}),
+        operator_id="leo",
+        session_id="session-1",
+    )
+    assert kanban["decision"] == "allow"
+    assert kanban["permission_mode"] == "bounded_write"
 
 
 def test_unauthenticated_owner_scoped_or_effectful_action_is_denied(tmp_path, monkeypatch):

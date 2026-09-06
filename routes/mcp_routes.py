@@ -516,21 +516,8 @@ def setup_mcp_routes(mcp_manager: McpManager):
     portal_connect_lock = asyncio.Lock()
 
     async def _connect_saved_server(srv):
-        args = json.loads(srv.args) if srv.args else []
-        env = json.loads(srv.env) if srv.env else {}
-        kwargs = {
-            "server_id": srv.id,
-            "name": srv.name,
-            "transport": srv.transport,
-            "command": srv.command,
-            "args": args,
-            "env": env,
-            "url": srv.url,
-        }
-        headers = _static_http_headers(srv.oauth_tokens)
-        if headers:
-            kwargs["headers"] = headers
-        return await mcp_manager.connect_server(**kwargs)
+        from src.mcp_manager import _mcp_connect_kwargs
+        return await mcp_manager.connect_server(**_mcp_connect_kwargs(srv))
 
     async def _read_portal_catalog():
         result = await mcp_manager.call_tool(

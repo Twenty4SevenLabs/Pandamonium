@@ -30,6 +30,7 @@ from src.tool_security import (
 from src.tool_policy import ToolPolicy
 from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
 from src.tool_utils import _truncate, get_mcp_manager
+from src.ssh_cookbook import ensure_ssh_cookbook
 
 # Persistent working directory for agent subprocesses.
 # Resolves to <repo_root>/data, which is the bind-mounted volume in Docker
@@ -395,6 +396,7 @@ def _parse_write_file(content: str) -> Dict:
 
 _MCP_ARG_PARSERS: Dict[str, Callable[[str], Dict[str, str]]] = {
     "bash":           lambda c: {"command": c},
+    "hermes_ssh":     lambda c: {"command": c},
     "python":         lambda c: {"code": c},
     "web_search":     lambda c: {"query": c.split("\n")[0].strip()},
     "web_fetch":      lambda c: {"url": c.split("\n")[0].strip()},
@@ -523,12 +525,20 @@ async def _direct_fallback(
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
 ) -> Optional[Dict]:
+    try:
+        ensure_ssh_cookbook()
+    except Exception:
+        pass
     _subproc_env = {
         **os.environ,
         "TERM": "xterm-256color",
         "COLUMNS": "120",
         "LINES": "40",
         "HOME": _AGENT_WORKDIR,
+        "PATH": os.pathsep.join([
+            str(pathlib.Path(_AGENT_WORKDIR) / "bin"),
+            os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        ]),
     }
 
     try:

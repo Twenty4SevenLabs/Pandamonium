@@ -38,7 +38,73 @@ class CursorOpenCodeImportTests(unittest.TestCase):
         self.assertEqual(self.mod.categorize_skill("prisma-cli-dev"), "prisma")
 
     def test_mcp_config_count(self):
-        self.assertEqual(len(self.mod.MCP_SERVERS), 10)
+        self.assertEqual(len(self.mod.MCP_SERVERS), 12)
+
+    def test_remote_mcp_servers_use_streamable_http(self):
+        by_name = {spec["name"]: spec for spec in self.mod.MCP_SERVERS}
+        for name in ("context7", "prisma-remote", "neon", "figma"):
+            spec = by_name[name]
+            self.assertEqual(spec["transport"], "http", name)
+            self.assertTrue(str(spec.get("url") or "").startswith("https://"), name)
+
+    def test_gitlab_uses_stdio_against_self_hosted_instance(self):
+        gitlab = {spec["name"]: spec for spec in self.mod.MCP_SERVERS}["gitlab"]
+        self.assertEqual(gitlab["transport"], "stdio")
+        self.assertEqual(gitlab["command"], "npx")
+        self.assertIn("gitlab-mcp", " ".join(gitlab["args"]))
+        env = gitlab["env"]
+        self.assertIn("GITLAB_API_URL", env)
+        self.assertIn("GITLAB_PERSONAL_ACCESS_TOKEN", env)
+        self.assertIn("${GITLAB_TOKEN}", env["GITLAB_PERSONAL_ACCESS_TOKEN"])
+
+    def test_hermes_ssh_targets_lan_ip_noninteractively(self):
+        hermes = {spec["name"]: spec for spec in self.mod.MCP_SERVERS}["hermes"]
+        joined = " ".join(hermes["args"])
+        self.assertIn("192.168.1.192", joined)
+        self.assertNotIn("vm-hermes", joined)
+        self.assertIn("BatchMode=yes", joined)
+        self.assertIn("-T", joined)
+        self.assertIn("RequestTTY=no", joined)
+
+    def test_hermes_mcp_uses_cookbook_key_and_kanban_tools_server(self):
+        hermes = {spec["name"]: spec for spec in self.mod.MCP_SERVERS}["hermes"]
+        args = hermes["args"]
+        self.assertEqual(hermes["command"], "ssh")
+        self.assertIn("-i", args)
+        self.assertIn("/app/.ssh/id_ed25519", args)
+        self.assertIn("IdentitiesOnly=yes", args)
+        remote = args[-1]
+        self.assertIn("hermes_tools_mcp_server", remote)
+        self.assertNotIn("hermes mcp serve", remote)
+
+    def test_hermes_messaging_mcp_uses_serve_bridge(self):
+        messaging = {spec["name"]: spec for spec in self.mod.MCP_SERVERS}["hermes-messaging"]
+        args = messaging["args"]
+        self.assertEqual(messaging["command"], "ssh")
+        self.assertIn("/app/.ssh/id_ed25519", args)
+        remote = args[-1]
+        self.assertIn("hermes mcp serve", remote)
+        self.assertNotIn("hermes_tools_mcp_server", remote)
+
+    def test_stdio_secret_placeholders_are_env_refs(self):
+        by_name = {spec["name"]: spec for spec in self.mod.MCP_SERVERS}
+        self.assertEqual(
+            by_name["github"]["env"]["GITHUB_PERSONAL_ACCESS_TOKEN"],
+            "${GITHUB_TOKEN}",
+        )
+        self.assertEqual(by_name["aikido"]["env"]["AIKIDO_API_KEY"], "${AIKIDO_API_KEY}")
+        self.assertEqual(
+            by_name["context7"]["env"]["CONTEXT7_API_KEY"],
+            "${CONTEXT7_API_KEY}",
+        )
+
+    def test_duckduckgo_mcp_uses_npx_without_api_key(self):
+        ddg = {spec["name"]: spec for spec in self.mod.MCP_SERVERS}["duckduckgo"]
+        self.assertEqual(ddg["transport"], "stdio")
+        self.assertEqual(ddg["command"], "npx")
+        self.assertEqual(ddg["args"], ["-y", "@oevortex/ddg_search@latest"])
+        self.assertEqual(ddg.get("url"), None)
+        self.assertFalse(ddg.get("env"))
 
     def test_dry_run_import(self):
         source = Path.home() / ".config" / "opencode"
@@ -69,10 +135,23 @@ class CursorOpenCodeImportTests(unittest.TestCase):
             self.mod.update_identity(source, data, dry_run=False)
             settings = json.loads((data / "settings.json").read_text(encoding="utf-8"))
             presets = json.loads((data / "presets.json").read_text(encoding="utf-8"))
-            self.assertEqual(settings["agent_constitution_version"], "2")
+            self.assertEqual(settings["agent_constitution_version"], "3")
             self.assertIn("Hermes", settings["agent_constitution"])
             self.assertIn("Context7", settings["agent_constitution"])
+            self.assertIn("read and write", settings["agent_constitution"].lower())
+            self.assertNotIn("do not implement project code unless", settings["agent_constitution"].lower())
             self.assertIn("hermes_orchestrator", presets)
+
+    def test_condensed_constitution_is_cluster_operator(self):
+        text = self.mod.CONDENSED_CONSTITUTION
+        self.assertLessEqual(len(text), 16_000)
+        self.assertIn("Pandamonium", text)
+        self.assertIn("Context7", text)
+        self.assertIn("Hermes Kanban", text)
+        self.assertIn("taste-skills-router", text)
+        self.assertIn("read and write", text.lower())
+        self.assertIn("admin", text.lower())
+        self.assertNotIn("do not implement project code unless", text.lower())
 
     def test_mcp_sqlite_write(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -102,11 +181,14 @@ class CursorOpenCodeImportTests(unittest.TestCase):
             conn.commit()
             conn.close()
             count = self.mod.import_mcp(data, dry_run=False)
-            self.assertEqual(count, 10)
+            self.assertEqual(count, 12)
             conn = sqlite3.connect(db)
             rows = conn.execute("SELECT name FROM mcp_servers").fetchall()
             conn.close()
-            self.assertEqual(len(rows), 10)
+            self.assertEqual(len(rows), 12)
+            names = {row[0] for row in rows}
+            self.assertIn("duckduckgo", names)
+            self.assertIn("hermes-messaging", names)
 
 
 if __name__ == "__main__":

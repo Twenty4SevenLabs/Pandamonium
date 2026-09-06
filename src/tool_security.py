@@ -39,6 +39,8 @@ BUILTIN_EMAIL_TOOLS = frozenset({
 # functionality).
 NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "bash",
+    "hermes_ssh",
+    "hermes_kanban",
     "python",
     "manage_bg_jobs",
     "read_file",

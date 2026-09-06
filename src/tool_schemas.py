@@ -55,6 +55,54 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "hermes_ssh",
+            "description": "Non-interactive SSH to vm-hermes (192.168.1.192) as openclaw1 — always uses ssh -T (no TTY). Full VM control: hermes kanban (archive, create, complete, boards switch, promote, decompose, bulk ops), gateway, profiles, dispatcher, ~/.hermes files, sudo. Use hermes_kanban for structured Kanban CLI (correct create syntax, default board pandamonium). MCP kanban_* tools do not inherit a prior boards switch from a separate call — pass `board` on MCP tools or chain switch+archive in one hermes_ssh command. Never claim SSH/CLI is unavailable. Bulk archive: `hermes kanban archive t_id1 t_id2 ...`. List IDs: `hermes kanban list --status ready`. Board totals exclude archived tasks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to execute on vm-hermes (hermes CLI, sudo, scripts, etc.)"}
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "hermes_kanban",
+            "description": "Structured Hermes Kanban CLI on vm-hermes (default board: pandamonium). Prefer Hermes MCP kanban_* when connected. Use for archive, dispatch, promote, or when MCP is down. Title is positional — never --title. Actions: list, show, create, complete, archive, comment, block, boards_list, dispatch, raw.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "show", "create", "complete", "archive", "comment", "block", "boards_list", "dispatch", "raw"],
+                        "description": "Kanban operation to run on vm-hermes",
+                    },
+                    "board": {"type": "string", "description": "Board slug (default pandamonium)"},
+                    "title": {"type": "string", "description": "Task title (create)"},
+                    "body": {"type": "string", "description": "Task body (create) or comment text"},
+                    "task_id": {"type": "string"},
+                    "task_ids": {"type": "array", "items": {"type": "string"}},
+                    "assignee": {"type": "string", "description": "Hermes profile, e.g. default or hermes-bert"},
+                    "workspace": {"type": "string"},
+                    "created_by": {"type": "string", "description": "Set pandamonium for Panda-issued cards"},
+                    "result": {"type": "string", "description": "Completion artifact for complete"},
+                    "comment": {"type": "string"},
+                    "kind": {"type": "string", "description": "Block kind, e.g. needs_input"},
+                    "reason": {"type": "string", "description": "Block reason"},
+                    "status": {"type": "string", "description": "Status filter for list"},
+                    "command": {"type": "string", "description": "Full hermes CLI command when action=raw"},
+                    "json": {"type": "boolean", "description": "Pass --json to the CLI"},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_calendar",
             "description": "Synchronize and read the authenticated user's calendars without changing them. Resolve relative dates against the current user time and pass explicit ISO start/end values.",
             "parameters": {
@@ -1465,6 +1513,10 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     # Convert structured args back to the text format each tool expects
     if tool_type == "bash":
         content = args.get("command", "")
+    elif tool_type == "hermes_ssh":
+        content = args.get("command", "")
+    elif tool_type == "hermes_kanban":
+        content = json.dumps(args) if args else "{}"
     elif tool_type == "python":
         content = args.get("code", "")
     elif tool_type == "web_search":
