@@ -9,15 +9,14 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Protocol
 
-import httpx
-
-from src.agent_identity import configured_agent_name
+from src.constants import DATA_DIR
 from src.model_discovery import installation_capabilities
 
 MILESTONE_MARKER = "[[ODYSSEUS_MILESTONE]]"
-WORKER_IDS = ("pc-codex", "hermes", "vps-codex")
+WORKER_IDS = ("pc-codex", "hermes", "vps-codex", "cursor")
 _WORKSPACE_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 CODEX_BRIDGE_PROTOCOL = "pandamonium.codex-bridge.v2"
+CURSOR_BRIDGE_PROTOCOL = "pandamonium.cursor-bridge.v1"
 
 
 class WorkerUnavailable(RuntimeError):
@@ -370,6 +369,163 @@ class CodexBridgeAdapter:
             return {"machine": self.machine, **_health_failure(exc)}
 
 
+class CursorBridgeAdapter:
+    adapter_name = "cursor-bridge"
+
+    def __init__(
+        self,
+        worker: str,
+        url: str,
+        token_file: Path,
+        *,
+        enabled: bool,
+        machine: str,
+        label: str | None = None,
+        workspaces: list[str] | None = None,
+    ):
+        self.worker = worker
+        self.url = url.rstrip("/")
+        self.token_file = token_file
+        self.enabled = enabled
+        self.machine = machine
+        self.label = label or "Cursor"
+        self.configured_workspaces = list(workspaces or [])
+
+    def _headers(self) -> dict[str, str]:
+        token = _token(self.token_file)
+        if not token:
+            raise RuntimeError(f"{self.worker}_token_missing")
+        return {"Authorization": f"Bearer {token}"}
+
+    async def start(self, task: dict[str, Any]) -> dict[str, Any]:
+        _require_worker_task_permission(task)
+        payload = {
+            "workspace": task["workspace"],
+            "prompt": task["prompt"],
+            "title": task.get("thread_title") or task.get("title"),
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{self.url}/agents",
+                json=payload,
+                headers=self._headers(),
+            )
+        response.raise_for_status()
+        remote = response.json()
+        agent = remote.get("agent") if isinstance(remote, dict) else {}
+        return {
+            "remote_task_id": str(agent.get("agent_id") or remote.get("agent_id") or ""),
+            "status": agent.get("status") or "running",
+            "cursor_run_id": remote.get("run_id"),
+        }
+
+    async def status(self, task: dict[str, Any]) -> dict[str, Any]:
+        agent_id = str(task.get("remote_task_id") or "")
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(f"{self.url}/agents", headers=self._headers())
+        response.raise_for_status()
+        body = response.json()
+        items = body.get("items") if isinstance(body, dict) else []
+        row = next((item for item in items if str(item.get("agent_id")) == agent_id), None)
+        if not row:
+            return {"status": "failed", "error": "cursor_agent_not_found"}
+        mapped = {
+            "running": "running",
+            "idle": "completed",
+            "failed": "failed",
+        }
+        return {
+            "status": mapped.get(str(row.get("status") or ""), "running"),
+            "result": None if row.get("status") != "idle" else "Cursor agent finished.",
+            "error": row.get("error"),
+        }
+
+    async def events(self, task: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        agent_id = str(task.get("remote_task_id") or "")
+        run_id = str(task.get("cursor_run_id") or task.get("remote_run_id") or "")
+        if not agent_id or not run_id:
+            yield {"type": "error", "text": "Cursor run metadata missing.", "event_id": str(uuid.uuid4())}
+            return
+        headers = self._headers()
+        headers["Accept"] = "text/event-stream"
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "GET",
+                f"{self.url}/agents/{agent_id}/runs/{run_id}/stream",
+                headers=headers,
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    raw = json.loads(line[6:])
+                    text = ""
+                    message = raw.get("message") if isinstance(raw, dict) else None
+                    if isinstance(message, dict):
+                        content = message.get("content")
+                        if isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, dict) and block.get("type") == "text":
+                                    text += str(block.get("text") or "")
+                    event_type = "progress" if raw.get("type") != "error" else "error"
+                    if text:
+                        yield {
+                            "type": "result" if event_type != "error" else "error",
+                            "text": text[:12_000],
+                            "event_id": str(uuid.uuid4()),
+                            "metadata": {"source": "cursor-bridge"},
+                        }
+
+    async def reply(self, task: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("cursor_bridge_reply_not_supported")
+
+    async def steer(self, task: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("cursor_bridge_steer_not_supported")
+
+    async def approve(self, task: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("cursor_bridge_approval_not_supported")
+
+    async def cancel(self, task: dict[str, Any]) -> dict[str, Any]:
+        agent_id = str(task.get("remote_task_id") or "")
+        run_id = str(task.get("cursor_run_id") or task.get("remote_run_id") or "")
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                f"{self.url}/agents/{agent_id}/runs/{run_id}/cancel",
+                json={},
+                headers=self._headers(),
+            )
+        response.raise_for_status()
+        return response.json()
+
+    async def health(self) -> dict[str, Any]:
+        try:
+            self._headers()
+            async with httpx.AsyncClient(timeout=5) as client:
+                response = await client.get(f"{self.url}/health")
+            response.raise_for_status()
+            payload = response.json()
+            payload = payload if isinstance(payload, dict) else {}
+            protocol_ready = payload.get("protocol") == CURSOR_BRIDGE_PROTOCOL and payload.get("model_lock") == "composer-2.5"
+            if not protocol_ready:
+                return {
+                    "state": "incompatible",
+                    "reason": "bridge_update_required",
+                    "machine": self.machine,
+                    "protocol": "cursor-bridge",
+                    "protocol_ready": False,
+                }
+            return {
+                "state": "connected" if payload.get("ok") else "reconnect_needed",
+                "machine": self.machine,
+                "protocol": "cursor-bridge",
+                "protocol_ready": True,
+                "display_name": self.label,
+                "installation_capabilities": ["cursor"],
+            }
+        except Exception as exc:
+            return {"machine": self.machine, **_health_failure(exc)}
+
+
 class HermesRunsAdapter:
     worker = "hermes"
     adapter_name = "hermes-runs"
@@ -593,6 +749,7 @@ class HermesRunsAdapter:
 
 
 PC_TOKEN_FILE = Path(os.getenv("ODYSSEUS_AGENT_BRIDGE_TOKEN_FILE", "/etc/odysseus-agent-bridge-token"))
+CURSOR_TOKEN_FILE = Path(os.getenv("ODYSSEUS_CURSOR_BRIDGE_TOKEN_FILE", str(Path(DATA_DIR) / "cursor-bridge" / "token")))
 HERMES_TOKEN_FILE = Path(os.getenv("ODYSSEUS_HERMES_TOKEN_FILE", "/etc/odysseus-hermes-token"))
 VPS_TOKEN_FILE = Path(os.getenv("ODYSSEUS_VPS_WORKER_TOKEN_FILE", "/etc/odysseus-vps-worker-token"))
 
@@ -621,6 +778,14 @@ def adapters() -> dict[str, WorkerAdapter]:
             machine="Remote server",
             label=_worker_label("ODYSSEUS_VPS_CODEX_LABEL", "VPS Codex"),
         ),
+        "cursor": CursorBridgeAdapter(
+            "cursor",
+            os.getenv("ODYSSEUS_CURSOR_BRIDGE_URL", "http://127.0.0.1:8050"),
+            CURSOR_TOKEN_FILE,
+            enabled=_enabled("ODYSSEUS_CURSOR_BRIDGE_ENABLED", True),
+            machine="Local workstation",
+            label=_worker_label("ODYSSEUS_CURSOR_BRIDGE_LABEL", "Cursor"),
+        ),
     }
 
 
@@ -633,6 +798,7 @@ def worker_catalog(
         "pc-codex": ("codex-bridge", "Local workstation", ["read_only_inspection", "code", "artifacts"]),
         "hermes": ("hermes-runs", "Remote agent", ["remote_agent", "approvals", "session_memory"]),
         "vps-codex": ("codex-bridge", "Remote server", ["read_only_inspection"]),
+        "cursor": ("cursor-bridge", "Local workstation", ["code", "artifacts", "cursor_agent"]),
     }
     result: dict[str, dict[str, Any]] = {}
     for worker, adapter in registry.items():

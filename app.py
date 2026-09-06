@@ -924,6 +924,9 @@ app.include_router(setup_contacts_routes())
 from companion import setup_companion_routes
 app.include_router(setup_companion_routes())
 
+from routes.cursor_bridge_routes import setup_cursor_bridge_routes
+app.include_router(setup_cursor_bridge_routes())
+
 # ========= ROUTES (kept in app.py) =========
 
 @app.get("/")
@@ -972,6 +975,10 @@ async def serve_tasks(request: Request):
 
 @app.get("/library")
 async def serve_library(request: Request):
+    return await serve_index(request)
+
+@app.get("/cursor-agents")
+async def serve_cursor_agents(request: Request):
     return await serve_index(request)
 
 @app.get("/backgrounds")
@@ -1414,6 +1421,15 @@ async def _startup_event():
             logger.warning("STT whisper preload failed: %s", exc)
 
     _startup_tasks.append(asyncio.create_task(_preload_stt()))
+
+    try:
+        from src.cursor_bridge_manager import bootstrap_api_key_from_env, ensure_bridge_process, is_configured
+
+        bootstrap_api_key_from_env()
+        if is_configured():
+            ensure_bridge_process()
+    except Exception as exc:
+        logger.warning("Cursor bridge startup skipped (non-critical): %s", exc)
 
     logger.info("Application startup complete")
 

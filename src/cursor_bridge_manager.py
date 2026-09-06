@@ -1,0 +1,294 @@
+"""Cursor bridge settings, token management, and process watchdog."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import secrets
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+from src.constants import DATA_DIR
+from src.secret_storage import decrypt, encrypt
+
+logger = logging.getLogger(__name__)
+
+BRIDGE_DIR = Path(DATA_DIR) / "cursor-bridge"
+SETTINGS_FILE = BRIDGE_DIR / "settings.json"
+TOKEN_FILE = BRIDGE_DIR / "token"
+DEFAULT_URL = os.getenv("ODYSSEUS_CURSOR_BRIDGE_URL", "http://127.0.0.1:8050").rstrip("/")
+PC_IDE_URL = os.getenv("ODYSSEUS_PC_CURSOR_BRIDGE_URL", "").rstrip("/")
+PC_IDE_TOKEN_FILE = Path(os.getenv("ODYSSEUS_PC_CURSOR_BRIDGE_TOKEN_FILE", str(Path.home() / ".config/jarvis/cursor-bridge-token")))
+BRIDGE_SCRIPT = Path(__file__).resolve().parents[1] / "services" / "cursor-bridge" / "cursor_bridge_service.py"
+BRIDGE_PROCESS: subprocess.Popen[str] | None = None
+
+
+def _load_settings() -> dict[str, Any]:
+    try:
+        payload = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_settings(payload: dict[str, Any]) -> None:
+    BRIDGE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    SETTINGS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    try:
+        SETTINGS_FILE.chmod(0o600)
+    except OSError:
+        pass
+
+
+def configured_api_key() -> str:
+    payload = _load_settings()
+    encrypted = str(payload.get("api_key_encrypted") or "")
+    return decrypt(encrypted).strip()
+
+
+def is_configured() -> bool:
+    return bool(configured_api_key())
+
+
+def bridge_token() -> str:
+    if TOKEN_FILE.exists():
+        token = TOKEN_FILE.read_text(encoding="utf-8").strip()
+        if token:
+            return token
+    token = secrets.token_urlsafe(32)
+    BRIDGE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    TOKEN_FILE.write_text(token + "\n", encoding="utf-8")
+    try:
+        TOKEN_FILE.chmod(0o600)
+    except OSError:
+        pass
+    return token
+
+
+def save_api_key(api_key: str) -> None:
+    payload = _load_settings()
+    payload["api_key_encrypted"] = encrypt(api_key.strip())
+    payload["configured"] = True
+    payload["updated_at"] = int(time.time())
+    _save_settings(payload)
+
+
+def clear_api_key() -> None:
+    payload = _load_settings()
+    payload.pop("api_key_encrypted", None)
+    payload["configured"] = False
+    payload["updated_at"] = int(time.time())
+    _save_settings(payload)
+
+
+def dismissed_agent_ids() -> set[str]:
+    payload = _load_settings()
+    raw = payload.get("dismissed_agent_ids")
+    if not isinstance(raw, list):
+        return set()
+    return {str(row).strip() for row in raw if str(row).strip()}
+
+
+def dismiss_agent(agent_id: str) -> None:
+    agent_id = str(agent_id or "").strip()
+    if not agent_id:
+        return
+    payload = _load_settings()
+    dismissed = dismissed_agent_ids()
+    dismissed.add(agent_id)
+    payload["dismissed_agent_ids"] = sorted(dismissed)
+    payload["updated_at"] = int(time.time())
+    _save_settings(payload)
+
+
+def _env_api_key_candidates() -> list[str]:
+    names = (
+        "ODYSSEUS_CURSOR_API_KEY",
+        "PANDAMONIUM_CURSOR_API_KEY",
+        "CURSOR_API_KEY",
+    )
+    values: list[str] = []
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            values.append(value)
+    return values
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    lowered = value.lower()
+    markers = (
+        "your_key_here",
+        "replace_me",
+        "replace_with",
+        "changeme",
+        "change_me",
+        "placeholder",
+        "xxx",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def is_plausible_cursor_api_key(value: str) -> bool:
+    token = str(value or "").strip()
+    if len(token) < 20 or len(token) > 4096:
+        return False
+    if any(ord(char) < 32 for char in token):
+        return False
+    if _looks_like_placeholder(token):
+        return False
+    return token.startswith(("cursor_", "crsr_"))
+
+
+def bootstrap_api_key_from_env() -> bool:
+    """Seed encrypted settings from env when the UI has not connected yet."""
+    if is_configured():
+        return False
+    for value in _env_api_key_candidates():
+        if not is_plausible_cursor_api_key(value):
+            continue
+        save_api_key(value)
+        logger.info("Cursor bridge API key loaded from environment")
+        return True
+    return False
+
+
+def bridge_env() -> dict[str, str]:
+    env = os.environ.copy()
+    api_key = configured_api_key()
+    if api_key:
+        env["CURSOR_API_KEY"] = api_key
+    env["ODYSSEUS_CURSOR_BRIDGE_TOKEN_FILE"] = str(TOKEN_FILE)
+    env["ODYSSEUS_CURSOR_BRIDGE_STATE_DIR"] = str(BRIDGE_DIR)
+    env.setdefault("ODYSSEUS_CURSOR_BRIDGE_HOST", "127.0.0.1")
+    env.setdefault("ODYSSEUS_CURSOR_BRIDGE_PORT", "8050")
+    if not env.get("ODYSSEUS_CURSOR_WORKSPACES_JSON"):
+        default_root = Path(__file__).resolve().parents[1]
+        env["ODYSSEUS_CURSOR_WORKSPACES_JSON"] = json.dumps({"pandamonium": str(default_root)})
+    return env
+
+
+def _bridge_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {bridge_token()}", "Accept": "application/json"}
+
+
+async def bridge_request(
+    method: str,
+    path: str,
+    *,
+    json_body: dict[str, Any] | None = None,
+    timeout: float = 20,
+    stream: bool = False,
+) -> httpx.Response:
+    url = f"{DEFAULT_URL}{path}"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        if stream:
+            return await client.build_request(method, url, headers=_bridge_headers(), json=json_body)
+        response = await client.request(method, url, headers=_bridge_headers(), json=json_body)
+    return response
+
+
+def _pc_ide_headers() -> dict[str, str]:
+    try:
+        token = PC_IDE_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        token = ""
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+
+async def list_ide_mirror_agents() -> list[dict[str, Any]]:
+    if not PC_IDE_URL:
+        return []
+    headers = _pc_ide_headers()
+    if not headers:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.get(f"{PC_IDE_URL}/v1/ide/agents", headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+        items = payload.get("items") if isinstance(payload, dict) else []
+        return [row for row in items if isinstance(row, dict)]
+    except Exception as exc:
+        logger.debug("IDE mirror unavailable: %s", exc)
+        return []
+
+
+async def bridge_health() -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get(f"{DEFAULT_URL}/health")
+        response.raise_for_status()
+        payload = response.json()
+        payload["configured"] = is_configured()
+        return payload
+    except Exception as exc:
+        return {"ok": False, "configured": is_configured(), "error": str(exc)[:120]}
+
+
+async def bridge_status() -> dict[str, Any]:
+    if not is_configured():
+        return {"configured": False, "connected": False, "status": "disconnected"}
+    try:
+        response = await bridge_request("GET", "/status")
+        response.raise_for_status()
+        payload = response.json()
+        payload["configured"] = True
+        payload["status"] = "connected" if payload.get("connected") else "reconnect_needed"
+        return payload
+    except Exception as exc:
+        return {
+            "configured": True,
+            "connected": False,
+            "status": "reconnect_needed",
+            "error": str(exc)[:120],
+        }
+
+
+def stop_bridge_process() -> None:
+    global BRIDGE_PROCESS
+    proc = BRIDGE_PROCESS
+    BRIDGE_PROCESS = None
+    if proc and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def ensure_bridge_process() -> None:
+    global BRIDGE_PROCESS
+    if not is_configured():
+        return
+    if BRIDGE_PROCESS and BRIDGE_PROCESS.poll() is None:
+        return
+    python = sys.executable
+    env = bridge_env()
+    BRIDGE_PROCESS = subprocess.Popen(
+        [python, str(BRIDGE_SCRIPT)],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    logger.info("Started Cursor bridge process pid=%s", BRIDGE_PROCESS.pid)
+
+
+async def ensure_bridge_online() -> dict[str, Any]:
+    ensure_bridge_process()
+    for delay in (0.2, 0.5, 1.0, 2.0):
+        health = await bridge_health()
+        if health.get("ok"):
+            return health
+        await asyncio.sleep(delay)
+    return await bridge_health()

@@ -42771,3 +42771,153 @@ html.jarvis-voice-minimized .extension-surface-panel.is-open {
   .marketplace-workspace.has-detail .marketplace-detail { display: block; }
   .marketplace-back { display: inline-flex; }
 }
+
+/* Cursor bridge sidebar */
+#cursor-bridge-section .cursor-bridge-sidebar-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  margin-left: 6px;
+  background: var(--muted, #666);
+}
+#cursor-bridge-section .cursor-bridge-sidebar-status[data-state="connected"] { background: #3ecf8e; }
+#cursor-bridge-section .cursor-bridge-sidebar-status[data-state="warning"] { background: #f5a623; }
+#cursor-bridge-section .cursor-bridge-sidebar-status[data-state="disconnected"] { background: #666; }
+.cursor-bridge-connect { padding: 8px 10px 10px; }
+.cursor-bridge-connect-copy { font-size: 11px; opacity: 0.72; margin: 0 0 8px; line-height: 1.45; }
+#cursor-bridge-connect-form { display: flex; gap: 6px; }
+#cursor-bridge-api-key {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 12px;
+}
+#cursor-bridge-connect-btn, .cursor-bridge-disconnect-btn, #cursor-agent-send-btn {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface, var(--bg));
+  color: var(--fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+.cursor-bridge-connect-error { color: #ff6b6b; font-size: 11px; margin-top: 6px; min-height: 1.2em; }
+#cursor-agent-list { display: flex; flex-direction: column; gap: 2px; padding: 0 4px 8px; }
+.cursor-agent-empty { font-size: 11px; opacity: 0.6; padding: 8px 10px; }
+.cursor-agent-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 24px;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+}
+.cursor-agent-row-main {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+.cursor-agent-row:hover .cursor-agent-row-main,
+.cursor-agent-row.is-selected .cursor-agent-row-main {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.cursor-agent-remove-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg);
+  opacity: 0.35;
+  cursor: pointer;
+}
+.cursor-agent-row:hover .cursor-agent-remove-btn,
+.cursor-agent-remove-btn:focus-visible {
+  opacity: 0.85;
+}
+.cursor-agent-remove-btn:hover {
+  opacity: 1 !important;
+  color: var(--color-error, #ff6b6b);
+  background: color-mix(in srgb, var(--color-error, #ff6b6b) 12%, transparent);
+}
+.cursor-agent-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #888;
+}
+.cursor-agent-status-dot[data-state="running"] { background: #3ecf8e; box-shadow: 0 0 0 3px color-mix(in srgb, #3ecf8e 25%, transparent); }
+.cursor-agent-status-dot[data-state="failed"] { background: #ff6b6b; }
+.cursor-agent-title {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cursor-agent-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  opacity: 0.65;
+}
+.cursor-agent-source-badge {
+  padding: 1px 5px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  letter-spacing: 0.04em;
+}
+.cursor-agent-detail {
+  border-top: 1px solid var(--border);
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cursor-agent-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.cursor-agent-stream {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+.cursor-agent-compose { display: flex; gap: 6px; align-items: flex-end; }
+#cursor-agent-prompt {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 12px;
+}

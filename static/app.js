@@ -1228,16 +1228,19 @@ function initializeEventListeners() {
   // Tasks tool button
   const toolTasksBtn = el('tool-tasks-btn');
   if (toolTasksBtn) {
-  // Agents buttons (sidebar + rail)
-  const agentsBtns = [el("rail-agents"), el("tool-agents-btn")].filter(Boolean);
-  agentsBtns.forEach(btn => {
-    btn.addEventListener("click", () => {
-    });
-  });
     toolTasksBtn.addEventListener('click', () => {
       if (tasksModule) {
         tasksModule.isTasksOpen() ? tasksModule.closeTasks() : tasksModule.openTasks();
       }
+    });
+  }
+
+  // Agents rail button — expand the Cursor section from the icon rail
+  const railCursorBridge = el("rail-cursor-bridge");
+  if (railCursorBridge) {
+    railCursorBridge.addEventListener("click", async () => {
+      const module = await import('./js/cursorBridge.js');
+      module.expandSection();
     });
   }
 
@@ -1394,6 +1397,10 @@ function initializeEventListeners() {
     '/gallery':  () => document.getElementById('tool-gallery-btn')?.click(),
     '/tasks':    () => document.getElementById('tool-tasks-btn')?.click(),
     '/library':  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
+    '/cursor-agents': async () => {
+      const module = await import('./js/cursorBridge.js');
+      module.expandSection();
+    },
   };
   const _opener = _routeOpen[urlPath];
   // Defer the opener — at this point in init, the modules whose handlers
@@ -2733,6 +2740,7 @@ function initializeEventListeners() {
     'sessions-section':    '#sessions-section',
     'email-section':       '#email-section',
     'models-section':      '#models-section',
+    'cursor-bridge-section': '#cursor-bridge-section',
     'tools-section':       '#tools-section',
     // Per-tool visibility — fine-grained control over which entries show
     // inside the Tools section in the sidebar.
@@ -3775,6 +3783,7 @@ function startPandamoniumApp() {
     'rail-compare':   'tool-compare-btn',
     'rail-research':  'tool-research-btn',
     'rail-cookbook':   'tool-cookbook-btn',
+    'rail-cursor-bridge': 'cursor-bridge-section-title',
     'rail-archive':   'tool-library-btn',
     'rail-gallery':   'tool-gallery-btn',
     'rail-tasks':     'tool-tasks-btn',

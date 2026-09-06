@@ -705,6 +705,7 @@
     <button class="icon-rail-btn" id="rail-calendar" title="Calendar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
     <button class="icon-rail-btn" id="rail-compare" title="Compare"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg></button>
     <button class="icon-rail-btn" id="rail-cookbook" title="Cookbook"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg></button>
+    <button class="icon-rail-btn" id="rail-cursor-bridge" title="Cursor Agents"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg></button>
     <button class="icon-rail-btn" id="rail-research" title="Deep Research"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>
     <button class="icon-rail-btn" id="rail-email" title="Email"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg></button>
     <button class="icon-rail-btn" id="rail-gallery" title="Gallery"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></button>
@@ -861,6 +862,40 @@
           <div class="models-row">
             <select id="model-select" aria-label="Select model" style="flex: 1; padding: 6px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--fg);"></select>
             <button type="button" id="btn-model-chat" class="model-chat-btn" aria-label="Add model chat" style="transition: all 0.2s ease;"><span class="model-chat-btn-label">+ Chat</span></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="section" id="cursor-bridge-section">
+        <div class="section-header-flex">
+          <span class="section-title" id="cursor-bridge-section-title" title="Collapse or expand Cursor agents">
+            <svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
+            <span>Cursor Agents</span>
+          </span>
+          <button type="button" class="section-header-btn list-item-plus-btn" id="cursor-bridge-new-agent" title="New Cursor agent">
+            <svg class="list-item-plus-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            <span class="list-item-plus-label">new</span>
+          </button>
+          <span id="cursor-bridge-sidebar-status" class="cursor-bridge-sidebar-status" aria-label="Disconnected"></span>
+        </div>
+        <div id="cursor-bridge-connect" class="cursor-bridge-connect">
+          <p class="cursor-bridge-connect-copy">Connect your Cursor subscription API key. Only Composer 2.5 local agents are allowed.</p>
+          <form id="cursor-bridge-connect-form">
+            <input id="cursor-bridge-api-key" type="password" autocomplete="off" placeholder="cursor_..." aria-label="Cursor API key">
+            <button type="submit" id="cursor-bridge-connect-btn">Connect</button>
+          </form>
+          <div id="cursor-bridge-connect-error" class="cursor-bridge-connect-error" role="alert"></div>
+        </div>
+        <div id="cursor-agent-list" role="listbox" aria-label="Cursor agents"></div>
+        <div id="cursor-agent-detail" class="cursor-agent-detail" hidden>
+          <div class="cursor-agent-detail-head">
+            <strong id="cursor-agent-detail-title">Cursor agent</strong>
+            <button type="button" id="cursor-bridge-disconnect-btn" class="cursor-bridge-disconnect-btn">Disconnect</button>
+          </div>
+          <pre id="cursor-agent-stream" class="cursor-agent-stream"></pre>
+          <div class="cursor-agent-compose">
+            <textarea id="cursor-agent-prompt" rows="2" placeholder="Send a follow-up to this Cursor agent…"></textarea>
+            <button type="button" id="cursor-agent-send-btn">Send</button>
           </div>
         </div>
       </div>
@@ -2022,6 +2057,11 @@
                 <input type="checkbox" checked data-ui-key="models-section"><span class="vis-switch"></span>
               </label>
               <label class="vis-row">
+                <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg></span>
+                <span class="vis-label">Cursor Agents</span>
+                <input type="checkbox" checked data-ui-key="cursor-bridge-section"><span class="vis-switch"></span>
+              </label>
+              <label class="vis-row">
                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span>
                 <span class="vis-label">Tools <span class="vis-hint">Whole section (header + all tools)</span></span>
                 <input type="checkbox" checked data-ui-key="tools-section"><span class="vis-switch"></span>
@@ -2781,6 +2821,7 @@
 <script type="module" src="/static/js/compare/index.js"></script>
 <script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/madMcp.js"></script>
+<script type="module" src="/static/js/cursorBridge.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
 <script type="module" src="/static/js/settings.js?v=20260904T140000Z"></script>
 <script type="module" src="/static/js/admin.js"></script>
