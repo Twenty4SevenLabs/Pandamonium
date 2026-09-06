@@ -113,7 +113,7 @@
       <div class="actions">
         <button id="copy-path" type="button">Copy path</button>
         <button id="reload-canvas" type="button">Reload</button>
-        <button id="open-panda" type="button" class="primary">Open in Panda tab</button>
+        <button id="open-panda" type="button" class="primary">Focus Panda</button>
       </div>
     </header>
     <main>
@@ -125,92 +125,6 @@
       </div>
     </main>
   </div>
-  <script type="module">
-    const params = new URLSearchParams(window.location.search);
-    const path = params.get('path') || '';
-    const titleEl = document.getElementById('canvas-title');
-    const pathEl = document.getElementById('canvas-path');
-    const frame = document.getElementById('canvas-frame');
-    const fallback = document.getElementById('canvas-fallback');
-    const statusEl = document.getElementById('canvas-status');
-    const fallbackTitle = document.getElementById('canvas-fallback-title');
-    const fallbackCopy = document.getElementById('canvas-fallback-copy');
-    const copyBtn = document.getElementById('copy-path');
-    const reloadBtn = document.getElementById('reload-canvas');
-    const openPandaBtn = document.getElementById('open-panda');
-
-    function setStatus(text) {
-      statusEl.textContent = text;
-    }
-
-    if (!path) {
-      titleEl.textContent = 'Canvas path missing';
-      fallbackTitle.textContent = 'No canvas path supplied';
-      fallbackCopy.textContent = 'Return to Panda and use the Open Canvas button on the agent reply.';
-      setStatus('Missing path');
-      throw new Error('missing path');
-    }
-
-    pathEl.textContent = path;
-    titleEl.textContent = path.split('/').pop()?.replace(/\.canvas\.tsx$/, '').replace(/[-_]+/g, ' ') || 'Cursor Canvas';
-
-    async function loadCanvas() {
-      setStatus('Registering canvas…');
-      const response = await fetch('/api/cursor/canvas/open', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ path }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        fallbackTitle.textContent = 'Canvas registration failed';
-        fallbackCopy.textContent = payload.detail || 'Could not register this canvas.';
-        setStatus('Registration failed');
-        return;
-      }
-      if (payload.title) titleEl.textContent = payload.title;
-      const embedUrl = String(payload.embed_url || '').trim();
-      if (embedUrl) {
-        setStatus('Live canvas connected');
-        fallback.classList.add('hidden');
-        frame.src = embedUrl;
-        frame.classList.remove('hidden');
-        return;
-      }
-      fallbackTitle.textContent = `${payload.title || 'Canvas'} is ready`;
-      fallbackCopy.textContent = 'The canvas file was saved. Use Open in Panda tab to view the registration page, or open the same canvas from the Open Canvas button in the agent overlay.';
-      setStatus('Saved — live server not configured');
-    }
-
-    copyBtn.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(path);
-        copyBtn.textContent = 'Copied';
-        setTimeout(() => { copyBtn.textContent = 'Copy path'; }, 1200);
-      } catch (_error) {
-        window.prompt('Copy canvas path', path);
-      }
-    });
-
-    reloadBtn.addEventListener('click', () => {
-      frame.classList.add('hidden');
-      frame.removeAttribute('src');
-      fallback.classList.remove('hidden');
-      loadCanvas().catch((error) => {
-        fallbackCopy.textContent = error instanceof Error ? error.message : 'Canvas load failed';
-        setStatus('Load failed');
-      });
-    });
-
-    openPandaBtn.addEventListener('click', () => {
-      window.location.href = `/static/cursor-canvas-popup.html?path=${encodeURIComponent(path)}`;
-    });
-
-    loadCanvas().catch((error) => {
-      fallbackCopy.textContent = error instanceof Error ? error.message : 'Canvas load failed';
-      setStatus('Load failed');
-    });
-  </script>
+  <script type="module" src="/static/js/cursorCanvasPopup.js"></script>
 </body>
 </html>

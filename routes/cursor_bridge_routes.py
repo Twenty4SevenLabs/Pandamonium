@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -32,6 +35,22 @@ from src.cursor_bridge_manager import (
 from src.cursor_bridge_nodes import execution_host_for_node, resolve_execution_node, sidecar_url_for_node, workspace_cwd_from_slug
 
 logger = logging.getLogger(__name__)
+
+_CANVAS_BRIDGE_PATH = Path(__file__).resolve().parents[1] / "services" / "cursor-bridge" / "canvas_bridge.py"
+_canvas_bridge = None
+
+
+def _load_canvas_bridge():
+    global _canvas_bridge
+    if _canvas_bridge is not None:
+        return _canvas_bridge
+    spec = importlib.util.spec_from_file_location("panda_cursor_bridge_canvas", _CANVAS_BRIDGE_PATH)
+    if not spec or not spec.loader:
+        raise RuntimeError("canvas_bridge_unavailable")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _canvas_bridge = mod
+    return mod
 
 
 def _enrich_execution_meta(payload: dict[str, Any]) -> dict[str, Any]:
@@ -346,17 +365,16 @@ def setup_cursor_bridge_routes() -> APIRouter:
     async def open_canvas(request: Request, body: dict[str, Any]) -> dict[str, Any]:
         if not is_configured():
             raise HTTPException(status_code=503, detail="cursor_bridge_not_configured")
-        await ensure_bridge_online()
         raw_path = str(body.get("path") or "").strip()
         if not raw_path:
             raise HTTPException(status_code=400, detail="path_required")
         workspace = str(body.get("workspace") or "pandamonium").strip()
-        cwd = workspace_cwd_from_slug(workspace) or body.get("cwd")
-        payload = {"path": raw_path, "cwd": cwd or "", "workspace": workspace}
-        response = await bridge_request("POST", "/canvas/open", json_body=payload)
-        if response.status_code >= 400:
-            detail = response.json().get("detail") if response.headers.get("content-type", "").startswith("application/json") else response.text
-            raise HTTPException(status_code=response.status_code, detail=detail)
-        return response.json()
+        cwd = str(body.get("cwd") or workspace_cwd_from_slug(workspace) or "").strip()
+        canvas = _load_canvas_bridge()
+        resolved = canvas.resolve_canvas_path(raw_path, cwd=cwd)
+        if not resolved:
+            raise HTTPException(status_code=404, detail="canvas_not_found")
+        public_url = os.getenv("APP_PUBLIC_URL", "").strip()
+        return canvas.build_canvas_open_payload(resolved, app_public_url=public_url)
 
     return router
