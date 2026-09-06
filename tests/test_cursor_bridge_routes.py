@@ -98,3 +98,54 @@ def test_agent_session_prefers_ide_mirror(client):
     assert response.status_code == 200
     assert response.json()["title"] == "IDE chat"
     assert response.json()["messages"][0]["blocks"][0]["text"] == "Hello"
+
+
+def test_send_ensures_ide_agent_even_without_source(client):
+    send_response = AsyncMock()
+    send_response.status_code = 200
+    send_response.json = lambda: {"run_id": "run-1", "agent": {"agent_id": "6d91f84e-cf09-4c68-86a7-1f0e1ed631a5", "source": "ide"}}
+
+    probe_response = AsyncMock()
+    probe_response.status_code = 404
+    probe_response.headers = {"content-type": "application/json"}
+    probe_response.json = lambda: {"detail": "agent_not_found"}
+
+    resume_response = AsyncMock()
+    resume_response.status_code = 200
+    resume_response.json = lambda: {"agent": {"agent_id": "6d91f84e-cf09-4c68-86a7-1f0e1ed631a5", "forked": True}, "forked": True}
+
+    ide_session = {
+        "agent_id": "6d91f84e-cf09-4c68-86a7-1f0e1ed631a5",
+        "title": "IDE chat",
+        "source": "ide",
+        "workspace": "mnt-dev-env-projects-pandamonium",
+        "messages": [{"role": "user", "blocks": [{"type": "text", "text": "Hello"}]}],
+    }
+
+    async def fake_bridge_request_for_agent(method, path, agent_meta, **kwargs):
+        if method == "GET" and path.endswith("/session"):
+            return probe_response
+        if method == "POST" and path.endswith("/resume"):
+            assert agent_meta.get("source") == "ide"
+            return resume_response
+        if method == "POST" and path.endswith("/send"):
+            return send_response
+        raise AssertionError(f"unexpected bridge request: {method} {path}")
+
+    with patch("routes.cursor_bridge_routes.is_configured", return_value=True), patch(
+        "routes.cursor_bridge_routes.ensure_bridge_online",
+        new=AsyncMock(return_value={"ok": True}),
+    ), patch(
+        "routes.cursor_bridge_routes.fetch_ide_agent_session",
+        new=AsyncMock(return_value=ide_session),
+    ), patch(
+        "routes.cursor_bridge_routes.bridge_request_for_agent",
+        new=AsyncMock(side_effect=fake_bridge_request_for_agent),
+    ):
+        response = client.post(
+            "/api/cursor/agents/6d91f84e-cf09-4c68-86a7-1f0e1ed631a5/send",
+            json={"prompt": "Reply with exactly: Panda overlay test OK."},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == "run-1"

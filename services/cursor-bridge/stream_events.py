@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 PARITY_TYPES = frozenset({"text", "thinking", "tool", "shell", "usage", "artifact", "error", "status"})
+DISPLAY_BLOCK_TYPES = frozenset({"text", "thinking", "tool", "shell", "artifact", "error"})
 _SDK_REPR_PREFIX = "SDK"
 
 
@@ -26,7 +27,7 @@ def sdk_message_to_stream_event(message: Any) -> dict[str, Any] | None:
         for block in content or ():
             btype = str(getattr(block, "type", "") or "")
             if btype == "text":
-                text = str(getattr(block, "text", "") or "").strip()
+                text = str(getattr(block, "text", "") or "")
                 if text:
                     blocks.append({"type": "text", "text": text})
             elif btype == "tool_use":
@@ -42,7 +43,7 @@ def sdk_message_to_stream_event(message: Any) -> dict[str, Any] | None:
             return {"type": "message", "message": {"role": "assistant", "content": blocks}}
         return None
     if msg_type == "thinking":
-        text = str(getattr(message, "text", "") or "").strip()
+        text = str(getattr(message, "text", "") or "")
         if not text:
             return None
         return {"type": "update", "update": {"type": "thinking_delta", "delta": text}}
@@ -154,7 +155,7 @@ def events_to_parity_blocks(events: list[dict[str, Any]]) -> list[dict[str, Any]
             continue
         flush_text()
         flush_thinking()
-        if kind in PARITY_TYPES:
+        if kind in DISPLAY_BLOCK_TYPES:
             blocks.append(block)
     flush_text()
     flush_thinking()
@@ -171,7 +172,7 @@ def _normalize_message_dict(message: dict[str, Any]) -> dict[str, Any] | None:
                 continue
             block_type = str(block.get("type") or "")
             if block_type == "text":
-                text = str(block.get("text") or "").strip()
+                text = str(block.get("text") or "")
                 if text:
                     parts.append(text)
             elif block_type == "tool_use":
@@ -183,7 +184,7 @@ def _normalize_message_dict(message: dict[str, Any]) -> dict[str, Any] | None:
                     "status": "completed",
                 }
         if parts:
-            return {"type": "text", "text": "\n\n".join(parts)}
+            return {"type": "text", "text": "".join(parts)}
     if role == "assistant" and isinstance(message.get("text"), str):
         text = message["text"].strip()
         return {"type": "text", "text": text} if text else None

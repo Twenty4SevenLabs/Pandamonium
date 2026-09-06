@@ -6,6 +6,7 @@ const overlayState = {
   messages: [],
   streamAbort: null,
   liveStreamEvents: [],
+  sending: false,
 };
 
 function normalizeStreamEvent(raw) {
@@ -43,7 +44,7 @@ function normalizeMessageDict(message) {
       if (!block || typeof block !== 'object') continue;
       const blockType = String(block.type || '');
       if (blockType === 'text') {
-        const text = String(block.text || '').trim();
+        const text = String(block.text || '');
         if (text) parts.push(text);
       } else if (blockType === 'tool_use') {
         return {
@@ -55,7 +56,7 @@ function normalizeMessageDict(message) {
         };
       }
     }
-    if (parts.length) return { type: 'text', text: parts.join('\n\n') };
+    if (parts.length) return { type: 'text', text: parts.join('') };
   }
   if (role === 'assistant' && typeof message.text === 'string' && message.text.trim()) {
     return { type: 'text', text: message.text.trim() };
@@ -115,6 +116,7 @@ function eventsToParityBlocks(events) {
   const blocks = [];
   const textBuffer = [];
   const thinkingBuffer = [];
+  const displayTypes = new Set(['text', 'thinking', 'tool', 'shell', 'artifact', 'error']);
   const flushText = () => {
     if (!textBuffer.length) return;
     const text = textBuffer.join('').trim();
@@ -143,7 +145,7 @@ function eventsToParityBlocks(events) {
     }
     flushText();
     flushThinking();
-    blocks.push(block);
+    if (displayTypes.has(kind)) blocks.push(block);
   }
   flushText();
   flushThinking();
@@ -160,9 +162,17 @@ function readJson(response) {
   });
 }
 
-function sessionQuery(agent) {
+function inferAgentSource(agent, agentId = null) {
+  const explicit = String(agent?.source || '').toLowerCase();
+  if (explicit) return explicit;
+  const id = String(agentId || agent?.agent_id || '');
+  if (id.startsWith('agent-')) return 'bridge';
+  return 'ide';
+}
+
+function sessionQuery(agent, agentId = null) {
   const params = new URLSearchParams();
-  const source = String(agent?.source || 'bridge').toLowerCase();
+  const source = inferAgentSource(agent, agentId);
   if (source) params.set('source', source);
   if (agent?.mirror_url) params.set('mirror_url', String(agent.mirror_url));
   const query = params.toString();
@@ -219,6 +229,9 @@ function renderBlock(block) {
     el.append(details);
     return el;
   }
+  if (type === 'usage' || type === 'status') {
+    return null;
+  }
   const body = document.createElement('div');
   body.className = 'cursor-overlay-block-body';
   body.textContent = type === 'text' ? String(block.text || '') : blockText([block]);
@@ -244,7 +257,10 @@ function renderMessage(message, liveBlocks = null) {
       .join('\n\n');
     body.textContent = text || '(empty message)';
   } else if (blocks.length) {
-    blocks.forEach((block) => body.append(renderBlock(block)));
+    blocks.forEach((block) => {
+      const node = renderBlock(block);
+      if (node) body.append(node);
+    });
   } else {
     body.textContent = blockText(blocks);
   }
@@ -282,12 +298,18 @@ function setHeader(session) {
 }
 
 async function loadSession(agentId, agent) {
-  const query = sessionQuery(agent);
+  const query = sessionQuery(agent, agentId);
   const session = await readJson(await fetch(`/api/cursor/agents/${encodeURIComponent(agentId)}/session${query}`, {
     credentials: 'same-origin',
     headers: { Accept: 'application/json' },
   }));
-  overlayState.agent = { ...(agent || {}), ...session };
+  overlayState.agent = {
+    ...(agent || {}),
+    ...session,
+    agent_id: agentId,
+    source: session?.source || agent?.source || inferAgentSource(agent, agentId),
+    mirror_url: session?.mirror_url || agent?.mirror_url,
+  };
   overlayState.messages = Array.isArray(session.messages) ? session.messages : [];
   setHeader(overlayState.agent);
   renderPanel(overlayState.messages, null);
@@ -365,27 +387,40 @@ async function streamRun(agentId, runId, agent) {
 async function sendFollowUp() {
   const agentId = overlayState.agentId;
   const agent = overlayState.agent;
-  if (!agentId) return;
+  if (!agentId || overlayState.sending) return;
   const input = byId('cursor-agent-overlay-prompt');
   const prompt = String(input?.value || '').trim();
   if (!prompt) return;
-  const body = {
-    prompt,
-    source: agent?.source,
-    mirror_url: agent?.mirror_url,
-    workspace: agent?.workspace || 'pandamonium',
-    title: agent?.title,
-  };
-  const q = sessionQuery(agent);
-  const payload = await readJson(await fetch(`/api/cursor/agents/${encodeURIComponent(agentId)}/send${q}`, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify(body),
-  }));
-  if (input) input.value = '';
-  await loadSession(agentId, overlayState.agent);
-  await streamRun(agentId, payload.run_id, overlayState.agent);
+  overlayState.sending = true;
+  if (input) {
+    input.value = '';
+    input.disabled = true;
+  }
+  const sendBtn = byId('cursor-agent-overlay-send');
+  if (sendBtn) sendBtn.disabled = true;
+  try {
+    const source = inferAgentSource(agent, agentId);
+    const body = {
+      prompt,
+      source,
+      mirror_url: agent?.mirror_url,
+      workspace: agent?.workspace || 'pandamonium',
+      title: agent?.title,
+    };
+    const q = sessionQuery({ ...(agent || {}), source }, agentId);
+    const payload = await readJson(await fetch(`/api/cursor/agents/${encodeURIComponent(agentId)}/send${q}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body),
+    }));
+    await loadSession(agentId, overlayState.agent);
+    await streamRun(agentId, payload.run_id, overlayState.agent);
+  } finally {
+    overlayState.sending = false;
+    if (input) input.disabled = false;
+    if (sendBtn) sendBtn.disabled = false;
+  }
 }
 
 async function stopRun() {
@@ -453,10 +488,17 @@ function onKeyDown(event) {
   if (event.key === 'Escape') closeCursorAgentOverlay();
 }
 
+function onPromptKeyDown(event) {
+  if (event.key !== 'Enter' || event.shiftKey) return;
+  event.preventDefault();
+  sendFollowUp().catch((error) => window.alert(error.message));
+}
+
 export function initCursorAgentOverlay() {
   byId('cursor-agent-overlay-close')?.addEventListener('click', closeCursorAgentOverlay);
   byId('cursor-agent-overlay-send')?.addEventListener('click', () => sendFollowUp().catch((error) => window.alert(error.message)));
   byId('cursor-agent-overlay-stop')?.addEventListener('click', () => stopRun().catch((error) => window.alert(error.message)));
   byId('cursor-agent-overlay-backdrop')?.addEventListener('click', closeCursorAgentOverlay);
+  byId('cursor-agent-overlay-prompt')?.addEventListener('keydown', onPromptKeyDown);
   document.addEventListener('keydown', onKeyDown);
 }

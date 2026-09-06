@@ -75,31 +75,41 @@ async def _ensure_sidecar_agent(agent_id: str, agent_meta: dict[str, Any]) -> No
     probe = await bridge_request_for_agent("GET", f"/agents/{agent_id}/session", agent_meta)
     if probe.status_code == 200:
         payload = probe.json() if probe.headers.get("content-type", "").startswith("application/json") else {}
-        if isinstance(payload, dict) and (
-            payload.get("forked")
-            or payload.get("sdk_agent_id")
-            or str(payload.get("source") or "") == "bridge"
-        ):
-            return
+        if isinstance(payload, dict):
+            source = str(payload.get("source") or "")
+            status = str(payload.get("status") or "")
+            if source == "bridge" and not payload.get("forked"):
+                return
+            if payload.get("forked") and status in {"idle", "running"}:
+                return
+            if payload.get("sdk_agent_id") and not payload.get("forked") and status in {"idle", "running"}:
+                return
+
+    ide_session = await fetch_ide_agent_session(agent_id)
     workspace = str(agent_meta.get("workspace") or "pandamonium")
     cwd = workspace_cwd_from_slug(workspace) or workspace_cwd_from_slug("pandamonium")
     body = {
         "workspace": workspace,
         "cwd": cwd,
         "title": agent_meta.get("title") or "Cursor agent",
-        "source": agent_meta.get("source") or "ide",
+        "source": "ide" if ide_session else str(agent_meta.get("source") or "bridge"),
     }
-    if str(agent_meta.get("source") or "").lower() == "ide":
-        ide_session = await fetch_ide_agent_session(agent_id)
-        if isinstance(ide_session, dict):
-            body["title"] = ide_session.get("title") or body["title"]
-            body["workspace"] = ide_session.get("workspace") or body["workspace"]
-            ide_cwd = workspace_cwd_from_slug(str(body["workspace"]))
-            if ide_cwd:
-                body["cwd"] = ide_cwd
-            messages = ide_session.get("messages")
-            if isinstance(messages, list) and messages:
-                body["messages"] = messages
+    if isinstance(ide_session, dict):
+        body["title"] = ide_session.get("title") or body["title"]
+        body["workspace"] = ide_session.get("workspace") or body["workspace"]
+        ide_cwd = workspace_cwd_from_slug(str(body["workspace"]))
+        if ide_cwd:
+            body["cwd"] = ide_cwd
+        messages = ide_session.get("messages")
+        if isinstance(messages, list) and messages:
+            body["messages"] = messages
+        agent_meta["source"] = "ide"
+        mirror_url = ide_session.get("mirror_url")
+        if mirror_url and not agent_meta.get("mirror_url"):
+            agent_meta["mirror_url"] = str(mirror_url)
+    elif probe.status_code == 404 and str(agent_meta.get("source") or "").lower() == "bridge":
+        raise HTTPException(status_code=404, detail="agent_not_found")
+
     response = await bridge_request_for_agent("POST", f"/agents/{agent_id}/resume", agent_meta, json_body=body)
     if response.status_code >= 400:
         detail = response.json().get("detail") if response.headers.get("content-type", "").startswith("application/json") else response.text
@@ -221,8 +231,7 @@ def setup_cursor_bridge_routes() -> APIRouter:
             "workspace": (body.get("workspace") if isinstance(body, dict) else None) or "pandamonium",
             "title": (body.get("title") if isinstance(body, dict) else None) or "Cursor agent",
         }
-        if agent_meta["source"] == "ide":
-            await _ensure_sidecar_agent(agent_id, agent_meta)
+        await _ensure_sidecar_agent(agent_id, agent_meta)
         response = await bridge_request_for_agent(
             "POST",
             f"/agents/{agent_id}/send",

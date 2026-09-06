@@ -182,6 +182,26 @@ async def _prepare_ide_fork(
     return row
 
 
+async def _refork_ide_agent(agent_id: str, row: dict[str, Any], *, cwd: str) -> Any | None:
+    messages = list(row.get("messages") or [])
+    pending_context = row.get("pending_context") if isinstance(row.get("pending_context"), list) else None
+    if pending_context and not messages:
+        messages = list(pending_context)
+    if not messages:
+        return None
+    workspace = str(row.get("workspace") or DEFAULT_WORKSPACE)
+    await _prepare_ide_fork(
+        agent_id,
+        workspace=workspace,
+        cwd=cwd,
+        title=str(row.get("title") or "Cursor agent"),
+        messages=messages,
+        source=str(row.get("source") or "ide"),
+    )
+    async with STATE.lock:
+        return STATE.agent_handles.get(agent_id)
+
+
 def _token() -> str:
     try:
         return TOKEN_FILE.read_text(encoding="utf-8").strip()
@@ -634,7 +654,15 @@ async def send_agent(agent_id: str, payload: dict[str, Any], authorization: str 
             agent = STATE.agent_handles.pop(agent_id, None)
         if agent is None:
             agent = await _resume_sdk_agent(client, agent_id, options)
-        run = await agent.send(prompt_to_send)
+        try:
+            run = await agent.send(prompt_to_send)
+        except AgentNotFoundError:
+            if not row.get("forked"):
+                raise
+            agent = await _refork_ide_agent(agent_id, row, cwd=cwd)
+            if agent is None:
+                raise
+            run = await agent.send(prompt_to_send)
         run_id = getattr(run, "run_id", None) or getattr(run, "id", None)
         await _append_message(agent_id, "user", [{"type": "text", "text": prompt}])
         await _update_registry(

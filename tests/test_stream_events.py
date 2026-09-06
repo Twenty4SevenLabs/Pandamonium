@@ -103,3 +103,24 @@ def test_sdk_message_to_stream_event_assistant():
 def test_sdk_message_to_stream_event_thinking():
     event = sdk_message_to_stream_event(_FakeThinkingMessage("planning"))
     assert event == {"type": "update", "update": {"type": "thinking_delta", "delta": "planning"}}
+
+
+def test_events_preserve_leading_spaces_in_text_deltas():
+    blocks = events_to_parity_blocks(
+        [
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "Hello"}]}},
+            {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": " world"}]}},
+        ]
+    )
+    assert blocks == [{"type": "text", "text": "Hello world"}]
+
+
+def test_events_hide_usage_and_status_blocks():
+    blocks = events_to_parity_blocks(
+        [
+            {"type": "update", "update": {"type": "text_delta", "delta": "Hi"}},
+            {"type": "update", "update": {"type": "usage", "usage": {"input_tokens": 1}}},
+            {"type": "update", "update": {"type": "status", "text": "FINISHED"}},
+        ]
+    )
+    assert blocks == [{"type": "text", "text": "Hi"}]
