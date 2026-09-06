@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 
 REQUIRED_MODEL = "composer-2.5"
+FAST_VARIANT_PATTERN = re.compile(r"fast", re.IGNORECASE)
 BLOCKED_HOSTS = ("api.cursor.com", "api2.cursor.sh")
 BLOCKED_PATH_PREFIXES = ("/v1/agents", "/v0/agents")
 BLOCKED_CLI_TOKENS = (
@@ -19,6 +20,29 @@ BLOCKED_CLI_TOKENS = (
     "--cloud",
     "cloud-agent",
 )
+
+
+def _text_implies_fast(text: object) -> bool:
+    return bool(FAST_VARIANT_PATTERN.search(str(text or "")))
+
+
+def _mapping_implies_fast(mapping: Mapping[str, Any]) -> bool:
+    for key, value in mapping.items():
+        if _text_implies_fast(key):
+            return True
+        if _text_implies_fast(value):
+            return True
+    return False
+
+
+def _model_implies_fast(model: Mapping[str, Any]) -> bool:
+    params = model.get("params")
+    if not isinstance(params, list):
+        return False
+    for param in params:
+        if isinstance(param, Mapping) and _mapping_implies_fast(param):
+            return True
+    return False
 
 
 class SubscriptionGuardError(RuntimeError):
@@ -38,6 +62,10 @@ def assert_model(model: object) -> str:
     elif isinstance(model, Mapping):
         raw = model.get("id") or model.get("model")
         model_id = str(raw or "").strip()
+        if _model_implies_fast(model):
+            raise SubscriptionGuardError("composer_fast_mode_not_allowed")
+    if _text_implies_fast(model_id):
+        raise SubscriptionGuardError("composer_fast_mode_not_allowed")
     if model_id != REQUIRED_MODEL:
         raise SubscriptionGuardError(f"model_must_be_{REQUIRED_MODEL}")
     return model_id
@@ -57,7 +85,12 @@ def assert_local_runtime(options: Mapping[str, Any]) -> dict[str, Any]:
 
 def assert_agent_options(options: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(options)
-    assert_model(payload.get("model"))
+    model = payload.get("model")
+    assert_model(model)
+    if isinstance(model, Mapping):
+        for key, value in model.items():
+            if key != "params" and (_text_implies_fast(key) or _text_implies_fast(value)):
+                raise SubscriptionGuardError("composer_fast_mode_not_allowed")
     assert_local_runtime(payload)
     if payload.get("autoCreatePR") or payload.get("auto_create_pr"):
         raise SubscriptionGuardError("cloud_pr_automation_not_allowed")

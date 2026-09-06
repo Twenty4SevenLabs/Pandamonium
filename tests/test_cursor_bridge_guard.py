@@ -18,6 +18,21 @@ def test_assert_model_rejects_non_composer():
         guard.assert_model("gpt-4.1")
 
 
+def test_assert_model_rejects_fast_variant():
+    with pytest.raises(guard.SubscriptionGuardError):
+        guard.assert_model("composer-2.5-fast")
+
+
+def test_assert_agent_options_rejects_fast_param():
+    with pytest.raises(guard.SubscriptionGuardError):
+        guard.assert_agent_options(
+            {
+                "model": {"id": "composer-2.5", "params": [{"id": "fast", "value": True}]},
+                "local": {"cwd": "/tmp"},
+            }
+        )
+
+
 def test_assert_local_runtime_requires_cwd():
     with pytest.raises(guard.SubscriptionGuardError):
         guard.assert_local_runtime({"local": {}})
