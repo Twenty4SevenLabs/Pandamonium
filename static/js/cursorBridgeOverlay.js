@@ -5,8 +5,150 @@ const overlayState = {
   agent: null,
   messages: [],
   streamAbort: null,
-  liveAssistantText: '',
+  liveStreamEvents: [],
 };
+
+function normalizeStreamEvent(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const eventType = String(raw.type || '').toLowerCase();
+  if (eventType === 'error') {
+    const text = String(raw.text || raw.message || 'error').trim();
+    return text ? { type: 'error', text } : null;
+  }
+  const message = raw.message;
+  if (message && typeof message === 'object') {
+    const nested = normalizeMessageDict(message);
+    if (nested) return nested;
+  }
+  if (typeof message === 'string' && message.trim()) {
+    return { type: 'text', text: message.trim() };
+  }
+  const update = raw.update;
+  if (update && typeof update === 'object') {
+    const nested = normalizeUpdateDict(update);
+    if (nested) return nested;
+  }
+  if (['thinking', 'tool', 'shell', 'usage', 'artifact', 'status'].includes(eventType)) {
+    return { ...raw, type: eventType };
+  }
+  return null;
+}
+
+function normalizeMessageDict(message) {
+  const role = String(message.role || '').toLowerCase();
+  const content = message.content;
+  if (Array.isArray(content)) {
+    const parts = [];
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      const blockType = String(block.type || '');
+      if (blockType === 'text') {
+        const text = String(block.text || '').trim();
+        if (text) parts.push(text);
+      } else if (blockType === 'tool_use') {
+        return {
+          type: 'tool',
+          name: String(block.name || 'tool'),
+          input: block.input && typeof block.input === 'object' ? block.input : {},
+          summary: String(block.name || 'tool'),
+          status: 'completed',
+        };
+      }
+    }
+    if (parts.length) return { type: 'text', text: parts.join('\n\n') };
+  }
+  if (role === 'assistant' && typeof message.text === 'string' && message.text.trim()) {
+    return { type: 'text', text: message.text.trim() };
+  }
+  return null;
+}
+
+function normalizeUpdateDict(update) {
+  const kind = String(update.type || update.updateType || '').toLowerCase();
+  if (kind.includes('textdelta') || kind === 'text_delta') {
+    const text = String(update.text || update.delta || '');
+    return text ? { type: 'text', text } : null;
+  }
+  if (kind.includes('thinking')) {
+    const text = String(update.text || update.delta || '');
+    return text ? { type: 'thinking', text, collapsed: true } : null;
+  }
+  if (kind.includes('toolcallstarted') || kind === 'tool_call_started') {
+    return {
+      type: 'tool',
+      name: String(update.name || update.toolName || 'tool'),
+      input: update.input && typeof update.input === 'object' ? update.input : {},
+      summary: String(update.name || update.toolName || 'tool'),
+      status: 'running',
+    };
+  }
+  if (kind.includes('toolcallcompleted') || kind === 'tool_call_completed') {
+    return {
+      type: 'tool',
+      name: String(update.name || update.toolName || 'tool'),
+      input: update.input && typeof update.input === 'object' ? update.input : {},
+      output: update.output,
+      summary: String(update.name || update.toolName || 'tool'),
+      status: 'completed',
+    };
+  }
+  if (kind.includes('shelloutput')) {
+    return { type: 'shell', text: String(update.text || update.delta || update.output || '') };
+  }
+  if (kind.endsWith('usage') || kind.includes('usage')) {
+    return { type: 'usage', usage: update.usage && typeof update.usage === 'object' ? update.usage : update };
+  }
+  if (kind.includes('artifact')) {
+    return {
+      type: 'artifact',
+      name: String(update.name || 'artifact'),
+      url: String(update.url || update.path || ''),
+    };
+  }
+  if (kind.includes('status')) {
+    return { type: 'status', text: String(update.text || update.status || '') };
+  }
+  return null;
+}
+
+function eventsToParityBlocks(events) {
+  const blocks = [];
+  const textBuffer = [];
+  const thinkingBuffer = [];
+  const flushText = () => {
+    if (!textBuffer.length) return;
+    const text = textBuffer.join('').trim();
+    textBuffer.length = 0;
+    if (text) blocks.push({ type: 'text', text });
+  };
+  const flushThinking = () => {
+    if (!thinkingBuffer.length) return;
+    const text = thinkingBuffer.join('').trim();
+    thinkingBuffer.length = 0;
+    if (text) blocks.push({ type: 'thinking', text, collapsed: true });
+  };
+  for (const raw of Array.isArray(events) ? events : []) {
+    const block = normalizeStreamEvent(raw);
+    if (!block) continue;
+    const kind = String(block.type || '');
+    if (kind === 'text') {
+      const delta = String(block.text || '');
+      if (delta) textBuffer.push(delta);
+      continue;
+    }
+    if (kind === 'thinking') {
+      const delta = String(block.text || block.delta || '');
+      if (delta) thinkingBuffer.push(delta);
+      continue;
+    }
+    flushText();
+    flushThinking();
+    blocks.push(block);
+  }
+  flushText();
+  flushThinking();
+  return blocks;
+}
 
 function readJson(response) {
   return response.json().catch(() => ({})).then((body) => {
@@ -84,7 +226,7 @@ function renderBlock(block) {
   return el;
 }
 
-function renderMessage(message, liveText = '') {
+function renderMessage(message, liveBlocks = null) {
   const role = message?.role === 'user' ? 'user' : 'assistant';
   const wrap = document.createElement('article');
   wrap.className = `cursor-overlay-msg cursor-overlay-msg-${role}`;
@@ -93,12 +235,14 @@ function renderMessage(message, liveText = '') {
   label.textContent = role === 'user' ? 'You' : 'Agent';
   const body = document.createElement('div');
   body.className = 'cursor-overlay-msg-body';
-  const blocks = Array.isArray(message?.blocks) ? message.blocks : [];
-  if (message?.live && liveText) {
-    const p = document.createElement('div');
-    p.className = 'cursor-overlay-block-body';
-    p.textContent = liveText || 'Thinking…';
-    body.append(p);
+  const blocks = message?.live && Array.isArray(liveBlocks) ? liveBlocks : (Array.isArray(message?.blocks) ? message.blocks : []);
+  if (role === 'user') {
+    const text = blocks
+      .filter((block) => String(block?.type || '') === 'text')
+      .map((block) => String(block.text || '').trim())
+      .filter(Boolean)
+      .join('\n\n');
+    body.textContent = text || '(empty message)';
   } else if (blocks.length) {
     blocks.forEach((block) => body.append(renderBlock(block)));
   } else {
@@ -108,19 +252,19 @@ function renderMessage(message, liveText = '') {
   return wrap;
 }
 
-function renderPanel(messages, liveText = '') {
+function renderPanel(messages, liveBlocks = null) {
   const panel = byId('cursor-agent-overlay-panel');
   if (!panel) return;
   panel.replaceChildren();
   const rows = Array.isArray(messages) ? messages : [];
-  if (!rows.length && !liveText) {
+  if (!rows.length && !liveBlocks?.length) {
     const empty = document.createElement('div');
     empty.className = 'cursor-overlay-empty';
     empty.textContent = 'Loading session…';
     panel.appendChild(empty);
     return;
   }
-  rows.forEach((message) => panel.appendChild(renderMessage(message, message?.live ? liveText : '')));
+  rows.forEach((message) => panel.appendChild(renderMessage(message, message?.live ? liveBlocks : null)));
   panel.scrollTop = panel.scrollHeight;
 }
 
@@ -146,8 +290,17 @@ async function loadSession(agentId, agent) {
   overlayState.agent = { ...(agent || {}), ...session };
   overlayState.messages = Array.isArray(session.messages) ? session.messages : [];
   setHeader(overlayState.agent);
-  renderPanel(overlayState.messages, overlayState.liveAssistantText);
+  renderPanel(overlayState.messages, null);
   return session;
+}
+
+function parseSsePayload(line) {
+  if (!line.startsWith('data: ')) return null;
+  try {
+    return JSON.parse(line.slice(6));
+  } catch (_error) {
+    return null;
+  }
 }
 
 async function streamRun(agentId, runId, agent) {
@@ -155,15 +308,17 @@ async function streamRun(agentId, runId, agent) {
   if (overlayState.streamAbort) overlayState.streamAbort.abort();
   const controller = new AbortController();
   overlayState.streamAbort = controller;
-  overlayState.liveAssistantText = '';
-  const liveMessage = { role: 'assistant', live: true, blocks: [{ type: 'text', text: '' }] };
+  overlayState.liveStreamEvents = [];
+  const liveMessage = { role: 'assistant', live: true, blocks: [] };
   const renderLive = () => {
+    const liveBlocks = eventsToParityBlocks(overlayState.liveStreamEvents);
     const messages = [...overlayState.messages];
     if (!messages.length || !messages[messages.length - 1]?.live) messages.push(liveMessage);
-    renderPanel(messages, overlayState.liveAssistantText);
+    renderPanel(messages, liveBlocks);
   };
   renderLive();
   const q = sessionQuery(agent);
+  let sseBuffer = '';
   try {
     const response = await fetch(
       `/api/cursor/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}/stream${q}`,
@@ -175,33 +330,34 @@ async function streamRun(agentId, runId, agent) {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      decoder.decode(value, { stream: true }).split('\n').forEach((line) => {
-        if (!line.startsWith('data: ')) return;
-        try {
-          const payload = JSON.parse(line.slice(6));
-          const message = payload.message;
-          if (message && Array.isArray(message.content)) {
-            message.content.forEach((block) => {
-              if (block?.type === 'text' && block.text) overlayState.liveAssistantText += block.text;
-            });
-          } else if (payload.text) {
-            overlayState.liveAssistantText += payload.text;
-          } else if (payload.block?.text) {
-            overlayState.liveAssistantText += payload.block.text;
-          }
-          renderLive();
-        } catch (_error) {
-          /* ignore malformed chunks */
-        }
-      });
+      sseBuffer += decoder.decode(value, { stream: true });
+      const lines = sseBuffer.split('\n');
+      sseBuffer = lines.pop() || '';
+      for (const line of lines) {
+        const payload = parseSsePayload(line.trim());
+        if (!payload) continue;
+        overlayState.liveStreamEvents.push(payload);
+        renderLive();
+      }
+    }
+    if (sseBuffer.trim()) {
+      const payload = parseSsePayload(sseBuffer.trim());
+      if (payload) {
+        overlayState.liveStreamEvents.push(payload);
+        renderLive();
+      }
     }
   } catch (error) {
     if (!(error instanceof DOMException && error.name === 'AbortError')) {
-      overlayState.liveAssistantText = `${overlayState.liveAssistantText}\n\n[stream ended: ${error instanceof Error ? error.message : 'error'}]`.trim();
+      overlayState.liveStreamEvents.push({
+        type: 'error',
+        text: error instanceof Error ? error.message : 'stream error',
+      });
       renderLive();
     }
   } finally {
     if (overlayState.streamAbort === controller) overlayState.streamAbort = null;
+    overlayState.liveStreamEvents = [];
     await loadSession(agentId, overlayState.agent).catch(() => {});
   }
 }
@@ -262,7 +418,7 @@ export function closeCursorAgentOverlay() {
   overlayState.agentId = null;
   overlayState.agent = null;
   overlayState.messages = [];
-  overlayState.liveAssistantText = '';
+  overlayState.liveStreamEvents = [];
 }
 
 export async function openCursorAgentOverlay(agentId, agent, runId = null) {

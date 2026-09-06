@@ -5,6 +5,80 @@ from __future__ import annotations
 from typing import Any
 
 PARITY_TYPES = frozenset({"text", "thinking", "tool", "shell", "usage", "artifact", "error", "status"})
+_SDK_REPR_PREFIX = "SDK"
+
+
+def sdk_message_to_stream_event(message: Any) -> dict[str, Any] | None:
+    """Convert cursor-sdk run message objects into normalizable stream events."""
+    if message is None:
+        return None
+    if isinstance(message, dict):
+        return dict(message)
+    if hasattr(message, "to_json") and callable(message.to_json):
+        payload = message.to_json()
+        if isinstance(payload, dict):
+            return payload
+    msg_type = str(getattr(message, "type", "") or "").strip().lower()
+    if msg_type == "assistant":
+        envelope = getattr(message, "message", None)
+        content = getattr(envelope, "content", None) if envelope is not None else None
+        blocks: list[dict[str, Any]] = []
+        for block in content or ():
+            btype = str(getattr(block, "type", "") or "")
+            if btype == "text":
+                text = str(getattr(block, "text", "") or "").strip()
+                if text:
+                    blocks.append({"type": "text", "text": text})
+            elif btype == "tool_use":
+                tool_input = getattr(block, "input", None)
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "name": str(getattr(block, "name", "tool") or "tool"),
+                        "input": tool_input if isinstance(tool_input, dict) else {},
+                    }
+                )
+        if blocks:
+            return {"type": "message", "message": {"role": "assistant", "content": blocks}}
+        return None
+    if msg_type == "thinking":
+        text = str(getattr(message, "text", "") or "").strip()
+        if not text:
+            return None
+        return {"type": "update", "update": {"type": "thinking_delta", "delta": text}}
+    if msg_type == "tool_call":
+        name = str(getattr(message, "name", "tool") or "tool")
+        tool_input = getattr(message, "args", None)
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        status = str(getattr(message, "status", "") or "running").lower()
+        if status in {"running", "started"}:
+            return {"type": "update", "update": {"type": "tool_call_started", "name": name, "input": tool_input}}
+        return {
+            "type": "update",
+            "update": {
+                "type": "tool_call_completed",
+                "name": name,
+                "input": tool_input,
+                "output": getattr(message, "result", None),
+            },
+        }
+    if msg_type == "usage":
+        usage = getattr(message, "usage", None)
+        payload: dict[str, Any]
+        if usage is not None and hasattr(usage, "__dataclass_fields__"):
+            from dataclasses import asdict
+
+            payload = asdict(usage)
+        elif isinstance(usage, dict):
+            payload = usage
+        else:
+            payload = {}
+        return {"type": "update", "update": {"type": "usage", "usage": payload}}
+    if msg_type == "status":
+        text = str(getattr(message, "status", "") or getattr(message, "message", "") or "").strip()
+        return {"type": "update", "update": {"type": "status", "text": text}} if text else None
+    return None
 
 
 def normalize_stream_event(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -21,7 +95,10 @@ def normalize_stream_event(raw: dict[str, Any]) -> dict[str, Any] | None:
         if nested:
             return nested
     if isinstance(message, str) and message.strip():
-        return {"type": "text", "text": message.strip()}
+        stripped = message.strip()
+        if stripped.startswith(_SDK_REPR_PREFIX) and "Message(" in stripped:
+            return None
+        return {"type": "text", "text": stripped}
 
     update = raw.get("update")
     if isinstance(update, dict):

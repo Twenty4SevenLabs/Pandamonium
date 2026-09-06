@@ -12,6 +12,33 @@ SPEC.loader.exec_module(stream_events)
 
 normalize_stream_event = stream_events.normalize_stream_event
 events_to_parity_blocks = stream_events.events_to_parity_blocks
+sdk_message_to_stream_event = stream_events.sdk_message_to_stream_event
+
+
+class _FakeBlock:
+    def __init__(self, block_type: str, **kwargs):
+        self.type = block_type
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+class _FakeAssistantEnvelope:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeAssistantMessage:
+    type = "assistant"
+
+    def __init__(self, text: str):
+        self.message = _FakeAssistantEnvelope([_FakeBlock("text", text=text)])
+
+
+class _FakeThinkingMessage:
+    type = "thinking"
+
+    def __init__(self, text: str):
+        self.text = text
 
 
 def test_normalize_error_event():
@@ -56,3 +83,23 @@ def test_events_to_parity_blocks_merges_text():
         ]
     )
     assert blocks == [{"type": "text", "text": "Hello"}]
+
+
+def test_normalize_rejects_sdk_repr_strings():
+    block = normalize_stream_event(
+        {"type": "assistant", "message": "SDKAssistantMessage(type='assistant', text='hi')"}
+    )
+    assert block is None
+
+
+def test_sdk_message_to_stream_event_assistant():
+    event = sdk_message_to_stream_event(_FakeAssistantMessage("Hello"))
+    assert event == {
+        "type": "message",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "Hello"}]},
+    }
+
+
+def test_sdk_message_to_stream_event_thinking():
+    event = sdk_message_to_stream_event(_FakeThinkingMessage("planning"))
+    assert event == {"type": "update", "update": {"type": "thinking_delta", "delta": "planning"}}

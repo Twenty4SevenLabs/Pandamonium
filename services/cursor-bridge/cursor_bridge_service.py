@@ -304,7 +304,7 @@ async def _append_message(agent_id: str, role: str, blocks: list[dict[str, Any]]
         _save_registry(registry)
 
 
-def _events_to_assistant_blocks(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _load_stream_events():
     from importlib.util import module_from_spec, spec_from_file_location
 
     path = Path(__file__).resolve().parent / "stream_events.py"
@@ -312,8 +312,13 @@ def _events_to_assistant_blocks(events: list[dict[str, Any]]) -> list[dict[str, 
     if spec and spec.loader:
         mod = module_from_spec(spec)
         spec.loader.exec_module(mod)
-        return mod.events_to_parity_blocks(events)
-    return []
+        return mod
+    raise RuntimeError("stream_events module unavailable")
+
+
+def _events_to_assistant_blocks(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    mod = _load_stream_events()
+    return mod.events_to_parity_blocks(events)
 
 
 def _session_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -365,15 +370,12 @@ async def _consume_run(agent_id: str, run: Any) -> None:
     await _update_registry(agent_id, status="running", run_id=run_id, error=None)
     try:
         async for message in run.messages():
-            payload = {
-                "type": getattr(message, "type", "message"),
-                "created_at": int(time.time()),
-            }
-            if hasattr(message, "to_json"):
-                payload["message"] = message.to_json()
-            else:
-                payload["message"] = str(message)
-            await _append_event(str(run_id), payload)
+            mod = _load_stream_events()
+            event = mod.sdk_message_to_stream_event(message)
+            if not event:
+                continue
+            event["created_at"] = int(time.time())
+            await _append_event(str(run_id), event)
         result = await run.wait()
         status = getattr(result, "status", None) or (result.get("status") if isinstance(result, dict) else "finished")
         terminal = "failed" if status == "error" else "idle"

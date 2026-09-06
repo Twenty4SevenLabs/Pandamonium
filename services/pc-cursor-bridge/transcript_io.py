@@ -10,6 +10,8 @@ from typing import Any
 
 USER_QUERY_PATTERN = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL | re.IGNORECASE)
 TAG_BLOCK_PATTERN = re.compile(r"<(timestamp|image_files|open_and_recently_viewed_files|agent_transcripts)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
+GENERIC_TAG_PATTERN = re.compile(r"<([a-zA-Z0-9_-]+)(?:\s[^>]*)?>.*?</\1>", re.DOTALL)
+SELF_CLOSING_TAG_PATTERN = re.compile(r"<([a-zA-Z0-9_-]+)(?:\s[^>]*)?/>")
 TITLE_JSON_PATTERN = re.compile(r'"title"\s*:\s*"([^"]{1,200})"')
 
 
@@ -24,10 +26,17 @@ class TranscriptRef:
 
 def _clean_user_text(raw: str) -> str:
     text = str(raw or "")
-    text = TAG_BLOCK_PATTERN.sub("", text)
     match = USER_QUERY_PATTERN.search(text)
     if match:
         text = match.group(1)
+    else:
+        text = TAG_BLOCK_PATTERN.sub("", text)
+        for _ in range(6):
+            cleaned = GENERIC_TAG_PATTERN.sub("", text)
+            if cleaned == text:
+                break
+            text = cleaned
+        text = SELF_CLOSING_TAG_PATTERN.sub("", text)
     text = text.replace("[Image]", "").strip()
     return " ".join(text.split())
 

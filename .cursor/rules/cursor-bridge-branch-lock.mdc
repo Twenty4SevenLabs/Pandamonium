@@ -1,0 +1,33 @@
+---
+description: Keep Pandamonium cursor-bridge work on the cursor-bridge git branch only
+alwaysApply: true
+---
+
+# Cursor bridge branch lock
+
+Pandamonium **cursor-bridge work stays on `cursor-bridge`**. Do not switch to `main` until bridge work is merged or explicitly abandoned.
+
+## Branch rules
+
+- Active branch: **`cursor-bridge`**
+- `main` must **not** receive bridge-only files (`cursorBridge.js`, `cursor_bridge_routes.py`, `services/cursor-bridge/`, `services/pc-cursor-bridge/`, etc.).
+- Before any merge to `main`, verify with `git diff main...cursor-bridge --stat` and drop bridge-only paths from the merge.
+
+## Verify before coding
+
+```bash
+cd /mnt/dev-env/projects/pandamonium
+git branch --show-current   # must print: cursor-bridge
+```
+
+If the IDE status bar shows `main`, run `git checkout cursor-bridge` on the SSH host and reload the window.
+
+## Deploy
+
+Panda Docker image is built from the **checked-out branch**. After bridge changes:
+
+```bash
+sudo systemctl restart pandamonium.service
+```
+
+(or `docker compose -f docker-compose.yml -f docker/host-proxmox.yml up -d --build`)

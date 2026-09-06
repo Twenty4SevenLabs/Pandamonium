@@ -47,6 +47,30 @@ def _enrich_execution_meta(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _merge_session_messages(
+    ide_messages: list[dict[str, Any]],
+    sidecar_messages: list[dict[str, Any]],
+    *,
+    forked: bool,
+    status: str,
+) -> list[dict[str, Any]]:
+    ide = list(ide_messages or [])
+    side = list(sidecar_messages or [])
+    if not ide:
+        return side
+    if not side:
+        return ide
+    if forked or status in {"running", "failed"}:
+        return side
+    if len(side) > len(ide):
+        return side
+    if len(ide) > len(side):
+        return ide
+    if side[-1] != ide[-1]:
+        return side
+    return ide
+
+
 async def _ensure_sidecar_agent(agent_id: str, agent_meta: dict[str, Any]) -> None:
     probe = await bridge_request_for_agent("GET", f"/agents/{agent_id}/session", agent_meta)
     if probe.status_code == 200:
@@ -261,8 +285,12 @@ def setup_cursor_bridge_routes() -> APIRouter:
             if ide_session and isinstance(payload, dict):
                 ide_messages = ide_session.get("messages") if isinstance(ide_session.get("messages"), list) else []
                 sidecar_messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
-                if len(ide_messages) >= len(sidecar_messages):
-                    payload["messages"] = ide_messages
+                payload["messages"] = _merge_session_messages(
+                    ide_messages,
+                    sidecar_messages,
+                    forked=bool(payload.get("forked")),
+                    status=str(payload.get("status") or ""),
+                )
                 payload["source"] = payload.get("source") or "ide"
             return _enrich_execution_meta(payload if isinstance(payload, dict) else {})
         if ide_session:
