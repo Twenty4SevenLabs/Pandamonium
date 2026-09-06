@@ -1,3 +1,5 @@
+import { closeCursorAgentOverlay, initCursorAgentOverlay, openCursorAgentOverlay } from './cursorBridgeOverlay.js';
+
 const byId = (id) => document.getElementById(id);
 
 const state = {
@@ -201,9 +203,7 @@ async function refreshStatus() {
   const status = await readJson(response);
   setStatusPill(status);
   const connectPanel = byId('cursor-bridge-connect');
-  const detail = byId('cursor-agent-detail');
   if (connectPanel) connectPanel.hidden = status.configured === true;
-  if (detail) detail.hidden = status.configured !== true;
   return status;
 }
 
@@ -339,29 +339,9 @@ async function selectAgent(agentId, runId = null) {
   state.selectedAgentId = agentId;
   state.liveAssistantText = '';
   renderAgentList(state.agents);
-  const agent = state.agents.find((row) => row.agent_id === agentId);
-  state.selectedAgent = agent || null;
-  const detail = byId('cursor-agent-detail');
-  if (detail) detail.hidden = false;
-  setDetailChrome(agent);
-  try {
-    await loadSession(agentId);
-  } catch (error) {
-    renderAgentPanel([], '');
-    const panel = byId('cursor-agent-panel');
-    if (panel) {
-      panel.replaceChildren();
-      const empty = document.createElement('div');
-      empty.className = 'cursor-agent-panel-empty';
-      empty.textContent = error instanceof Error ? error.message : 'Could not load session.';
-      panel.appendChild(empty);
-    }
-    return;
-  }
-  const activeRunId = runId || agent?.run_id;
-  if (activeRunId && (agent?.status === 'running' || runId)) {
-    await streamRun(agentId, activeRunId);
-  }
+  const agent = state.agents.find((row) => row.agent_id === agentId) || null;
+  state.selectedAgent = agent;
+  await openCursorAgentOverlay(agentId, agent, runId);
 }
 
 async function streamRun(agentId, runId) {
@@ -434,6 +414,7 @@ function expandSection() {
 }
 
 function init() {
+  initCursorAgentOverlay();
   byId('cursor-bridge-new-agent')?.addEventListener('click', (event) => {
     event.stopPropagation();
     createAgent().catch((error) => {
@@ -443,9 +424,6 @@ function init() {
   byId('cursor-bridge-connect-form')?.addEventListener('submit', connectBridge);
   byId('cursor-bridge-disconnect-btn')?.addEventListener('click', () => disconnectBridge().catch((error) => {
     window.alert(error instanceof Error ? error.message : 'Disconnect failed.');
-  }));
-  byId('cursor-agent-send-btn')?.addEventListener('click', () => sendFollowUp().catch((error) => {
-    window.alert(error instanceof Error ? error.message : 'Send failed.');
   }));
   refreshAgents().catch(() => {});
   startPolling();

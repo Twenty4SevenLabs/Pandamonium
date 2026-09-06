@@ -43,6 +43,7 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now pc-cursor-bridge.service
+systemctl enable pc-cursor-bridge.service
+systemctl restart pc-cursor-bridge.service
 systemctl status pc-cursor-bridge.service --no-pager || true
 echo "Installed on $(hostname) for $USER"

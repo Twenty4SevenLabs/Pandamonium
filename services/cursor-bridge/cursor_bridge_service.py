@@ -69,6 +69,118 @@ def _load_workspaces() -> dict[str, str]:
 WORKSPACES = _load_workspaces()
 DEFAULT_WORKSPACE = next(iter(WORKSPACES), "")
 
+try:
+    from cursor_sdk.errors import AgentNotFoundError
+except ImportError:
+
+    class AgentNotFoundError(Exception):
+        """Fallback when cursor_sdk.errors is unavailable."""
+
+
+def _resolve_cwd(workspace: str, explicit_cwd: str = "") -> str:
+    cwd = str(explicit_cwd or "").strip()
+    if cwd:
+        candidate = Path(cwd).expanduser()
+        if candidate.is_dir():
+            return str(candidate.resolve())
+    key = str(workspace or "").strip()
+    if key in WORKSPACES:
+        return WORKSPACES[key]
+    prefix = "mnt-dev-env-projects-"
+    if key.startswith(prefix):
+        project = key.removeprefix(prefix)
+        if project:
+            mapped = Path(f"/mnt/dev-env/projects/{project}")
+            if mapped.is_dir():
+                return str(mapped.resolve())
+    fallback_root = os.getenv("PANDAMONIUM_CURSOR_WORKSPACE_FALLBACK_ROOT", "").strip()
+    if fallback_root and key:
+        mapped = Path(fallback_root.rstrip("/")) / key
+        if mapped.is_dir():
+            return str(mapped.resolve())
+    return ""
+
+
+def _sdk_agent_id(row: dict[str, Any]) -> str:
+    return str(row.get("sdk_agent_id") or row.get("agent_id") or "")
+
+
+def _messages_to_context_prompt(messages: list[dict[str, Any]], *, max_messages: int = 24) -> str:
+    lines = ["Continue this Cursor IDE session from Panda. Prior transcript:\n"]
+    for msg in messages[-max_messages:]:
+        role = str(msg.get("role") or "user").upper()
+        chunks: list[str] = []
+        for block in msg.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and block.get("text"):
+                chunks.append(str(block["text"]).strip())
+            elif block.get("type") == "tool":
+                summary = str(block.get("summary") or block.get("name") or "tool").strip()
+                chunks.append(f"[tool {summary}]")
+        text = " ".join(chunks).strip()
+        if text:
+            lines.append(f"{role}: {text}")
+    lines.append("\nContinue naturally from this context.")
+    return "\n".join(lines)[:50_000]
+
+
+async def _resume_sdk_agent(client: Any, agent_id: str, options: dict[str, Any]) -> Any:
+    registry = _load_registry()
+    row = registry.get(agent_id) or {}
+    candidates = [agent_id]
+    sdk_id = _sdk_agent_id(row)
+    if sdk_id and sdk_id not in candidates:
+        candidates.append(sdk_id)
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            return await client.resume_agent(candidate, options)
+        except AgentNotFoundError as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise last_error
+    raise AgentNotFoundError(f"Agent {agent_id} not found")
+
+
+async def _prepare_ide_fork(
+    agent_id: str,
+    *,
+    workspace: str,
+    cwd: str,
+    title: str,
+    messages: list[dict[str, Any]] | None,
+    source: str = "ide",
+) -> dict[str, Any]:
+    client = await _ensure_client()
+    options = assert_agent_options(
+        {
+            "api_key": STATE.api_key,
+            "model": REQUIRED_MODEL,
+            "local": {"cwd": cwd, "setting_sources": []},
+        }
+    )
+    agent = await client.create_agent(options)
+    sdk_id = getattr(agent, "agent_id", None) or getattr(agent, "id", None)
+    if not sdk_id:
+        raise HTTPException(status_code=502, detail="cursor_agent_missing")
+    imported = list(messages or [])[-500:]
+    async with STATE.lock:
+        STATE.agent_handles[agent_id] = agent
+    row = await _update_registry(
+        agent_id,
+        sdk_agent_id=str(sdk_id),
+        title=title,
+        workspace=workspace,
+        status="idle",
+        source=source,
+        forked=True,
+        pending_context=imported or None,
+        error=None,
+    )
+    return row
+
 
 def _token() -> str:
     try:
@@ -123,6 +235,7 @@ class BridgeState:
     guard_failed: str | None = None
     active_runs: dict[str, asyncio.Task] = field(default_factory=dict)
     run_events: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    agent_handles: dict[str, Any] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -148,6 +261,8 @@ def _public_agent(row: dict[str, Any]) -> dict[str, Any]:
         "updated_at": row.get("updated_at"),
         "error": row.get("error"),
         "read_only": False,
+        "forked": bool(row.get("forked")),
+        "sdk_agent_id": row.get("sdk_agent_id"),
         "message_count": len(row.get("messages") or []),
     }
 
@@ -190,26 +305,15 @@ async def _append_message(agent_id: str, role: str, blocks: list[dict[str, Any]]
 
 
 def _events_to_assistant_blocks(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    blocks: list[dict[str, Any]] = []
-    text_parts: list[str] = []
-    for event in events:
-        if event.get("type") == "error":
-            text = str(event.get("text") or "").strip()
-            if text:
-                text_parts.append(text)
-            continue
-        message = event.get("message")
-        for block in _blocks_from_message(message if isinstance(message, dict) else {}):
-            if block.get("type") == "text":
-                text_parts.append(str(block.get("text") or ""))
-            else:
-                if text_parts:
-                    blocks.append({"type": "text", "text": "".join(text_parts).strip()})
-                    text_parts = []
-                blocks.append(block)
-    if text_parts:
-        blocks.append({"type": "text", "text": "".join(text_parts).strip()})
-    return [block for block in blocks if block.get("text") or block.get("type") == "tool"]
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    path = Path(__file__).resolve().parent / "stream_events.py"
+    spec = spec_from_file_location("stream_events", path)
+    if spec and spec.loader:
+        mod = module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.events_to_parity_blocks(events)
+    return []
 
 
 def _session_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -228,6 +332,9 @@ def _session_payload(row: dict[str, Any]) -> dict[str, Any]:
         "run_id": row.get("run_id"),
         "updated_at": row.get("updated_at"),
         "read_only": False,
+        "can_send": STATE.client is not None and not STATE.guard_failed,
+        "forked": bool(row.get("forked")),
+        "sdk_agent_id": row.get("sdk_agent_id"),
         "message_count": len(messages),
         "messages": messages,
     }
@@ -365,7 +472,7 @@ async def list_agents(
     client = await _ensure_client()
     sdk_items: list[dict[str, Any]] = []
     target_workspace = workspace or DEFAULT_WORKSPACE
-    cwd = WORKSPACES.get(target_workspace) if target_workspace else None
+    cwd = _resolve_cwd(target_workspace)
     if cwd:
         try:
             listed = await client.agents.list(runtime="local", cwd=cwd, api_key=STATE.api_key)
@@ -402,7 +509,7 @@ async def create_agent(payload: dict[str, Any], authorization: str | None = Head
     _require_auth(authorization)
     client = await _ensure_client()
     workspace = str(payload.get("workspace") or DEFAULT_WORKSPACE).strip()
-    cwd = WORKSPACES.get(workspace)
+    cwd = _resolve_cwd(workspace)
     if not cwd:
         raise HTTPException(status_code=400, detail="unknown_workspace")
     prompt = str(payload.get("prompt") or "").strip()
@@ -439,6 +546,59 @@ async def create_agent(payload: dict[str, Any], authorization: str | None = Head
         return {"agent": _public_agent(_load_registry()[str(agent_id)]), "run_id": run_id}
     except SubscriptionGuardError as exc:
         raise HTTPException(status_code=403, detail=exc.reason) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)[:240]) from exc
+
+
+@app.post("/agents/{agent_id}/resume")
+async def resume_agent_endpoint(
+    agent_id: str,
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_auth(authorization)
+    client = await _ensure_client()
+    workspace = str(payload.get("workspace") or DEFAULT_WORKSPACE).strip()
+    cwd = _resolve_cwd(workspace, str(payload.get("cwd") or ""))
+    if not cwd:
+        raise HTTPException(status_code=400, detail="unknown_workspace")
+    options = assert_agent_options(
+        {
+            "api_key": STATE.api_key,
+            "model": REQUIRED_MODEL,
+            "local": {"cwd": cwd, "setting_sources": []},
+        }
+    )
+    title = str(payload.get("title") or "Cursor agent").strip()[:120]
+    source = str(payload.get("source") or "ide")
+    messages = payload.get("messages") if isinstance(payload.get("messages"), list) else None
+    try:
+        await _resume_sdk_agent(client, agent_id, options)
+        await _update_registry(
+            agent_id,
+            title=title,
+            workspace=workspace,
+            status="idle",
+            source=source,
+            error=None,
+        )
+        return {"agent": _public_agent(_load_registry()[agent_id])}
+    except AgentNotFoundError:
+        if not messages:
+            raise HTTPException(status_code=404, detail="agent_not_found") from None
+        row = await _prepare_ide_fork(
+            agent_id,
+            workspace=workspace,
+            cwd=cwd,
+            title=title,
+            messages=messages,
+            source=source,
+        )
+        return {"agent": _public_agent(row), "forked": True}
+    except SubscriptionGuardError as exc:
+        raise HTTPException(status_code=403, detail=exc.reason) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)[:240]) from exc
 
 
 @app.post("/agents/{agent_id}/send")
@@ -453,7 +613,7 @@ async def send_agent(agent_id: str, payload: dict[str, Any], authorization: str 
     if not prompt or len(prompt) > 50_000:
         raise HTTPException(status_code=400, detail="invalid_prompt")
     workspace = str(row.get("workspace") or DEFAULT_WORKSPACE)
-    cwd = WORKSPACES.get(workspace)
+    cwd = _resolve_cwd(workspace)
     if not cwd:
         raise HTTPException(status_code=400, detail="unknown_workspace")
     options = assert_agent_options(
@@ -463,20 +623,39 @@ async def send_agent(agent_id: str, payload: dict[str, Any], authorization: str 
             "local": {"cwd": cwd, "setting_sources": []},
         }
     )
+    pending_context = row.get("pending_context") if isinstance(row.get("pending_context"), list) else None
+    prompt_to_send = prompt
+    if pending_context:
+        prompt_to_send = f"{_messages_to_context_prompt(pending_context)}\n\nUSER (new message):\n{prompt}"[:50_000]
     try:
-        agent = await client.resume_agent(agent_id, options)
-        run = await agent.send(prompt)
+        async with STATE.lock:
+            agent = STATE.agent_handles.pop(agent_id, None)
+        if agent is None:
+            agent = await _resume_sdk_agent(client, agent_id, options)
+        run = await agent.send(prompt_to_send)
         run_id = getattr(run, "run_id", None) or getattr(run, "id", None)
         await _append_message(agent_id, "user", [{"type": "text", "text": prompt}])
-        await _update_registry(agent_id, status="running", run_id=run_id, error=None)
+        await _update_registry(
+            agent_id,
+            status="running",
+            run_id=run_id,
+            error=None,
+            pending_context=None,
+        )
         task = asyncio.create_task(_consume_run(agent_id, run))
         async with STATE.lock:
             if run_id:
                 STATE.active_runs[str(run_id)] = task
         return {"agent": _public_agent(_load_registry()[agent_id]), "run_id": run_id}
+    except AgentNotFoundError as exc:
+        await _update_registry(agent_id, status="failed", error="agent_not_found")
+        raise HTTPException(status_code=404, detail="agent_not_found") from exc
     except SubscriptionGuardError as exc:
         await _update_registry(agent_id, status="failed", error=exc.reason)
         raise HTTPException(status_code=403, detail=exc.reason) from exc
+    except Exception as exc:
+        await _update_registry(agent_id, status="failed", error=str(exc)[:240])
+        raise HTTPException(status_code=502, detail=str(exc)[:240]) from exc
 
 
 @app.get("/agents/{agent_id}/runs/{run_id}/stream")

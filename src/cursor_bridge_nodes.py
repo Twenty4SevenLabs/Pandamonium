@@ -97,6 +97,11 @@ def workspace_cwd_from_slug(slug: str) -> str | None:
     workspaces = _workspaces_json()
     if slug_key in workspaces:
         return workspaces[slug_key]
+    prefix = "mnt-dev-env-projects-"
+    if slug_key.startswith(prefix):
+        project = slug_key.removeprefix(prefix)
+        if project:
+            return f"/mnt/dev-env/projects/{project}"
     fallback_root = os.getenv("PANDAMONIUM_CURSOR_WORKSPACE_FALLBACK_ROOT", "").strip()
     if fallback_root:
         return f"{fallback_root.rstrip('/')}/{slug_key}"

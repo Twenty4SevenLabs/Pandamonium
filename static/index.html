@@ -885,22 +885,33 @@
             <button type="submit" id="cursor-bridge-connect-btn">Connect</button>
           </form>
           <div id="cursor-bridge-connect-error" class="cursor-bridge-connect-error" role="alert"></div>
+          <button type="button" id="cursor-bridge-disconnect-btn" class="cursor-bridge-disconnect-btn">Disconnect</button>
         </div>
         <div id="cursor-agent-list" role="listbox" aria-label="Cursor agents"></div>
-        <div id="cursor-agent-detail" class="cursor-agent-detail" hidden>
-          <div class="cursor-agent-detail-head">
-            <strong id="cursor-agent-detail-title">Cursor agent</strong>
-            <span id="cursor-agent-detail-badge" class="cursor-agent-source-badge">BRIDGE</span>
-            <button type="button" id="cursor-bridge-disconnect-btn" class="cursor-bridge-disconnect-btn">Disconnect</button>
-          </div>
-          <div id="cursor-agent-panel" class="cursor-agent-panel" aria-live="polite"></div>
-          <div id="cursor-agent-readonly-note" class="cursor-agent-readonly-note" hidden>
-            Read-only IDE session — continue this agent in Cursor on your PC.
-          </div>
-          <div class="cursor-agent-compose">
-            <textarea id="cursor-agent-prompt" rows="2" placeholder="Send a follow-up to this Cursor agent…"></textarea>
-            <button type="button" id="cursor-agent-send-btn">Send</button>
-          </div>
+      </div>
+
+      <div id="cursor-agent-overlay" class="cursor-agent-overlay" hidden>
+        <div id="cursor-agent-overlay-backdrop" class="cursor-agent-overlay-backdrop"></div>
+        <div class="cursor-agent-overlay-shell" role="dialog" aria-modal="true" aria-labelledby="cursor-agent-overlay-title">
+          <header class="cursor-agent-overlay-header">
+            <button type="button" id="cursor-agent-overlay-close" class="cursor-agent-overlay-close" aria-label="Close">×</button>
+            <div class="cursor-agent-overlay-headings">
+              <strong id="cursor-agent-overlay-title">Cursor agent</strong>
+              <div class="cursor-agent-overlay-badges">
+                <span id="cursor-agent-overlay-source" class="cursor-agent-source-badge">BRIDGE</span>
+                <span id="cursor-agent-overlay-node" class="cursor-agent-node-badge"></span>
+                <span id="cursor-agent-overlay-model" class="cursor-agent-model-badge">Composer 2.5 · local · fast off</span>
+              </div>
+            </div>
+          </header>
+          <div id="cursor-agent-overlay-panel" class="cursor-agent-overlay-panel" aria-live="polite"></div>
+          <footer id="cursor-agent-overlay-compose" class="cursor-agent-overlay-compose">
+            <textarea id="cursor-agent-overlay-prompt" rows="3" placeholder="Message this Cursor agent…"></textarea>
+            <div class="cursor-agent-overlay-actions">
+              <button type="button" id="cursor-agent-overlay-stop" class="cursor-agent-overlay-stop">Stop</button>
+              <button type="button" id="cursor-agent-overlay-send" class="cursor-agent-overlay-send">Send</button>
+            </div>
+          </footer>
         </div>
       </div>
 
