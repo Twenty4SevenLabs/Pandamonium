@@ -147,6 +147,89 @@ def _public_agent(row: dict[str, Any]) -> dict[str, Any]:
         "run_id": row.get("run_id"),
         "updated_at": row.get("updated_at"),
         "error": row.get("error"),
+        "read_only": False,
+        "message_count": len(row.get("messages") or []),
+    }
+
+
+def _blocks_from_message(message: object) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    if not isinstance(message, dict):
+        return blocks
+    content = message.get("content")
+    if not isinstance(content, list):
+        return blocks
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "").strip()
+        if block_type == "text":
+            text = str(block.get("text") or "").strip()
+            if text:
+                blocks.append({"type": "text", "text": text})
+        elif block_type == "tool_use":
+            name = str(block.get("name") or "tool").strip() or "tool"
+            tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
+            blocks.append({"type": "tool", "name": name, "input": tool_input, "summary": name})
+    return blocks
+
+
+async def _append_message(agent_id: str, role: str, blocks: list[dict[str, Any]]) -> None:
+    if not blocks:
+        return
+    async with STATE.lock:
+        registry = _load_registry()
+        row = dict(registry.get(agent_id) or {})
+        messages = list(row.get("messages") or [])
+        messages.append({"id": f"msg-{len(messages)}", "role": role, "blocks": blocks})
+        row["messages"] = messages[-500:]
+        row["agent_id"] = agent_id
+        row["updated_at"] = int(time.time())
+        registry[agent_id] = row
+        _save_registry(registry)
+
+
+def _events_to_assistant_blocks(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    text_parts: list[str] = []
+    for event in events:
+        if event.get("type") == "error":
+            text = str(event.get("text") or "").strip()
+            if text:
+                text_parts.append(text)
+            continue
+        message = event.get("message")
+        for block in _blocks_from_message(message if isinstance(message, dict) else {}):
+            if block.get("type") == "text":
+                text_parts.append(str(block.get("text") or ""))
+            else:
+                if text_parts:
+                    blocks.append({"type": "text", "text": "".join(text_parts).strip()})
+                    text_parts = []
+                blocks.append(block)
+    if text_parts:
+        blocks.append({"type": "text", "text": "".join(text_parts).strip()})
+    return [block for block in blocks if block.get("text") or block.get("type") == "tool"]
+
+
+def _session_payload(row: dict[str, Any]) -> dict[str, Any]:
+    messages = list(row.get("messages") or [])
+    run_id = str(row.get("run_id") or "")
+    if row.get("status") == "running" and run_id:
+        live_blocks = _events_to_assistant_blocks(STATE.run_events.get(run_id, []))
+        if live_blocks:
+            messages = messages + [{"id": "msg-live", "role": "assistant", "blocks": live_blocks, "live": True}]
+    return {
+        "agent_id": row.get("agent_id"),
+        "title": row.get("title") or "Cursor agent",
+        "workspace": row.get("workspace"),
+        "status": row.get("status") or "idle",
+        "source": row.get("source") or "bridge",
+        "run_id": row.get("run_id"),
+        "updated_at": row.get("updated_at"),
+        "read_only": False,
+        "message_count": len(messages),
+        "messages": messages,
     }
 
 
@@ -191,6 +274,9 @@ async def _consume_run(agent_id: str, run: Any) -> None:
         if status == "error":
             error = "cursor_run_failed"
             terminal = "failed"
+        assistant_blocks = _events_to_assistant_blocks(STATE.run_events.get(str(run_id), []))
+        if assistant_blocks:
+            await _append_message(agent_id, "assistant", assistant_blocks)
         await _update_registry(agent_id, status=terminal, error=error)
     except Exception as exc:
         await _update_registry(agent_id, status="failed", error=str(exc)[:240])
@@ -343,6 +429,7 @@ async def create_agent(payload: dict[str, Any], authorization: str | None = Head
             source="bridge",
             error=None,
         )
+        await _append_message(str(agent_id), "user", [{"type": "text", "text": prompt}])
         run = await agent.send(prompt)
         run_id = getattr(run, "run_id", None) or getattr(run, "id", None)
         task = asyncio.create_task(_consume_run(str(agent_id), run))
@@ -380,6 +467,7 @@ async def send_agent(agent_id: str, payload: dict[str, Any], authorization: str 
         agent = await client.resume_agent(agent_id, options)
         run = await agent.send(prompt)
         run_id = getattr(run, "run_id", None) or getattr(run, "id", None)
+        await _append_message(agent_id, "user", [{"type": "text", "text": prompt}])
         await _update_registry(agent_id, status="running", run_id=run_id, error=None)
         task = asyncio.create_task(_consume_run(agent_id, run))
         async with STATE.lock:
@@ -410,6 +498,16 @@ async def stream_run(agent_id: str, run_id: str, authorization: str | None = Hea
             await asyncio.sleep(0.4)
 
     return StreamingResponse(event_source(), media_type="text/event-stream")
+
+
+@app.get("/agents/{agent_id}/session")
+async def agent_session(agent_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _require_auth(authorization)
+    registry = _load_registry()
+    row = registry.get(agent_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="agent_not_found")
+    return _session_payload(row)
 
 
 @app.delete("/agents/{agent_id}")

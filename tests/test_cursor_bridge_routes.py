@@ -80,3 +80,21 @@ def test_remove_agent_bridge_delegates(client):
         response = client.delete("/api/cursor/agents/a1")
     assert response.status_code == 200
     dismiss.assert_called_once_with("a1")
+
+
+def test_agent_session_prefers_ide_mirror(client):
+    ide_session = {
+        "agent_id": "ide-1",
+        "title": "IDE chat",
+        "source": "ide",
+        "read_only": True,
+        "messages": [{"role": "user", "blocks": [{"type": "text", "text": "Hello"}]}],
+    }
+    with patch("routes.cursor_bridge_routes.is_configured", return_value=True), patch(
+        "routes.cursor_bridge_routes.fetch_ide_agent_session",
+        new=AsyncMock(return_value=ide_session),
+    ):
+        response = client.get("/api/cursor/agents/ide-1/session?source=ide")
+    assert response.status_code == 200
+    assert response.json()["title"] == "IDE chat"
+    assert response.json()["messages"][0]["blocks"][0]["text"] == "Hello"

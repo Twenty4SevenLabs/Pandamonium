@@ -42897,18 +42897,77 @@ html.jarvis-voice-minimized .extension-surface-panel.is-open {
   justify-content: space-between;
   gap: 8px;
 }
-.cursor-agent-stream {
-  margin: 0;
-  max-height: 180px;
+#cursor-agent-detail-badge { margin-right: auto; }
+.cursor-agent-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: min(48vh, 420px);
   overflow: auto;
+  padding: 4px 2px 8px;
+}
+.cursor-agent-panel-empty {
+  font-size: 11px;
+  opacity: 0.6;
+  padding: 12px 8px;
+}
+.cursor-agent-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 100%;
+}
+.cursor-agent-msg-role {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+.cursor-agent-msg-user .cursor-agent-msg-body {
+  align-self: flex-end;
+  max-width: 92%;
+  padding: 8px 10px;
+  border-radius: 10px 10px 4px 10px;
+  background: color-mix(in srgb, var(--accent, #3ecf8e) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #3ecf8e) 28%, transparent);
+}
+.cursor-agent-msg-assistant .cursor-agent-msg-body {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 8px 10px;
+  border-radius: 10px 10px 10px 4px;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.cursor-agent-msg-body {
+  font-size: 11px;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 11px;
-  line-height: 1.45;
-  padding: 8px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--fg) 4%, transparent);
 }
+.cursor-agent-tool-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.cursor-agent-tool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  font-size: 10px;
+  opacity: 0.85;
+}
+.cursor-agent-readonly-note {
+  font-size: 11px;
+  opacity: 0.72;
+  padding: 0 2px 4px;
+}
+.cursor-agent-detail.is-readonly .cursor-agent-compose { display: none; }
 .cursor-agent-compose { display: flex; gap: 6px; align-items: flex-end; }
 #cursor-agent-prompt {
   flex: 1;

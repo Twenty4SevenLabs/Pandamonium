@@ -24,8 +24,36 @@ BRIDGE_DIR = Path(DATA_DIR) / "cursor-bridge"
 SETTINGS_FILE = BRIDGE_DIR / "settings.json"
 TOKEN_FILE = BRIDGE_DIR / "token"
 DEFAULT_URL = os.getenv("ODYSSEUS_CURSOR_BRIDGE_URL", "http://127.0.0.1:8050").rstrip("/")
-PC_IDE_URL = os.getenv("ODYSSEUS_PC_CURSOR_BRIDGE_URL", "").rstrip("/")
-PC_IDE_TOKEN_FILE = Path(os.getenv("ODYSSEUS_PC_CURSOR_BRIDGE_TOKEN_FILE", str(Path.home() / ".config/jarvis/cursor-bridge-token")))
+PC_IDE_URL = (
+    os.getenv("PANDAMONIUM_PC_CURSOR_BRIDGE_URL")
+    or os.getenv("ODYSSEUS_PC_CURSOR_BRIDGE_URL")
+    or ""
+).rstrip("/")
+PC_IDE_URLS_RAW = (
+    os.getenv("PANDAMONIUM_PC_CURSOR_BRIDGE_URLS")
+    or os.getenv("ODYSSEUS_PC_CURSOR_BRIDGE_URLS")
+    or ""
+)
+
+
+def pc_ide_urls() -> list[str]:
+    """Return all configured IDE mirror bridge base URLs (deduped, order preserved)."""
+    urls: list[str] = []
+    seen: set[str] = set()
+    if PC_IDE_URLS_RAW.strip():
+        for part in PC_IDE_URLS_RAW.split(","):
+            url = part.strip().rstrip("/")
+            if url and url not in seen:
+                seen.add(url)
+                urls.append(url)
+    if PC_IDE_URL and PC_IDE_URL not in seen:
+        urls.insert(0, PC_IDE_URL)
+    return urls
+PC_IDE_TOKEN_FILE = Path(
+    os.getenv("PANDAMONIUM_PC_CURSOR_BRIDGE_TOKEN_FILE")
+    or os.getenv("ODYSSEUS_PC_CURSOR_BRIDGE_TOKEN_FILE")
+    or str(BRIDGE_DIR / "pc-ide-token")
+)
 BRIDGE_SCRIPT = Path(__file__).resolve().parents[1] / "services" / "cursor-bridge" / "cursor_bridge_service.py"
 BRIDGE_PROCESS: subprocess.Popen[str] | None = None
 
@@ -205,22 +233,122 @@ def _pc_ide_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
 
+async def _fetch_ide_agents_from_url(
+    client: httpx.AsyncClient,
+    base_url: str,
+    headers: dict[str, str],
+) -> list[dict[str, Any]]:
+    response = await client.get(f"{base_url}/v1/ide/agents", headers=headers)
+    response.raise_for_status()
+    payload = response.json()
+    items = payload.get("items") if isinstance(payload, dict) else []
+    rows: list[dict[str, Any]] = []
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        enriched = dict(row)
+        enriched.setdefault("mirror_url", base_url)
+        rows.append(enriched)
+    return rows
+
+
 async def list_ide_mirror_agents() -> list[dict[str, Any]]:
-    if not PC_IDE_URL:
+    urls = pc_ide_urls()
+    if not urls:
         return []
     headers = _pc_ide_headers()
     if not headers:
         return []
+    merged: dict[str, dict[str, Any]] = {}
     try:
         async with httpx.AsyncClient(timeout=8) as client:
-            response = await client.get(f"{PC_IDE_URL}/v1/ide/agents", headers=headers)
-        response.raise_for_status()
-        payload = response.json()
-        items = payload.get("items") if isinstance(payload, dict) else []
-        return [row for row in items if isinstance(row, dict)]
+            for base_url in urls:
+                try:
+                    rows = await _fetch_ide_agents_from_url(client, base_url, headers)
+                except Exception as exc:
+                    logger.debug("IDE mirror unavailable at %s: %s", base_url, exc)
+                    continue
+                for row in rows:
+                    agent_id = str(row.get("agent_id") or "")
+                    if not agent_id:
+                        continue
+                    prev = merged.get(agent_id)
+                    if prev is None or float(row.get("updated_at") or 0) >= float(prev.get("updated_at") or 0):
+                        merged[agent_id] = row
     except Exception as exc:
-        logger.debug("IDE mirror unavailable: %s", exc)
-        return []
+        logger.debug("IDE mirror list failed: %s", exc)
+    items = list(merged.values())
+    items.sort(key=lambda row: float(row.get("updated_at") or 0), reverse=True)
+    return items
+
+
+async def ide_mirror_health() -> dict[str, Any]:
+    urls = pc_ide_urls()
+    if not urls:
+        return {"configured": False, "connected": False, "hosts": []}
+    headers = _pc_ide_headers()
+    if not headers:
+        return {"configured": True, "connected": False, "error": "pc_ide_token_missing", "hosts": []}
+    hosts: list[dict[str, Any]] = []
+    any_connected = False
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            for base_url in urls:
+                host_status: dict[str, Any] = {"url": base_url, "connected": False}
+                try:
+                    response = await client.get(f"{base_url}/health", headers=headers)
+                    response.raise_for_status()
+                    payload = response.json()
+                    if isinstance(payload, dict):
+                        host_status.update(payload)
+                    host_status["connected"] = bool(host_status.get("ok"))
+                    any_connected = any_connected or host_status["connected"]
+                except Exception as exc:
+                    host_status["error"] = str(exc)[:120]
+                hosts.append(host_status)
+    except Exception as exc:
+        return {
+            "configured": True,
+            "connected": False,
+            "error": str(exc)[:120],
+            "hosts": hosts,
+        }
+    return {
+        "configured": True,
+        "connected": any_connected,
+        "hosts": hosts,
+        "url_count": len(urls),
+    }
+
+
+async def fetch_ide_agent_session(agent_id: str) -> dict[str, Any] | None:
+    urls = pc_ide_urls()
+    if not urls:
+        return None
+    headers = _pc_ide_headers()
+    if not headers:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            for base_url in urls:
+                try:
+                    response = await client.get(
+                        f"{base_url}/v1/ide/agents/{agent_id}/session",
+                        headers=headers,
+                    )
+                except Exception as exc:
+                    logger.debug("IDE session fetch failed for %s at %s: %s", agent_id, base_url, exc)
+                    continue
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                payload = response.json()
+                if isinstance(payload, dict):
+                    payload.setdefault("mirror_url", base_url)
+                    return payload
+    except Exception as exc:
+        logger.debug("IDE session fetch failed for %s: %s", agent_id, exc)
+    return None
 
 
 async def bridge_health() -> dict[str, Any]:
@@ -244,6 +372,8 @@ async def bridge_status() -> dict[str, Any]:
         payload = response.json()
         payload["configured"] = True
         payload["status"] = "connected" if payload.get("connected") else "reconnect_needed"
+        ide = await ide_mirror_health()
+        payload["ide_mirror"] = ide
         return payload
     except Exception as exc:
         return {

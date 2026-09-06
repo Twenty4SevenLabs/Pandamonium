@@ -19,8 +19,16 @@ services:
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-https://prod.tail61d527.ts.net:7080,http://127.0.0.1:7080}
       - SECURE_COOKIES=${SECURE_COOKIES:-true}
       - GITLAB_API_URL=${GITLAB_API_URL:-http://192.168.1.211/api/v4}
+      - PANDAMONIUM_PC_CURSOR_BRIDGE_URL=http://pc-cursor-bridge:8051
+      - PANDAMONIUM_PC_CURSOR_BRIDGE_URLS=http://pc-cursor-bridge:8051,http://192.168.1.2:8051,http://192.168.1.90:8051
     ports: !override
       - "127.0.0.1:7080:7000"
+
+  pc-cursor-bridge:
+    volumes:
+      - /home/labsadmin/.cursor/projects:/cursor-projects:ro
+    ports: !override
+      - "127.0.0.1:8051:8051"
 
   searxng:
     privileged: true

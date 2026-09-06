@@ -39,7 +39,9 @@ Get the key from [Cursor Dashboard → Integrations](https://cursor.com/dashboar
 ```bash
 PANDAMONIUM_CURSOR_BRIDGE_URL=http://127.0.0.1:8050
 PANDAMONIUM_CURSOR_WORKSPACES_JSON={"pandamonium":"/mnt/dev-env/projects/pandamonium"}
-PANDAMONIUM_PC_CURSOR_BRIDGE_URL=http://windows-host:8051   # Phase 2 IDE mirror
+# Phase 2 — Remote-SSH IDE transcript mirror (see services/pc-cursor-bridge/README.md)
+PANDAMONIUM_PC_CURSOR_BRIDGE_URL=http://pc-cursor-bridge:8051
+PANDAMONIUM_PC_CURSOR_BRIDGE_URLS=http://pc-cursor-bridge:8051,http://192.168.1.2:8051,http://192.168.1.90:8051
 ```
 
 Install dependency: `pip install cursor-sdk==1.0.31` (listed in `requirements-optional.txt`).

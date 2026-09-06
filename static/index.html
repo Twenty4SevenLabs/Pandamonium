@@ -890,9 +890,13 @@
         <div id="cursor-agent-detail" class="cursor-agent-detail" hidden>
           <div class="cursor-agent-detail-head">
             <strong id="cursor-agent-detail-title">Cursor agent</strong>
+            <span id="cursor-agent-detail-badge" class="cursor-agent-source-badge">BRIDGE</span>
             <button type="button" id="cursor-bridge-disconnect-btn" class="cursor-bridge-disconnect-btn">Disconnect</button>
           </div>
-          <pre id="cursor-agent-stream" class="cursor-agent-stream"></pre>
+          <div id="cursor-agent-panel" class="cursor-agent-panel" aria-live="polite"></div>
+          <div id="cursor-agent-readonly-note" class="cursor-agent-readonly-note" hidden>
+            Read-only IDE session — continue this agent in Cursor on your PC.
+          </div>
           <div class="cursor-agent-compose">
             <textarea id="cursor-agent-prompt" rows="2" placeholder="Send a follow-up to this Cursor agent…"></textarea>
             <button type="button" id="cursor-agent-send-btn">Send</button>

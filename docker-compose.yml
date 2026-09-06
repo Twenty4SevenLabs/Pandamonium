@@ -85,6 +85,10 @@ services:
       - NEON_API_KEY=${NEON_API_KEY:-}
       - FIGMA_API_KEY=${FIGMA_API_KEY:-}
       - AIKIDO_API_KEY=${AIKIDO_API_KEY:-}
+      - PANDAMONIUM_CURSOR_API_KEY=${PANDAMONIUM_CURSOR_API_KEY:-}
+      - PANDAMONIUM_PC_CURSOR_BRIDGE_URL=${PANDAMONIUM_PC_CURSOR_BRIDGE_URL:-http://pc-cursor-bridge:8051}
+      - PANDAMONIUM_PC_CURSOR_BRIDGE_URLS=${PANDAMONIUM_PC_CURSOR_BRIDGE_URLS:-http://pc-cursor-bridge:8051,http://192.168.1.2:8051,http://192.168.1.90:8051}
+      - PANDAMONIUM_PC_CURSOR_BRIDGE_TOKEN_FILE=${PANDAMONIUM_PC_CURSOR_BRIDGE_TOKEN_FILE:-/app/data/cursor-bridge/pc-ide-token}
       - APP_PUBLIC_URL=${APP_PUBLIC_URL:-}
       - OAUTH_REDIRECT_BASE_URL=${OAUTH_REDIRECT_BASE_URL:-}
       - NODE_EXTRA_CA_CERTS=${NODE_EXTRA_CA_CERTS:-}
@@ -108,6 +112,28 @@ services:
         condition: service_healthy
       chromadb:
         condition: service_started
+      pc-cursor-bridge:
+        condition: service_started
+    restart: unless-stopped
+
+  pc-cursor-bridge:
+    image: docker.io/library/python:3.14-slim
+    working_dir: /app
+    command:
+      - python3
+      - /app/pc_cursor_bridge.py
+    volumes:
+      - ./services/pc-cursor-bridge/pc_cursor_bridge.py:/app/pc_cursor_bridge.py:ro
+      - ./services/pc-cursor-bridge/transcript_io.py:/app/transcript_io.py:ro
+      - ${APP_DATA_DIR:-./data}/cursor-bridge/pc-ide-token:/token:ro
+      - ${PC_CURSOR_PROJECTS_ROOT:-${HOME}/.cursor/projects}:/cursor-projects:ro
+    environment:
+      - JARVIS_CURSOR_BRIDGE_ALLOW_LAN=1
+      - JARVIS_CURSOR_BRIDGE_HOST=0.0.0.0
+      - JARVIS_CURSOR_BRIDGE_HOSTS=0.0.0.0
+      - JARVIS_CURSOR_BRIDGE_PORT=8051
+      - JARVIS_CURSOR_BRIDGE_TOKEN_FILE=/token
+      - JARVIS_CURSOR_PROJECTS_ROOT=/cursor-projects
     restart: unless-stopped
 
   chromadb:

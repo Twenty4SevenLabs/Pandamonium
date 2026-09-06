@@ -2,9 +2,12 @@ const byId = (id) => document.getElementById(id);
 
 const state = {
   selectedAgentId: null,
+  selectedAgent: null,
   pollTimer: null,
   streamAbort: null,
   agents: [],
+  sessionMessages: [],
+  liveAssistantText: '',
 };
 
 function relativeTime(unix) {
@@ -109,10 +112,88 @@ function renderAgentList(items) {
   });
 }
 
-function renderStreamText(text) {
-  const stream = byId('cursor-agent-stream');
-  if (!stream) return;
-  stream.textContent = text || '';
+function messageText(blocks) {
+  return (Array.isArray(blocks) ? blocks : [])
+    .filter((block) => block?.type === 'text' && block.text)
+    .map((block) => String(block.text))
+    .join('\n\n')
+    .trim();
+}
+
+function renderMessageNode(message, index, liveText = '') {
+  const role = message?.role === 'user' ? 'user' : 'assistant';
+  const wrap = document.createElement('article');
+  wrap.className = `cursor-agent-msg cursor-agent-msg-${role}`;
+  wrap.dataset.messageIndex = String(index);
+
+  const label = document.createElement('div');
+  label.className = 'cursor-agent-msg-role';
+  label.textContent = role === 'user' ? 'You' : 'Agent';
+
+  const body = document.createElement('div');
+  body.className = 'cursor-agent-msg-body';
+  let text = messageText(message?.blocks);
+  if (message?.live && liveText) text = liveText;
+  body.textContent = text || (role === 'assistant' && message?.live ? 'Thinking…' : '');
+
+  const tools = document.createElement('div');
+  tools.className = 'cursor-agent-tool-list';
+  (Array.isArray(message?.blocks) ? message.blocks : []).forEach((block) => {
+    if (block?.type !== 'tool') return;
+    const chip = document.createElement('span');
+    chip.className = 'cursor-agent-tool-chip';
+    chip.textContent = String(block.summary || block.name || 'tool');
+    tools.appendChild(chip);
+  });
+
+  wrap.append(label, body);
+  if (tools.childElementCount) wrap.append(tools);
+  return wrap;
+}
+
+function renderAgentPanel(messages, liveText = '') {
+  const panel = byId('cursor-agent-panel');
+  if (!panel) return;
+  panel.replaceChildren();
+  const rows = Array.isArray(messages) ? messages : [];
+  if (!rows.length && !liveText) {
+    const empty = document.createElement('div');
+    empty.className = 'cursor-agent-panel-empty';
+    empty.textContent = 'Select an agent to load its Cursor session.';
+    panel.appendChild(empty);
+    return;
+  }
+  rows.forEach((message, index) => {
+    panel.appendChild(renderMessageNode(message, index, message?.live ? liveText : ''));
+  });
+  panel.scrollTop = panel.scrollHeight;
+}
+
+function setDetailChrome(agent) {
+  const detail = byId('cursor-agent-detail');
+  const title = byId('cursor-agent-detail-title');
+  const badge = byId('cursor-agent-detail-badge');
+  const readonlyNote = byId('cursor-agent-readonly-note');
+  const readOnly = agent?.read_only === true || String(agent?.source || '').toLowerCase() === 'ide';
+  if (title) title.textContent = agent?.title || 'Cursor agent';
+  if (badge) badge.textContent = String(agent?.source || 'bridge').toUpperCase();
+  if (detail) detail.classList.toggle('is-readonly', readOnly);
+  if (readonlyNote) readonlyNote.hidden = !readOnly;
+}
+
+async function loadSession(agentId) {
+  const agent = state.agents.find((row) => row.agent_id === agentId) || state.selectedAgent;
+  const source = String(agent?.source || 'bridge').toLowerCase();
+  const query = source === 'ide' ? '?source=ide' : '';
+  const session = await readJson(await fetch(`/api/cursor/agents/${encodeURIComponent(agentId)}/session${query}`, {
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+  }));
+  state.sessionMessages = Array.isArray(session.messages) ? session.messages : [];
+  state.selectedAgent = { ...(agent || {}), ...session };
+  setDetailChrome(state.selectedAgent);
+  renderAgentPanel(state.sessionMessages, state.liveAssistantText);
+  return session;
 }
 
 async function refreshStatus() {
@@ -137,12 +218,19 @@ async function refreshAgents() {
   const payload = await readJson(response);
   state.agents = Array.isArray(payload.items) ? payload.items : [];
   renderAgentList(state.agents);
+  if (state.selectedAgentId) {
+    const selected = state.agents.find((row) => row.agent_id === state.selectedAgentId);
+    if (selected) state.selectedAgent = selected;
+  }
 }
 
 function startPolling() {
   stopPolling();
   state.pollTimer = window.setInterval(() => {
     refreshAgents().catch(() => {});
+    if (state.selectedAgentId && state.selectedAgent?.status === 'running') {
+      loadSession(state.selectedAgentId).catch(() => {});
+    }
   }, 5000);
 }
 
@@ -186,7 +274,9 @@ async function disconnectBridge() {
     headers: { Accept: 'application/json' },
   }));
   state.selectedAgentId = null;
-  renderStreamText('');
+  state.selectedAgent = null;
+  state.sessionMessages = [];
+  renderAgentPanel([]);
   await refreshAgents();
 }
 
@@ -204,9 +294,9 @@ async function removeAgent(agent) {
   }));
   if (state.selectedAgentId === agentId) {
     state.selectedAgentId = null;
-    renderStreamText('');
-    const detail = byId('cursor-agent-detail');
-    if (detail) detail.hidden = false;
+    state.selectedAgent = null;
+    state.sessionMessages = [];
+    renderAgentPanel([]);
   }
   if (state.streamAbort) {
     state.streamAbort.abort();
@@ -241,19 +331,37 @@ async function sendFollowUp() {
     body: JSON.stringify({ prompt }),
   }));
   if (input) input.value = '';
+  await loadSession(state.selectedAgentId);
   await streamRun(state.selectedAgentId, payload.run_id);
 }
 
-function selectAgent(agentId, runId = null) {
+async function selectAgent(agentId, runId = null) {
   state.selectedAgentId = agentId;
+  state.liveAssistantText = '';
   renderAgentList(state.agents);
   const agent = state.agents.find((row) => row.agent_id === agentId);
-  const title = byId('cursor-agent-detail-title');
+  state.selectedAgent = agent || null;
   const detail = byId('cursor-agent-detail');
   if (detail) detail.hidden = false;
-  if (title) title.textContent = agent?.title || 'Cursor agent';
-  renderStreamText('');
-  if (runId || agent?.run_id) streamRun(agentId, runId || agent.run_id);
+  setDetailChrome(agent);
+  try {
+    await loadSession(agentId);
+  } catch (error) {
+    renderAgentPanel([], '');
+    const panel = byId('cursor-agent-panel');
+    if (panel) {
+      panel.replaceChildren();
+      const empty = document.createElement('div');
+      empty.className = 'cursor-agent-panel-empty';
+      empty.textContent = error instanceof Error ? error.message : 'Could not load session.';
+      panel.appendChild(empty);
+    }
+    return;
+  }
+  const activeRunId = runId || agent?.run_id;
+  if (activeRunId && (agent?.status === 'running' || runId)) {
+    await streamRun(agentId, activeRunId);
+  }
 }
 
 async function streamRun(agentId, runId) {
@@ -261,7 +369,14 @@ async function streamRun(agentId, runId) {
   if (state.streamAbort) state.streamAbort.abort();
   const controller = new AbortController();
   state.streamAbort = controller;
-  let buffer = '';
+  state.liveAssistantText = '';
+  const liveMessage = { role: 'assistant', live: true, blocks: [{ type: 'text', text: '' }] };
+  const renderLive = () => {
+    const messages = [...state.sessionMessages];
+    if (!messages.length || !messages[messages.length - 1]?.live) messages.push(liveMessage);
+    renderAgentPanel(messages, state.liveAssistantText);
+  };
+  renderLive();
   try {
     const response = await fetch(`/api/cursor/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}/stream`, {
       credentials: 'same-origin',
@@ -282,12 +397,12 @@ async function streamRun(agentId, runId) {
           const message = payload.message;
           if (message && Array.isArray(message.content)) {
             message.content.forEach((block) => {
-              if (block?.type === 'text' && block.text) buffer += block.text;
+              if (block?.type === 'text' && block.text) state.liveAssistantText += block.text;
             });
           } else if (payload.text) {
-            buffer += payload.text;
+            state.liveAssistantText += payload.text;
           }
-          renderStreamText(buffer);
+          renderLive();
         } catch (_error) {
           /* ignore malformed chunks */
         }
@@ -295,10 +410,12 @@ async function streamRun(agentId, runId) {
     }
   } catch (error) {
     if (!(error instanceof DOMException && error.name === 'AbortError')) {
-      renderStreamText(`${buffer}\n\n[stream ended: ${error instanceof Error ? error.message : 'error'}]`.trim());
+      state.liveAssistantText = `${state.liveAssistantText}\n\n[stream ended: ${error instanceof Error ? error.message : 'error'}]`.trim();
+      renderLive();
     }
   } finally {
     if (state.streamAbort === controller) state.streamAbort = null;
+    await loadSession(agentId).catch(() => {});
     refreshAgents().catch(() => {});
   }
 }
@@ -331,6 +448,7 @@ function init() {
     window.alert(error instanceof Error ? error.message : 'Send failed.');
   }));
   refreshAgents().catch(() => {});
+  startPolling();
 }
 
 if (document.readyState === 'loading') {

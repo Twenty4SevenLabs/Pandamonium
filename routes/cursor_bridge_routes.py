@@ -21,6 +21,7 @@ from src.cursor_bridge_manager import (
     dismissed_agent_ids,
     ensure_bridge_online,
     ensure_bridge_process,
+    fetch_ide_agent_session,
     is_configured,
     is_plausible_cursor_api_key,
     list_ide_mirror_agents,
@@ -162,6 +163,31 @@ def setup_cursor_bridge_routes() -> APIRouter:
                         yield chunk
 
         return StreamingResponse(relay(), media_type="text/event-stream")
+
+    @router.get("/agents/{agent_id}/session")
+    async def agent_session(agent_id: str, request: Request) -> dict[str, Any]:
+        if not is_configured():
+            raise HTTPException(status_code=503, detail="cursor_bridge_not_configured")
+        source = str(request.query_params.get("source") or "").strip().lower()
+        if source == "ide" or not source:
+            ide_session = await fetch_ide_agent_session(agent_id)
+            if ide_session:
+                ide_session["source"] = "ide"
+                ide_session["read_only"] = True
+                return ide_session
+            if source == "ide":
+                raise HTTPException(status_code=404, detail="agent_not_found")
+        await ensure_bridge_online()
+        response = await bridge_request("GET", f"/agents/{agent_id}/session")
+        if response.status_code == 404:
+            ide_session = await fetch_ide_agent_session(agent_id)
+            if ide_session:
+                return ide_session
+            raise HTTPException(status_code=404, detail="agent_not_found")
+        if response.status_code >= 400:
+            detail = response.json().get("detail") if response.headers.get("content-type", "").startswith("application/json") else response.text
+            raise HTTPException(status_code=response.status_code, detail=detail)
+        return response.json()
 
     @router.delete("/agents/{agent_id}")
     async def remove_agent(agent_id: str, request: Request) -> dict[str, Any]:
