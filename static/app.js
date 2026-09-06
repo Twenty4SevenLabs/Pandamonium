@@ -17,7 +17,10 @@ import searchChatModule from './js/search-chat.js';
 import { makeWindowDraggable } from './js/windowDrag.js';
 import markdownModule from './js/markdown.js';
 import chatRenderer from './js/chatRenderer.js';
-import sessionModule from './js/sessions.js?v=20260719T024058Z';
+// Keep this specifier identical to every other sessions.js import. Adding a
+// cache-busting query here creates a second module instance with separate
+// current-session/pending-chat state.
+import sessionModule from './js/sessions.js';
 import memoryModule from './js/memory.js';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
@@ -47,6 +50,8 @@ import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
 import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
+import marketplaceModule from './js/marketplace.js';
+import updaterModule from './js/updater.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -241,39 +246,6 @@ async function _refreshDefaultChat() {
 // synchronously; later reads should call _refreshDefaultChat() first.
 _refreshDefaultChat();
 
-async function _createDirectChatFromPreferredModel() {
-  if (!sessionModule) return false;
-
-  const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
-  if (pending && pending.url && pending.modelId && pending.endpointId) {
-    sessionModule.createDirectChat(pending.url, pending.modelId, pending.endpointId);
-    return true;
-  }
-
-  const sessions = sessionModule.getSessions();
-  const currentId = sessionModule.getCurrentSessionId();
-  const current = sessions.find(s => s.id === currentId);
-  if (current && current.endpoint_url && current.model && current.endpoint_id) {
-    sessionModule.createDirectChat(current.endpoint_url, current.model, current.endpoint_id);
-    return true;
-  }
-
-  const dc = await _refreshDefaultChat();
-  if (dc) {
-    sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
-    return true;
-  }
-
-  const withModel = sessions.filter(s => s.endpoint_url && s.model);
-  if (withModel.length > 0) {
-    const last = withModel[0]; // sessions are sorted by recent
-    sessionModule.createDirectChat(last.endpoint_url, last.model, last.endpoint_id);
-    return true;
-  }
-
-  return false;
-}
-
 async function _hasUsableChatModel() {
   try {
     const pending = sessionModule?.getPendingChat?.();
@@ -321,13 +293,13 @@ async function _syncWelcomeModelHint() {
 const FIRST_RUN_DISMISS_KEY = 'pandamonium-first-run-dismissed';
 
 async function _renderFirstRunGuide(identityStatus, options = {}) {
-  const guide = document.getElementById('welcome-setup');
+  const guide = document.getElementById(options.targetId || 'welcome-setup');
   if (!guide || !window._isAdmin) return;
   const identityConfigured = identityStatus?.source === 'configured';
   const hasModel = await _hasUsableChatModel();
   let dismissed = false;
   try { dismissed = sessionStorage.getItem(FIRST_RUN_DISMISS_KEY) === '1'; } catch (_) {}
-  if ((identityConfigured && hasModel) || (dismissed && !options.force)) {
+  if (!options.force && ((identityConfigured && hasModel) || dismissed)) {
     guide.style.display = 'none';
     guide.className = '';
     guide.replaceChildren();
@@ -349,10 +321,11 @@ async function _renderFirstRunGuide(identityStatus, options = {}) {
   const dismiss = document.createElement('button');
   dismiss.type = 'button';
   dismiss.className = 'first-run-dismiss';
-  dismiss.textContent = 'Explore first';
+  dismiss.textContent = options.dismissLabel || (options.force ? 'Skip for now' : 'Explore first');
   dismiss.addEventListener('click', () => {
     try { sessionStorage.setItem(FIRST_RUN_DISMISS_KEY, '1'); } catch (_) {}
     guide.style.display = 'none';
+    options.onDismiss?.();
   });
   copy.append(copyText, dismiss);
 
@@ -394,6 +367,7 @@ async function _renderFirstRunGuide(identityStatus, options = {}) {
     state.textContent = definition.state;
     button.append(indexEl, label, state);
     button.addEventListener('click', () => {
+      options.onNavigate?.();
       settingsModule.open(definition.tab);
       if (definition.target) {
         setTimeout(() => document.getElementById(definition.target)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80);
@@ -401,14 +375,42 @@ async function _renderFirstRunGuide(identityStatus, options = {}) {
     });
     steps.append(button);
   });
-  guide.append(copy, steps);
+
+  const actions = document.createElement('div');
+  actions.className = 'first-run-actions';
+  const launchCommand = options.onCommand || ((command) => {
+    const messageInput = document.getElementById('message');
+    const chatForm = document.getElementById('chat-form');
+    if (!messageInput || !chatForm) return;
+    messageInput.value = command;
+    messageInput.dispatchEvent(new Event('input', { bubbles: true }));
+    chatForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+  });
+  const continueSetup = document.createElement('button');
+  continueSetup.type = 'button';
+  continueSetup.className = 'first-run-action';
+  continueSetup.textContent = 'Continue setup';
+  continueSetup.addEventListener('click', () => launchCommand('/setup'));
+  const restartTour = document.createElement('button');
+  restartTour.type = 'button';
+  restartTour.className = 'first-run-action first-run-action-primary';
+  restartTour.textContent = 'Restart product tour';
+  restartTour.addEventListener('click', () => launchCommand('/tour'));
+  actions.append(continueSetup, restartTour);
+
+  guide.append(copy, steps, actions);
 }
 
 async function initPluginSidebar() {
   const list = el('plugins-list');
   if (!list) return;
+  const clearInstalled = () => {
+    Array.from(list.children).forEach(child => {
+      if (child.id !== 'add-plugins-btn') child.remove();
+    });
+  };
   const showMessage = (message) => {
-    list.replaceChildren();
+    clearInstalled();
     const row = document.createElement('div');
     row.className = 'list-item';
     row.setAttribute('aria-disabled', 'true');
@@ -429,7 +431,7 @@ async function initPluginSidebar() {
     }
     plugins.sort((a, b) => String(a.name).localeCompare(String(b.name)));
     if (!plugins.length) return showMessage('No plugins installed');
-    list.replaceChildren();
+    clearInstalled();
     for (const plugin of plugins) {
       const canOpen = plugin.state === 'enabled' && (plugin.legacy || surfaces.has(plugin.id));
       const row = document.createElement('div');
@@ -464,7 +466,9 @@ async function initPluginSidebar() {
 // EVENT LISTENERS INITIALIZATION
 // ============================================
 function initializeEventListeners() {
+  marketplaceModule.init();
   initPluginSidebar();
+  window.addEventListener('pandamonium:extensions-changed', initPluginSidebar);
   // Chat form submission
 //  document.getElementById('chat-form').addEventListener('submit', chatModule.handleChatSubmit);
 
@@ -889,6 +893,7 @@ function initializeEventListeners() {
       // Close one modal at a time (last in DOM = topmost)
       // Map modal id → sidebar list-item id to clear active state
       const modalItemMap = {
+        'guide-modal': null,
         'cookbook-modal': null,
         'rename-session-modal': null,
         'rename-ai-modal': null,
@@ -948,6 +953,8 @@ function initializeEventListeners() {
   const _dynamicModalIds = ['library-modal', 'archive-modal', 'doclib-modal', 'gallery-modal', 'tasks-modal'];
   function dismissModal(modal) {
     if (!modal || modal.classList.contains('hidden')) return;
+    const dismissRun = Symbol('modal-dismiss');
+    modal._dismissRun = dismissRun;
     if (modal.id === 'gallery-modal') {
       const editor = document.getElementById('gallery-editor-container');
       const editing = !!window.__galleryEditLive || !!(
@@ -964,6 +971,7 @@ function initializeEventListeners() {
       content.style.transition = '';
       content.classList.add('modal-closing');
       content.addEventListener('animationend', () => {
+        if (modal._dismissRun !== dismissRun) return;
         if (_dynamicModalIds.includes(modal.id)) {
           modal.remove();
         } else {
@@ -973,6 +981,7 @@ function initializeEventListeners() {
       }, { once: true });
       // Fallback in case animationend doesn't fire
       setTimeout(() => {
+        if (modal._dismissRun !== dismissRun) return;
         if (modal.parentElement && !modal.classList.contains('hidden')) {
           if (_dynamicModalIds.includes(modal.id)) modal.remove();
           else { modal.classList.add('hidden'); content.classList.remove('modal-closing'); }
@@ -1453,12 +1462,50 @@ function initializeEventListeners() {
 
   // Sidebar user bar — settings, admin, profile
   const userBarSettings = el('user-bar-settings');
+  const userBarGuide = el('user-bar-guide');
   const userBarProfile = el('user-bar-profile');
   const userBarAdmin = el('user-bar-admin');
+
+  const guideModal = el('guide-modal');
+  let guideFocusTimer = null;
+  const closeGuideModal = (restoreFocus = true) => {
+    if (guideFocusTimer) clearTimeout(guideFocusTimer);
+    dismissModal(guideModal);
+    if (restoreFocus) guideFocusTimer = setTimeout(() => userBarGuide?.focus(), 260);
+  };
+  const runGuideCommand = (command) => {
+    closeGuideModal(false);
+    setTimeout(() => {
+      if (command === '/tour') window.cancelActiveTour?.();
+      const messageInput = el('message');
+      const chatForm = el('chat-form');
+      if (!messageInput || !chatForm) return;
+      messageInput.value = command;
+      messageInput.dispatchEvent(new Event('input', { bubbles: true }));
+      chatForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    }, 260);
+  };
 
   if (userBarSettings) {
     userBarSettings.addEventListener('click', () => settingsModule.open());
   }
+  if (userBarGuide) {
+    userBarGuide.addEventListener('click', async () => {
+      if (guideFocusTimer) clearTimeout(guideFocusTimer);
+      if (guideModal) guideModal._dismissRun = null;
+      guideModal?.classList.remove('hidden');
+      await _renderFirstRunGuide(window._agentIdentityStatus || {}, {
+        targetId: 'guide-panel',
+        force: true,
+        dismissLabel: 'Skip for now',
+        onDismiss: () => closeGuideModal(),
+        onNavigate: () => closeGuideModal(false),
+        onCommand: runGuideCommand,
+      });
+      guideModal?.querySelector('.first-run-step, .first-run-action, .first-run-dismiss')?.focus();
+    });
+  }
+  el('close-guide-modal')?.addEventListener('click', () => closeGuideModal());
   if (userBarProfile) {
     // Clicking the user (avatar + name) jumps straight to the Account tab
     // instead of landing on whatever was last selected.
@@ -1475,6 +1522,7 @@ function initializeEventListeners() {
       window._isAdmin = !!d.is_admin;
       window._agentIdentityStatus = d.agent_identity || null;
       if (d.is_admin) _renderFirstRunGuide(window._agentIdentityStatus);
+      if (d.is_admin && userBarGuide) userBarGuide.hidden = false;
       if (d.is_admin && userBarAdmin) userBarAdmin.style.display = '';
       const userBarName = el('user-bar-name');
       const userBarAvatar = el('user-bar-avatar');
@@ -1544,21 +1592,15 @@ function initializeEventListeners() {
     document.addEventListener('click', () => { sortDropdown.style.display = 'none'; });
     sortDropdown.addEventListener('click', (e) => e.stopPropagation());
 
-    // Sort mode options (newest, oldest, last active) — toggleable
+    // Sort mode options. Re-selecting the active chronology must remain a
+    // chronology; silently falling back to manual order hid date headings and
+    // left newly active chats at their old positions.
     sortDropdown.querySelectorAll('.sort-option').forEach(opt => {
       opt.addEventListener('click', () => {
         const mode = opt.dataset.sort;
-        const current = sessionModule.getSortMode();
-        // Toggle: clicking the active sort reverts to manual
-        if (current === mode) {
-          sessionModule.setSortMode(null);
-          sortDropdown.style.display = 'none';
-          uiModule.showToast('Manual order');
-        } else {
-          sessionModule.setSortMode(mode);
-          sortDropdown.style.display = 'none';
-          uiModule.showToast(`Sorted: ${opt.textContent.trim().toLowerCase()}`);
-        }
+        sessionModule.setSortMode(mode);
+        sortDropdown.style.display = 'none';
+        uiModule.showToast(`Sorted: ${opt.textContent.trim().toLowerCase()}`);
         _syncSortChecks();
       });
     });
@@ -3308,18 +3350,22 @@ function initializeEventListeners() {
     }, { passive: true });
   })();
 
-  async function _handleNewChatAction({ preferModel = true, focus = true } = {}) {
+  function _handleNewChatAction({ focus = true } = {}) {
       if (!sessionModule) return;
-      if (_closeCompareIfActive()) return;
+      // Compare teardown may wait on session cleanup. Start it, but do not let
+      // that delay the canonical blank-chat transition the user requested.
+      _closeCompareIfActive();
       _deactivateIncognito();
       // Clear character on new chat
       if (presetsModule && presetsModule.deactivateCharacter) presetsModule.deactivateCharacter();
       // Clear research mode if active
       const _resChk = el('research-toggle');
       if (_resChk && _resChk.checked) _syncResearchIndicator(false);
-      if (preferModel && await _createDirectChatFromPreferredModel()) return;
-      // No models at all — show welcome screen
-      _startFreshChat();
+      // Navigation is immediate. Model/default discovery is intentionally
+      // handled by updateModelPicker after the blank chat is visible, so a
+      // slow or stalled discovery request can never make this button inert.
+      if (sessionModule.createBlankChat) sessionModule.createBlankChat();
+      else _startFreshChat();
       const docBtn3 = el('overflow-doc-btn');
       if (docBtn3) docBtn3.classList.remove('active', 'has-docs');
       document.querySelectorAll('.session-item.active').forEach(s => s.classList.remove('active'));
@@ -3332,9 +3378,9 @@ function initializeEventListeners() {
   // New session button on icon rail
   const railNewSession = el('rail-new-session');
   if (railNewSession) {
-    railNewSession.addEventListener('click', async (e) => {
+    railNewSession.addEventListener('click', (e) => {
       if (e) { e.preventDefault(); e.stopPropagation(); }
-      await _handleNewChatAction();
+      _handleNewChatAction();
     });
   }
 
@@ -3345,33 +3391,26 @@ function initializeEventListeners() {
   const mobileNewChat = el('mobile-new-chat-btn');
   if (mobileNewChat) {
     mobileNewChat.addEventListener('click', () => {
-      if (!sessionModule) return;
-      if (_closeCompareIfActive()) return;
-      _deactivateIncognito();
-      _startFreshChat();
-      document.querySelectorAll('.session-item.active').forEach(s => s.classList.remove('active'));
-      // Focus the composer synchronously so mobile keyboards pop open.
-      // iOS Safari only honours programmatic focus inside the original click
-      // callback — a setTimeout breaks the user-gesture chain.
-      const _input = el('message-input');
-      if (_input) { try { _input.focus(); } catch (_) {} }
+      // Keep mobile on the same pending-chat lifecycle as every other New Chat
+      // entry point. The synchronous focus preserves the iOS gesture chain.
+      _handleNewChatAction();
     });
   }
 
   // Logo click → new chat (same logic as rail new-session button)
   const brandBtn = el('sidebar-brand-btn');
   if (brandBtn) {
-    brandBtn.addEventListener('click', async (e) => {
+    brandBtn.addEventListener('click', (e) => {
       if (e) { e.preventDefault(); e.stopPropagation(); }
-      await _handleNewChatAction();
+      _handleNewChatAction();
     });
   }
 
   const sidebarNewChatBtn = el('sidebar-new-chat-btn');
   if (sidebarNewChatBtn) {
-    sidebarNewChatBtn.addEventListener('click', async (e) => {
+    sidebarNewChatBtn.addEventListener('click', (e) => {
       if (e) { e.preventDefault(); e.stopImmediatePropagation(); }
-      await _handleNewChatAction();
+      _handleNewChatAction();
     });
   }
 
@@ -3648,8 +3687,7 @@ function initializeEventListeners() {
   // Keyboard shortcuts (extracted to js/keyboard-shortcuts.js)
   initKeyboardShortcuts({
     el, Storage, sessionModule, uiModule, chatModule,
-    adminModule, settingsModule, searchChatModule,
-    _closeCompareIfActive, _deactivateIncognito, API_BASE
+    adminModule, settingsModule, searchChatModule, API_BASE
   });
   
 }
@@ -3877,7 +3915,6 @@ function startPandamoniumApp() {
   // ── Dual-purpose send/mic button ──
   const sendBtn = document.querySelector('.send-btn');
   const messageInput = el('message');
-  const modelPickerWrap = document.getElementById('model-picker-wrap');
 
   const _sendIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
   const _micIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
@@ -4038,18 +4075,8 @@ function startPandamoniumApp() {
 
       // New chat mode — empty input, no attachments, no STT
       if (!hasText && !hasFiles && sendBtn.dataset.mode === 'newchat') {
-        if (sessionModule) {
-          const sessions = sessionModule.getSessions();
-          const currentId = sessionModule.getCurrentSessionId();
-          const current = sessions.find(s => s.id === currentId);
-          if (current && current.endpoint_url && current.model) {
-            sessionModule.createDirectChat(current.endpoint_url, current.model, current.endpoint_id);
-          } else {
-            // Fallback to rail button
-            const railNew = el('rail-new-session');
-            if (railNew) railNew.click();
-          }
-        }
+        const railNew = el('rail-new-session');
+        if (railNew) railNew.click();
         return;
       }
 
@@ -4105,20 +4132,10 @@ function startPandamoniumApp() {
     });
   }
 
-  // Toggle mic/send icon on input change + hide model picker after enough text
+  // Toggle mic/send icon on input change.
   if (messageInput) {
     const _debouncedUpdateIcon = uiModule.debounce(_updateSendBtnIcon, 50);
-    const _MODEL_PICKER_HIDE_CHARS = 10;
-    const _syncModelPickerAutohide = () => {
-      const hidePicker = (messageInput.value || '').replace(/\s/g, '').length >= _MODEL_PICKER_HIDE_CHARS;
-      if (modelPickerWrap) {
-        modelPickerWrap.classList.toggle('model-picker-autohide', hidePicker);
-      }
-    };
-    window._syncModelPickerAutohide = _syncModelPickerAutohide;
-    _syncModelPickerAutohide();
     messageInput.addEventListener('input', () => {
-      _syncModelPickerAutohide();
       if (sendBtn && sendBtn.dataset.mode === 'streaming') {
         _updateSendBtnIcon();
       } else {
@@ -4354,6 +4371,7 @@ function startPandamoniumApp() {
   // Ensure proper initial state
   voiceRecorderModule.init();
   if (censorModule) censorModule.init();
+  updaterModule.init();
 
   // Auto-focus message input on load
   const msgEl = document.getElementById('message');

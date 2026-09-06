@@ -55,6 +55,79 @@ class FakeSessionManager:
     def add_message(self, session_id, message):
         self.messages.setdefault(session_id, []).append(message)
 
+    def get_session(self, session_id):
+        return SimpleNamespace(history=self.messages.setdefault(session_id, []))
+
+
+def test_voice_final_does_not_duplicate_a_worker_result_for_the_same_task():
+    manager = FakeSessionManager()
+    manager.messages["chat-1"] = [
+        SimpleNamespace(
+            role="assistant",
+            content="The complete library list.",
+            metadata={"task_id": "task-1", "source": "agent_worker"},
+        ),
+    ]
+
+    voice_routes._append_chat_message(
+        manager,
+        {"chat_session_id": "chat-1"},
+        "assistant",
+        "The complete library list.",
+        task_id="task-1",
+        source="jarvis_voice",
+    )
+
+    assert len(manager.messages["chat-1"]) == 1
+
+
+def test_foreground_summary_does_not_duplicate_full_worker_result():
+    manager = FakeSessionManager()
+    manager.messages["chat-1"] = [
+        SimpleNamespace(
+            role="assistant",
+            content="The complete structured worker result with all details.",
+            metadata={"task_id": "task-1", "source": "agent_worker"},
+        ),
+    ]
+
+    voice_routes._append_chat_message(
+        manager,
+        {"chat_session_id": "chat-1"},
+        "assistant",
+        "PC Codex finished. The complete result is in chat.",
+        task_id="task-1",
+        source="jarvis_voice",
+        diagnostics={
+            "guard_reason": "selected_completed_pc-codex",
+            "task_delivery_pending": False,
+        },
+    )
+
+    assert len(manager.messages["chat-1"]) == 1
+
+
+def test_later_voice_turn_keeps_same_reply_for_same_active_task():
+    manager = FakeSessionManager()
+    manager.messages["chat-1"] = [
+        SimpleNamespace(
+            role="assistant",
+            content="The task is still running.",
+            metadata={"task_id": "task-1", "source": "jarvis_voice"},
+        ),
+    ]
+
+    voice_routes._append_chat_message(
+        manager,
+        {"chat_session_id": "chat-1"},
+        "assistant",
+        "The task is still running.",
+        task_id="task-1",
+        source="jarvis_voice",
+    )
+
+    assert len(manager.messages["chat-1"]) == 2
+
 
 def test_voice_session_creates_chat_session_and_persists_text_turns(monkeypatch, tmp_path):
     async def fake_jarvis_reply(session, text, owner, voice_session=None):
@@ -495,11 +568,88 @@ def test_jarvis_events_does_not_send_flux_to_the_brain(monkeypatch):
     assert events[-1]["diagnostics"]["model"] == "Qwen3.8-27B"
 
 
+def test_spoken_text_policy_hands_off_file_contents_without_narrating_them():
+    response = "The requested file contains a long block of plain text that remains visible in chat. " * 20
+
+    spoken = asyncio.run(voice_routes._select_spoken_text("Show me the configuration file", response))
+
+    assert spoken == "I found the file. It's available in the chat."
+
+
+def test_spoken_text_policy_honors_explicit_read_all_for_files():
+    response = "First line. Second line. Third line."
+
+    spoken = asyncio.run(voice_routes._select_spoken_text("Read the whole file aloud", response))
+
+    assert spoken == response
+
+
+def test_completed_worker_result_uses_concise_spoken_handoff():
+    final = {
+        "assistant_text": "The worker completed the audit. " * 40,
+        "diagnostics": {"guard_reason": "selected_completed_pc-codex"},
+        "task_ids": ["task-1"],
+    }
+
+    spoken = asyncio.run(voice_routes._spoken_text_for_final("Ask PC Codex to audit the repo", final))
+
+    assert spoken == "The agent finished. The complete result is in chat."
+    assert len(spoken.split()) <= 40
+
+
+def test_short_plain_worker_result_is_verbatim():
+    response = "The audit passed. CT103 is healthy and no restart occurred."
+    final = {
+        "assistant_text": response,
+        "diagnostics": {"guard_reason": "selected_completed_pc-codex"},
+        "task_ids": ["task-1"],
+    }
+
+    contract = voice_routes._speech_contract_for_final("Ask PC Codex to audit the repo", final)
+
+    assert contract == {"spoken_text": response, "speech_mode": "verbatim"}
+
+
+def test_failed_worker_result_reports_issue_without_reading_details():
+    final = {
+        "assistant_text": "PC Codex could not complete the request because the worker disconnected.",
+        "diagnostics": {"guard_reason": "selected_failed_pc-codex"},
+        "task_ids": ["task-1"],
+    }
+
+    spoken = asyncio.run(voice_routes._spoken_text_for_final("Ask PC Codex to audit the repo", final))
+
+    assert spoken.startswith("PC Codex could not complete the request")
+    assert "try again" in spoken
+    assert len(spoken.split()) <= 40
+
+
+def test_approval_question_is_verbatim_and_actionable():
+    response = "Approve deleting only archive 42, or deny it."
+    final = {
+        "assistant_text": response,
+        "diagnostics": {"guard_reason": "authority_approval_required"},
+        "task_ids": [],
+    }
+
+    contract = voice_routes._speech_contract_for_final("Delete archive 42", final)
+
+    assert contract == {"spoken_text": response, "speech_mode": "verbatim"}
+
+
+def test_streaming_speech_waits_for_file_and_worker_handoff_policy():
+    assert voice_routes._should_stream_spoken_response("Tell me a joke", {"target": "jarvis"}) is True
+    assert voice_routes._should_stream_spoken_response("Read the whole file aloud", {"target": "jarvis"}) is True
+    assert voice_routes._should_stream_spoken_response("Show me the config file", {"target": "jarvis"}) is False
+    assert voice_routes._should_stream_spoken_response("Ask PC Codex to audit the repo", {"target": "jarvis"}) is False
+    assert voice_routes._should_stream_spoken_response("Audit the repo", {"target": "pc-codex"}) is False
+
+
 @pytest.mark.parametrize(
     ("target", "endpoint", "model", "character"),
     [
         ("jarvis", "http://freetoken.test/v1/chat/completions", "jarvis", "Assistant"),
-        ("friday", "https://chatgpt.com/backend-api/codex/responses", "gpt-5-codex", "Friday"),
+        ("friday", "https://chatgpt.com/backend-api/codex/responses", "gpt-5-codex", "ChatGPT Subscription"),
     ],
 )
 def test_voice_uses_selected_chat_brain(monkeypatch, target, endpoint, model, character):
@@ -583,7 +733,7 @@ def test_transferred_voice_uses_the_target_agent_endpoint(monkeypatch):
         "model": "gpt-5-codex",
         "headers": {"Authorization": "Bearer friday"},
     }
-    assert events[-1]["diagnostics"]["character_name"] == "Friday"
+    assert events[-1]["diagnostics"]["character_name"] == "ChatGPT Subscription"
 
 
 async def _collect_voice_events(chat_session_id, target, origin_target=None):

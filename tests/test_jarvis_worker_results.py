@@ -20,123 +20,50 @@ def _task(**updates):
     return task
 
 
-def test_jarvis_runtime_uses_linked_chat_brain(monkeypatch):
-    class Session:
-        endpoint_url = "http://freetoken.test/v1/chat/completions"
-        model = "jarvis"
-        headers = {"Authorization": "Bearer private"}
-        owner = "leo"
+@pytest.mark.asyncio
+async def test_short_plain_worker_result_is_verbatim_without_an_llm_call(monkeypatch):
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("speech selection must not make a second LLM call")
 
-    class Manager:
-        def get_session(self, session_id):
-            assert session_id == "session-1"
-            return Session()
+    monkeypatch.setattr("src.llm_core.llm_call_async", forbidden)
+    text = "Good evening, Leo. The focused verification passed and no blocker remains."
 
-    monkeypatch.setattr(jarvis_agent, "_SESSION_MANAGER", Manager())
+    assert await jarvis_agent._spoken_result(_task(), text) == text
 
-    assert jarvis_agent._jarvis_runtime(_task()) == (
-        "http://freetoken.test/v1/chat/completions",
-        "jarvis",
-        {"Authorization": "Bearer private"},
+
+@pytest.mark.asyncio
+async def test_long_worker_result_uses_deterministic_handoff():
+    spoken = await jarvis_agent._spoken_result(_task(), "verified result " * 100)
+
+    assert spoken == "PC Codex finished. The complete result is in chat."
+    assert len(spoken.split()) <= 40
+
+
+@pytest.mark.asyncio
+async def test_structured_worker_result_uses_deterministic_handoff():
+    spoken = await jarvis_agent._spoken_result(
+        _task(), "| Item | Status |\n| --- | --- |\n| Check | complete |",
     )
 
-
-@pytest.mark.asyncio
-async def test_jarvis_summary_uses_compatible_configured_brain_call(monkeypatch):
-    captured = {}
-
-    async def llm_call(endpoint_url, model, messages, **kwargs):
-        captured.update(
-            endpoint_url=endpoint_url,
-            model=model,
-            messages=messages,
-            kwargs=kwargs,
-        )
-        return "ready"
-
-    monkeypatch.setattr(
-        jarvis_agent,
-        "_jarvis_runtime",
-        lambda _task: ("http://freetoken.test/v1/chat/completions", "jarvis", {}),
-    )
-    monkeypatch.setattr("src.llm_core.llm_call_async", llm_call)
-
-    assert await jarvis_agent._jarvis_summary(_task(), "Summarize this.", 384) == "ready"
-    assert captured["endpoint_url"] == "http://freetoken.test/v1/chat/completions"
-    assert captured["model"] == "jarvis"
-    assert captured["kwargs"]["max_tokens"] == 384
-    assert "workload" not in captured["kwargs"]
+    assert spoken == "PC Codex finished. The complete table is in chat."
 
 
 @pytest.mark.asyncio
-async def test_spoken_result_caps_source_and_output(monkeypatch):
-    captured = {}
+async def test_explicit_read_all_worker_result_is_verbatim():
+    text = "```text\nfirst line\nsecond line\n```"
+    spoken = await jarvis_agent._spoken_result(_task(prompt="Read the whole result aloud"), text)
 
-    async def summary(_task, prompt, max_tokens):
-        captured.update(prompt=prompt, max_tokens=max_tokens)
-        return "Outcome complete. No blocker remains. Next, review the result. " * 20
-
-    monkeypatch.setattr(jarvis_agent, "_jarvis_summary", summary)
-    spoken = await jarvis_agent._spoken_result(_task(), "x" * 20_000)
-
-    assert len(spoken) <= 600
-    assert spoken.endswith(".")
-    assert len(captured["prompt"].split("Worker result:\n", 1)[1]) == 16_000
-    assert captured["max_tokens"] == 600
+    assert spoken == "first line second line"
 
 
 @pytest.mark.asyncio
-async def test_short_plain_result_skips_summary_model(monkeypatch):
-    async def must_not_summarize(*_args, **_kwargs):
-        raise AssertionError("a short conversational result must stay on the fast path")
+async def test_spoken_milestone_is_deterministic_and_bounded():
+    short = await jarvis_agent._spoken_milestone(_task(), "The focused verification now passes cleanly.")
+    long = await jarvis_agent._spoken_milestone(_task(), "raw milestone detail " * 60)
 
-    monkeypatch.setattr(jarvis_agent, "_jarvis_summary", must_not_summarize)
-    assert await jarvis_agent._spoken_result(
-        _task(), "Good evening, Leo. I’m good—settled in and ready. How are you?",
-    ) == "Good evening, Leo. I’m good—settled in and ready. How are you?"
-
-
-@pytest.mark.asyncio
-async def test_spoken_result_falls_back_when_configured_brain_fails(monkeypatch):
-    async def summary(_task, _prompt, _max_tokens):
-        raise RuntimeError("offline")
-
-    monkeypatch.setattr(jarvis_agent, "_jarvis_summary", summary)
-    assert await jarvis_agent._spoken_result(_task(), "| Item | Status |\n| --- | --- |\n| Check | complete |") == (
-        "Friday finished. The full result is in the chat."
-    )
-
-
-@pytest.mark.asyncio
-async def test_spoken_milestone_is_one_bounded_sentence(monkeypatch):
-    captured = {}
-
-    async def summary(_task, prompt, max_tokens):
-        captured.update(prompt=prompt, max_tokens=max_tokens)
-        return (
-            "The focused verification now passes cleanly. A second sentence must not be spoken. "
-            + ("Extra detail " * 40)
-        )
-
-    monkeypatch.setattr(jarvis_agent, "_jarvis_summary", summary)
-    spoken = await jarvis_agent._spoken_milestone(_task(), "Tests completed.")
-
-    assert spoken == "Friday: The focused verification now passes cleanly."
-    assert len(spoken) <= 240
-    assert captured["max_tokens"] == 384
-
-
-@pytest.mark.asyncio
-async def test_spoken_milestone_failure_uses_non_raw_fallback(monkeypatch):
-    async def summary(_task, _prompt, _max_tokens):
-        raise RuntimeError("offline")
-
-    monkeypatch.setattr(jarvis_agent, "_jarvis_summary", summary)
-    spoken = await jarvis_agent._spoken_milestone(_task(), "SECRET RAW TABLE CONTENT")
-
-    assert spoken == "Friday completed a milestone; details are in the activity history."
-    assert "SECRET RAW TABLE CONTENT" not in spoken
-    assert len(spoken) <= 240
+    assert short == "The focused verification now passes cleanly."
+    assert long == "PC Codex completed a milestone; details are in the activity history."
+    assert len(long.split()) <= 40
 
 
 @pytest.mark.asyncio
@@ -242,15 +169,11 @@ async def test_live_result_keeps_raw_chat_text_and_adds_spoken_summary(tmp_path,
             self.messages.append((session_id, message))
             message.metadata["_db_id"] = f"db-{len(self.messages)}"
 
-    async def summary(_task, _text):
-        return "PC Codex finished the Mark 6 check. The full table is in the chat."
-
     manager = SessionManager()
     monkeypatch.setattr(jarvis_agent, "TASKS_FILE", tmp_path / "agent_tasks.json")
     monkeypatch.setattr(jarvis_agent, "_SESSION_MANAGER", manager)
     monkeypatch.setattr(jarvis_agent, "_MIRRORS", {})
     monkeypatch.setattr(jarvis_agent, "adapters", lambda: {"pc-codex": Adapter()})
-    monkeypatch.setattr(jarvis_agent, "_spoken_result", summary)
     jarvis_agent._save_task(_task())
 
     await jarvis_agent._mirror("task-1")
@@ -261,9 +184,8 @@ async def test_live_result_keeps_raw_chat_text_and_adds_spoken_summary(tmp_path,
     assert saved["events"][0]["spoken_text"].startswith("PC Codex finished")
     assert saved["events"][0]["metadata"]["result_summary"] is True
     assert manager.messages[0][1].content == raw
-    assert manager.messages[0][1].metadata["character_name"] == "Friday"
-    assert manager.messages[1][1].content == "PC Codex finished the Mark 6 check. The full table is in the chat."
-    assert manager.messages[1][1].metadata["character_name"] == "Jarvis"
+    assert manager.messages[0][1].metadata["character_name"] == jarvis_agent.configured_agent_name()
+    assert len(manager.messages) == 1
 
 
 def test_broker_progress_summaries_persist_once_with_jarvis_attribution(tmp_path, monkeypatch):
@@ -326,7 +248,6 @@ def test_broker_progress_summaries_persist_once_with_jarvis_attribution(tmp_path
         "PC Codex has verified the three highest-priority client items.",
         "PC Codex finished reviewing the current Business ledger.",
         "| Client | Status |\n| --- | --- |\n| Acme | Ready |",
-        "PC Codex finished. The full report is in chat.",
     ]
     summary_metadata = manager.session.history[1].metadata
     assert {key: value for key, value in summary_metadata.items() if key != "_db_id"} == {
@@ -334,11 +255,85 @@ def test_broker_progress_summaries_persist_once_with_jarvis_attribution(tmp_path
         "worker": "pc-codex",
         "task_id": "task-1",
         "worker_event_id": "progress-summary-1",
-        "character_name": "Jarvis",
+        "character_name": jarvis_agent.configured_agent_name(),
     }
-    assert manager.session.history[-2].metadata["source"] == "agent_worker"
-    assert manager.session.history[-1].metadata["source"] == "jarvis_worker_summary"
-    assert manager.session.history[-1].metadata["worker_event_id"] == "result-1"
+    assert manager.session.history[-1].metadata["source"] == "agent_worker"
+    assert manager.session.history[-1].metadata["character_name"] == jarvis_agent.configured_agent_name()
+
+
+def test_worker_result_uses_explicit_conversational_presenter(tmp_path, monkeypatch):
+    class SessionManager:
+        def __init__(self):
+            self.messages = []
+
+        def add_message(self, _session_id, message):
+            self.messages.append(message)
+
+    manager = SessionManager()
+    monkeypatch.setattr(jarvis_agent, "TASKS_FILE", tmp_path / "agent_tasks.json")
+    monkeypatch.setattr(jarvis_agent, "_SESSION_MANAGER", manager)
+    jarvis_agent._save_task(_task(presenter="Friday"))
+
+    jarvis_agent._append_event("task-1", {
+        "event_id": "result-presenter",
+        "type": "result",
+        "text": "The requested inspection is complete.",
+        "metadata": {},
+    })
+
+    assert manager.messages[0].metadata["character_name"] == "Friday"
+    assert jarvis_agent.get_task("task-1")["events"][0]["presenter"] == "Friday"
+
+
+def test_orchestrated_worker_result_waits_for_one_presenter_response(tmp_path, monkeypatch):
+    class SessionManager:
+        def __init__(self):
+            self.messages = []
+            self.session = type("Session", (), {"history": self.messages, "message_count": 0})()
+
+        def get_session(self, _session_id):
+            return self.session
+
+        def add_message(self, _session_id, message):
+            self.messages.append(message)
+            message.metadata["_db_id"] = "raw-result"
+
+        def delete_message(self, _session_id, message_id):
+            self.messages[:] = [
+                message for message in self.messages
+                if (message.metadata or {}).get("_db_id") != message_id
+            ]
+            return True
+
+    manager = SessionManager()
+    monkeypatch.setattr(jarvis_agent, "TASKS_FILE", tmp_path / "agent_tasks.json")
+    monkeypatch.setattr(jarvis_agent, "_SESSION_MANAGER", manager)
+    jarvis_agent._save_task(_task(presenter="Jarvis", persist_result=True))
+
+    jarvis_agent._append_event("task-1", {
+        "event_id": "result-orchestrated",
+        "type": "result",
+        "text": "Raw worker result for the orchestrator to synthesize.",
+        "metadata": {},
+    })
+
+    assert len(manager.messages) == 1
+    assert jarvis_agent.get_task("task-1")["result_persisted"] is True
+
+    not_consumed = jarvis_agent.consume_task_result(
+        "task-1", owner="leo", session_id="another-session",
+    )
+
+    assert len(manager.messages) == 1
+    assert not not_consumed.get("result_consumed")
+
+    consumed = jarvis_agent.consume_task_result(
+        "task-1", owner="leo", session_id="session-1",
+    )
+
+    assert manager.messages == []
+    assert consumed["result_consumed"] is True
+    assert consumed["persist_result"] is False
 
 
 def test_progress_summary_retries_after_transient_persistence_failure(tmp_path, monkeypatch):
@@ -380,25 +375,22 @@ def test_progress_summary_retries_after_transient_persistence_failure(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_reconciled_result_also_gets_spoken_summary(tmp_path, monkeypatch):
+async def test_reconciled_short_result_gets_verbatim_spoken_envelope(tmp_path, monkeypatch):
     class Adapter:
         async def status(self, _task):
             return {"status": "completed", "result": "Raw reconciled result"}
-
-    async def summary(_task, _text):
-        return "PC Codex completed the task. Review the full result in chat."
 
     monkeypatch.setattr(jarvis_agent, "TASKS_FILE", tmp_path / "agent_tasks.json")
     monkeypatch.setattr(jarvis_agent, "_SESSION_MANAGER", None)
     monkeypatch.setattr(jarvis_agent, "_MIRRORS", {})
     monkeypatch.setattr(jarvis_agent, "adapters", lambda: {"pc-codex": Adapter()})
-    monkeypatch.setattr(jarvis_agent, "_spoken_result", summary)
     jarvis_agent._save_task(_task())
 
     saved = await jarvis_agent.refresh_task("task-1", owner="leo")
 
     assert saved["events"][0]["text"] == "Raw reconciled result"
-    assert saved["events"][0]["spoken_text"].startswith("PC Codex completed")
+    assert saved["events"][0]["spoken_text"] == "Raw reconciled result"
+    assert saved["events"][0]["speech_mode"] == "verbatim"
 
 
 @pytest.mark.asyncio

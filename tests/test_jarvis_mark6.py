@@ -35,6 +35,7 @@ from src.extension_registry import ExtensionRegistry
 
 def test_voice_intent_separates_foreground_switch_from_background_delegation():
     assert _target_switch("Talk to PC Codex") == "pc-codex"
+    assert _target_switch("Let me talk to Friday") == "pc-codex"
     assert _target_switch("Please switch me back to Jarvis") == "jarvis"
     assert _target_switch("Connect me to Jarvis") == "jarvis"
     assert _target_switch("Talk about the result Hermes found") is None
@@ -185,8 +186,8 @@ async def test_compound_voice_request_starts_pc_and_hermes_as_scoped_tasks(monke
         ("hermes", "home-lab"),
     ]
     pc_prompt, hermes_prompt = calls[0][2], calls[1][2]
-    assert "Handle only the work explicitly assigned to Friday" in pc_prompt
-    assert "Handle only the work explicitly assigned to Gordon" in hermes_prompt
+    assert "Handle only the work explicitly assigned to PC Codex" in pc_prompt
+    assert "Handle only the work explicitly assigned to Hermes" in hermes_prompt
     assert "ODYSSEUS_ARTIFACT" in pc_prompt
     assert "ODYSSEUS_ARTIFACT" not in hermes_prompt
     assert [event["worker"] for event in events if event["type"] == "agent_task"] == [
@@ -196,8 +197,8 @@ async def test_compound_voice_request_starts_pc_and_hermes_as_scoped_tasks(monke
     assert events[-1]["diagnostics"]["guard_reason"] == (
         "delegation_multi_pc-codex_started_hermes_started"
     )
-    assert "Friday is opening the document in Pandamonium" in events[-1]["assistant_text"]
-    assert "Gordon is handling its part" in events[-1]["assistant_text"]
+    assert "PC Codex is opening the document in Pandamonium" in events[-1]["assistant_text"]
+    assert "Hermes is handling its part" in events[-1]["assistant_text"]
 
 
 @pytest.mark.asyncio
@@ -223,8 +224,8 @@ async def test_compound_dispatch_failure_does_not_block_the_other_worker(monkeyp
     assert calls == ["pc-codex", "hermes"]
     assert [event["task_id"] for event in events if event["type"] == "agent_task"] == ["hermes-task"]
     assert events[-1]["task_ids"] == ["hermes-task"]
-    assert "Friday is not connected" in events[-1]["assistant_text"]
-    assert "Gordon is handling its part" in events[-1]["assistant_text"]
+    assert "PC Codex is not connected" in events[-1]["assistant_text"]
+    assert "Hermes is handling its part" in events[-1]["assistant_text"]
 
 
 @pytest.mark.asyncio
@@ -453,10 +454,12 @@ async def test_business_then_hermes_runs_as_distinct_background_tasks_with_jarvi
     assert business_task == {
         "type": "agent_task", "task_id": "pc-codex-task", "worker": "pc-codex",
         "workspace": "business", "foreground": False,
+        "presenter": voice_routes.configured_agent_name(),
     }
     assert hermes_task == {
         "type": "agent_task", "task_id": "hermes-task", "worker": "hermes",
         "workspace": "home-lab", "foreground": False,
+        "presenter": voice_routes.configured_agent_name(),
     }
     assert "not current enough" in business[-1]["assistant_text"]
     assert all(event["type"] != "target_changed" for event in business + hermes)
@@ -520,12 +523,12 @@ async def test_selected_hermes_talks_directly_to_gordon_without_broker_task(monk
     assert events[0] == {
         "type": "assistant_delta",
         "text": "Good evening, Leo. This is Gordon.",
-        "model": "Gordon",
+        "model": "Hermes",
     }
     assert events[-1]["task_ids"] == []
-    assert events[-1]["diagnostics"]["guard_reason"] == "direct_gordon"
+    assert events[-1]["diagnostics"]["guard_reason"] == "direct_hermes"
     assert events[-1]["diagnostics"]["direct_target"] == "hermes"
-    assert events[-1]["diagnostics"]["character_name"] == "Gordon"
+    assert events[-1]["diagnostics"]["character_name"] == "Hermes"
 
 
 @pytest.mark.asyncio
@@ -552,7 +555,7 @@ async def test_selected_hermes_greeting_reaches_gordon(monkeypatch):
 
     assert calls == [("chat-1", "Good evening, how are you?", "leo", "home-lab")]
     assert events[-1]["assistant_text"] == "Good evening, Leo. Gordon here."
-    assert events[-1]["diagnostics"]["guard_reason"] == "direct_gordon"
+    assert events[-1]["diagnostics"]["guard_reason"] == "direct_hermes"
 
 
 @pytest.mark.asyncio
@@ -577,7 +580,7 @@ async def test_direct_gordon_failure_does_not_fall_back_to_jarvis_broker(monkeyp
     assert [event["type"] for event in events] == ["assistant_delta", "final"]
     assert all(event["type"] != "agent_task" for event in events)
     assert events[-1]["task_ids"] == []
-    assert events[-1]["diagnostics"]["guard_reason"] == "direct_gordon_unavailable"
+    assert events[-1]["diagnostics"]["guard_reason"] == "direct_hermes_unavailable"
     assert events[-1]["diagnostics"]["character_name"] == "Pandamonium"
     assert "did not send that through Jarvis" in events[-1]["assistant_text"]
 
@@ -612,6 +615,7 @@ async def test_jarvis_selected_ask_hermes_stays_background_brokered(monkeypatch)
         "worker": "hermes",
         "workspace": "home-lab",
         "foreground": False,
+        "presenter": voice_routes.configured_agent_name(),
     }
     assert events[-1]["diagnostics"]["guard_reason"] == "delegation_started_hermes"
     assert "direct_target" not in events[-1]["diagnostics"]
@@ -772,7 +776,7 @@ async def test_target_switch_precedes_active_worker_dispatch(monkeypatch):
     assert [event["type"] for event in events] == [
         "assistant_delta", "target_changed", "handoff_greeting", "final",
     ]
-    assert events[0]["text"] == "Transferring you to Gordon now—one moment, please."
+    assert events[0]["text"] == "Transferring you to Hermes now—one moment, please."
     assert events[1]["target"] == "hermes"
     assert events[-1]["task_ids"] == []
 
@@ -809,9 +813,9 @@ async def test_friday_handoff_greeting_does_not_launch_a_deep_codex_task():
         "pc-codex", "chat-1", "leo", "home-lab",
     )
 
-    assert greeting["text"] == "Friday here, Leo. What are we working on?"
+    assert greeting["text"] == "PC Codex here, Leo. What are we working on?"
     assert greeting["target"] == "pc-codex"
-    assert greeting["diagnostics"]["character_name"] == "Friday"
+    assert greeting["diagnostics"]["character_name"] == "PC Codex"
     assert greeting["diagnostics"]["model"] == "odysseus-router"
 
 
@@ -842,7 +846,36 @@ async def test_foreground_friday_result_becomes_the_spoken_reply(monkeypatch):
 
     assert events[-1]["assistant_text"] == "Good evening, Leo. I’m ready."
     assert events[-1]["diagnostics"]["guard_reason"] == "selected_completed_pc-codex"
+    assert events[-1]["diagnostics"]["task_delivery_pending"] is False
     assert any(event.get("type") == "agent_task" and event.get("foreground") for event in events)
+
+
+@pytest.mark.asyncio
+async def test_timed_out_friday_task_is_released_for_later_delivery(monkeypatch):
+    async def dispatch(*_args, **_kwargs):
+        return {"task_id": "friday-task"}, "started"
+
+    async def foreground(_task_id, _owner):
+        return "timeout", ""
+
+    monkeypatch.setattr(voice_routes, "_dispatch_worker_request", dispatch)
+    monkeypatch.setattr(voice_routes, "_foreground_worker_result", foreground)
+    monkeypatch.setattr(
+        jarvis_agent,
+        "_SESSION_MANAGER",
+        SimpleNamespace(get_session=lambda _session_id: SimpleNamespace(owner="leo")),
+    )
+    events = [
+        event async for event in _server_routed_events(
+            "chat-1",
+            "Friday, inspect the active project configuration.",
+            "leo",
+            {"target": "pc-codex", "workspace": "home-lab"},
+        )
+    ]
+
+    assert events[-1]["assistant_text"] == "PC Codex is still working. I’ll deliver the result here when it finishes."
+    assert events[-1]["diagnostics"]["task_delivery_pending"] is True
 
 
 def test_selected_friday_only_dispatches_explicit_work_requests():
@@ -852,9 +885,99 @@ def test_selected_friday_only_dispatches_explicit_work_requests():
     assert not voice_routes._selected_pc_codex_task_request(
         "We're getting there one piece at a time. It's all teamwork, wouldn't you say?",
     )
+    assert not voice_routes._selected_pc_codex_task_request(
+        "Check my Books library and list every title.",
+    )
+    assert not voice_routes._selected_pc_codex_task_request(
+        "Find the book in my library that still needs OCR.",
+    )
     assert voice_routes._selected_pc_codex_task_request(
         "Friday, inspect the active project's protocol configuration.",
     )
+    assert voice_routes._selected_pc_codex_task_request(
+        "Review the Books service source code.",
+    )
+    assert voice_routes._selected_pc_codex_task_request(
+        "Check the server configuration.",
+    )
+    assert voice_routes._selected_pc_codex_task_request(
+        "Search the repository for this symbol.",
+    )
+    assert voice_routes._selected_pc_codex_task_request(
+        "Find the configuration file.",
+    )
+    assert voice_routes._selected_pc_codex_task_request(
+        "Read the repository file.",
+    )
+    assert voice_routes._selected_pc_codex_task_request("Friday, fix the tests.")
+    assert voice_routes._selected_pc_codex_task_request("Review these files.")
+    assert voice_routes._selected_pc_codex_task_request("Inspect the containers.")
+    assert voice_routes._selected_pc_codex_task_request("Create a repository script.")
+    assert voice_routes._selected_pc_codex_task_request("Start the project server.")
+    assert voice_routes._selected_pc_codex_task_request("Stop the project service.")
+    assert voice_routes._selected_pc_codex_task_request("Compare these files.")
+    assert voice_routes._selected_pc_codex_task_request("Fix the authentication bug.")
+    assert voice_routes._selected_pc_codex_task_request("Debug the API.")
+    assert not voice_routes._selected_pc_codex_task_request("Do not run the repository tests.")
+    assert not voice_routes._selected_pc_codex_task_request("Don't deploy the service.")
+    assert not voice_routes._selected_pc_codex_task_request(
+        "I don't want you to run the repository tests.",
+    )
+    assert not voice_routes._selected_pc_codex_task_request(
+        "Don't ever under any circumstances deploy the service.",
+    )
+    assert voice_routes._selected_pc_codex_task_request(
+        "I don't know why it failed, but fix the API bug.",
+    )
+    assert voice_routes._selected_pc_codex_task_request(
+        "Don't run tests, but fix the API bug.",
+    )
+    assert not voice_routes._selected_pc_codex_task_request("Read the book Clean Code.")
+    assert not voice_routes._selected_pc_codex_task_request(
+        "Read the email about the API bug.",
+    )
+    assert not voice_routes._selected_pc_codex_task_request("Update this scheduled task.")
+    assert not voice_routes._selected_pc_codex_task_request("Fix that todo.")
+    assert not voice_routes._selected_pc_codex_task_request("Change this reminder.")
+
+
+@pytest.mark.asyncio
+async def test_selected_friday_contextual_followup_steers_active_task(monkeypatch):
+    dispatched = []
+
+    monkeypatch.setattr(
+        jarvis_agent,
+        "find_active_task",
+        lambda *_args, **_kwargs: {"task_id": "friday-task", "status": "running"},
+    )
+    monkeypatch.setattr(jarvis_agent, "list_active_tasks", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        voice_routes,
+        "_SESSION_MANAGER",
+        SimpleNamespace(get_session=lambda _session_id: SimpleNamespace(owner="leo")),
+    )
+
+    async def dispatch(*args, **_kwargs):
+        dispatched.append(args)
+        return {"task_id": "friday-task"}, "steered"
+
+    async def foreground(_task_id, _owner):
+        return "completed", "I applied that follow-up."
+
+    monkeypatch.setattr(voice_routes, "_dispatch_worker_request", dispatch)
+    monkeypatch.setattr(voice_routes, "_foreground_worker_result", foreground)
+    events = [
+        event async for event in voice_routes._jarvis_events(
+            "chat-1",
+            "Fix that.",
+            "leo",
+            {"target": "pc-codex", "origin_target": "jarvis", "workspace": "home-lab"},
+        )
+    ]
+
+    assert dispatched
+    assert events[-1]["assistant_text"] == "I applied that follow-up."
+    assert events[-1]["diagnostics"]["guard_reason"] == "selected_completed_pc-codex"
 
 
 @pytest.mark.asyncio
@@ -892,10 +1015,92 @@ async def test_selected_friday_conversation_uses_voice_model_without_task_tools(
 
     assert events[-1]["assistant_text"] == "I am up and running, Leo."
     assert events[-1]["diagnostics"]["guard_reason"] == "friday_conversation"
-    assert events[-1]["diagnostics"]["character_name"] == "Friday"
+    assert events[-1]["diagnostics"]["character_name"] == "PC Codex"
     assert captured["messages"][0]["content"] == voice_routes.FRIDAY_VOICE_SYSTEM_PROMPT
     assert "start_agent_task" not in captured["relevant_tools"]
     assert "read_agent_task" not in captured["relevant_tools"]
+
+
+@pytest.mark.asyncio
+async def test_voice_forwards_the_canonical_authority_decision_and_speaks_one_summary(monkeypatch):
+    decision = {
+        "decision_id": "decision-voice-1",
+        "decision": "approval_required",
+        "action_effect": "destructive_or_difficult_to_recover",
+        "gate_reason": "destructive_or_difficult_to_recover",
+        "capability": {"name": "delete_email", "target": "tool"},
+        "preview": {"uid": "7"},
+    }
+
+    async def model_stream(*_args, **_kwargs):
+        yield "data: " + json.dumps({"type": "authority_approval_required", "data": decision})
+        yield 'data: {"delta":"A second confirmation should not be spoken."}'
+        yield 'data: {"type":"metrics","data":{}}'
+        yield "data: [DONE]"
+
+    monkeypatch.setattr(voice_routes, "stream_agent_loop", model_stream)
+    monkeypatch.setattr(
+        voice_routes,
+        "_SESSION_MANAGER",
+        SimpleNamespace(get_session=lambda _session_id: SimpleNamespace(
+            endpoint_url="http://jarvis.test/v1/chat/completions",
+            model="jarvis-model",
+            headers={},
+            get_context_messages=lambda: [],
+        )),
+    )
+
+    events = [
+        event async for event in voice_routes._jarvis_events(
+            "chat-1", "Delete email seven", "leo", {"target": "jarvis"},
+        )
+    ]
+
+    assert events[0] == {"type": "authority_approval_required", "data": decision}
+    assert events[1]["text"] == "Approval required for delete_email. I opened the exact decision in chat."
+    assert events[-1]["assistant_text"] == events[1]["text"]
+    assert events[-1]["diagnostics"]["guard_reason"] == "authority_approval_required"
+
+
+@pytest.mark.asyncio
+async def test_voice_oracle_language_uses_the_shared_ui_control_action(monkeypatch):
+    captured = {"calls": 0}
+
+    async def model_stream(*_args, **_kwargs):
+        captured["calls"] += 1
+        yield 'data: {"type":"ui_control","data":{"ui_event":"oracle_protocol_engage"}}'
+        yield 'data: {"delta":"ORACLE protocol engaged."}'
+        yield 'data: {"type":"metrics","data":{}}'
+        yield "data: [DONE]"
+
+    monkeypatch.setattr(voice_routes, "stream_agent_loop", model_stream)
+    monkeypatch.setattr(
+        voice_routes,
+        "_SESSION_MANAGER",
+        SimpleNamespace(get_session=lambda _session_id: SimpleNamespace(
+            endpoint_url="http://jarvis.test/v1/chat/completions",
+            model="jarvis-model",
+            headers={},
+            get_context_messages=lambda: [],
+        )),
+    )
+    monkeypatch.setattr(
+        voice_routes,
+        "_oracle_protocol_intent",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("legacy phrase shortcut was used")),
+    )
+    session = {"target": "jarvis"}
+
+    events = [
+        event async for event in voice_routes._jarvis_events(
+            "chat-1", "Engage the ORACLE protocol", "leo", session,
+        )
+    ]
+
+    assert captured["calls"] == 1
+    assert events[0] == {"type": "ui_control", "ui_event": "oracle_protocol_engage"}
+    assert events[-1]["assistant_text"] == "ORACLE protocol engaged."
+    assert session["oracle_protocol_active"] is True
 
 
 @pytest.mark.asyncio
@@ -938,7 +1143,7 @@ async def test_old_worker_question_does_not_capture_direct_gordon_turn(monkeypat
 
     assert all(event["type"] != "agent_task" for event in events)
     assert events[-1]["assistant_text"] == "I have this, Leo."
-    assert events[-1]["diagnostics"]["guard_reason"] == "direct_gordon"
+    assert events[-1]["diagnostics"]["guard_reason"] == "direct_hermes"
 
 
 @pytest.mark.asyncio
@@ -994,7 +1199,9 @@ async def test_new_pc_task_ignores_voice_global_thread_id(monkeypatch):
                 "decision_id": "decision-1",
                 "decision": "allow",
                 "permission_mode": "bounded_write",
-                "policy_basis": "existing_scoped_policy",
+                "action_effect": "reversible_write",
+                "gate_reason": None,
+                "policy_basis": "authenticated_explicit_request",
             }
 
     monkeypatch.setattr(jarvis_agent, "find_active_task", lambda *_args: None)
@@ -1005,7 +1212,18 @@ async def test_new_pc_task_ignores_voice_global_thread_id(monkeypatch):
         lambda **values: operational_events.append(values) or {"event_id": f"event-{len(operational_events)}"},
     )
 
-    async def start_task(worker, session_id, workspace, prompt, permission_mode, approved, owner, codex_thread_id=None):
+    async def start_task(
+        worker,
+        session_id,
+        workspace,
+        prompt,
+        permission_mode,
+        approved,
+        owner,
+        codex_thread_id=None,
+        presenter=None,
+        **trace,
+    ):
         captured.update(
             worker=worker,
             session_id=session_id,
@@ -1015,6 +1233,8 @@ async def test_new_pc_task_ignores_voice_global_thread_id(monkeypatch):
             approved=approved,
             owner=owner,
             codex_thread_id=codex_thread_id,
+            presenter=presenter,
+            trace=trace,
         )
         return {"task_id": "business-task", "status": "queued"}
 
@@ -1033,9 +1253,17 @@ async def test_new_pc_task_ignores_voice_global_thread_id(monkeypatch):
     assert result == "started"
     assert captured["workspace"] == "business"
     assert captured["codex_thread_id"] is None
+    assert captured["presenter"] == voice_routes.configured_agent_name()
+    assert captured["trace"]["request_id"] == operational_events[0]["request_id"]
+    assert captured["trace"]["authority_ref"] == "decision-1"
     assert captured["action_call"]["target"] == "worker"
     assert captured["action_call"]["agent_id"] == "assistant"
-    assert [event["event_type"] for event in operational_events] == ["approval", "result"]
+    assert [event["event_type"] for event in operational_events] == [
+        "started", "approval", "progress", "result",
+    ]
+    assert [event["status"] for event in operational_events] == [
+        "requested", "authorized", "executed", "succeeded",
+    ]
     assert operational_events[0]["request_id"] == operational_events[1]["request_id"]
 
 
@@ -1878,7 +2106,7 @@ async def test_voice_cancel_uses_named_broker_task_not_browser_task_id(monkeypat
 
     assert calls == [("hermes-live", "cancel", None, False, "leo")]
     assert events[-1]["diagnostics"]["guard_reason"] == "worker_cancel_requested"
-    assert events[-1]["assistant_text"].startswith("Cancellation requested for Gordon")
+    assert events[-1]["assistant_text"].startswith("Cancellation requested for Hermes")
 
 
 @pytest.mark.asyncio
@@ -2072,9 +2300,9 @@ async def test_cancellation_failure_warns_task_may_still_run(monkeypatch):
 
 
 def test_voice_system_prompt_assigns_workers_without_inference():
-    assert "Friday owns local project, code, and document inspection through PC Codex" in voice_routes.VOICE_SYSTEM_PROMPT
-    assert "VPS Codex is only for work that explicitly names the VPS" in voice_routes.VOICE_SYSTEM_PROMPT
-    assert "Gordon is the Hermes agent and is explicit-only" in voice_routes.VOICE_SYSTEM_PROMPT
+    assert "configured PC Codex worker owns local project, code, and document inspection" in voice_routes.VOICE_SYSTEM_PROMPT
+    assert "VPS Codex worker is only for work that explicitly names the VPS" in voice_routes.VOICE_SYSTEM_PROMPT
+    assert "Hermes worker is explicit-only" in voice_routes.VOICE_SYSTEM_PROMPT
     assert "Ambiguous follow-ups refer to the preceding conversation" in voice_routes.VOICE_SYSTEM_PROMPT
 
 

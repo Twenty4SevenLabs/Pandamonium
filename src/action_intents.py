@@ -114,6 +114,9 @@ _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
          r"\b(?:what|which)\s+(?:tools?|integrations?|plugins?|capabilities)\b.{0,100}\b(?:see|visible|available|access|have|connected|installed)\b|"
          r"\b(?:do|can)\s+you\s+(?:see|access|have)\b.{0,100}\b(?:tools?|integrations?|plugins?|capabilities)\b|"
          r"\b(?:list|show|tell\s+me)\b.{0,80}\b(?:tools?|integrations?|plugins?|capabilities)\b"),
+        ("integrations", "live integration health request",
+         r"\b(?:check|show|report|summari[sz]e|what(?:'s| is))\b.{0,100}\b(?:integration|plugin|mcp|portal)s?\b.{0,100}\b(?:health|status|working|connected|available)\b|"
+         r"\b(?:health|status)\b.{0,100}\b(?:all\s+|my\s+|configured\s+)?(?:integration|plugin|mcp|portal)s?\b"),
 
         # Deep research jobs, not quick conceptual mentions of research.
         ("web", "explicit web search request", rf"{_PLEASE}(?:do|run|use|perform|make)\s+(?:a\s+)?(?:web\s+search|search\s+the\s+web)\b.+"),
@@ -140,6 +143,12 @@ _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
         ("shell", "ssh target request", r"\bssh\s+\w+"),
         ("shell", "remote command request", r"\b(run|execute)\s+.{1,40}\bon\s+\w+"),
         ("shell", "assistant command execution request", r"\b(can|could|please|would)\s+you\s+(run|execute|exec)\b"),
+        (
+            "shell",
+            "explicit command execution request",
+            rf"{_PLEASE}(?:(?:execute|exec)\b\s+\S+|"
+            r"run\b(?!\s+(?:this|it)\b.{0,40}\b(?:in\s+the\s+)?background\b)\s+\S+)",
+        ),
         # Shell verbs only count in imperative position (start of message,
         # optionally after "please") or as a "can you ..." request. A bare
         # word match promoted informational questions ("What does the grep

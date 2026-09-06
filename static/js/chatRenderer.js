@@ -2113,15 +2113,42 @@ export function removeAskUserCards(root) {
   scope.querySelectorAll('.ask-user-card').forEach((node) => node.remove());
 }
 
+function _resumeApprovedAction(attempt = 0) {
+  const input = uiModule.el('message');
+  const sendButton = document.querySelector('.send-btn');
+  const busy = sendButton && (
+    sendButton.disabled
+    || sendButton.dataset.mode === 'streaming'
+    || sendButton.classList.contains('send-pending')
+  );
+  if ((!input || !sendButton || busy) && attempt < 100) {
+    setTimeout(() => _resumeApprovedAction(attempt + 1), 50);
+    return;
+  }
+  if (!input || !sendButton || busy) {
+    uiModule.showError('Approved, but automatic continuation could not start. Send “Approve” once to resume.');
+    return;
+  }
+  input.value = 'Approve';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  sendButton.click();
+}
+
 export function renderAuthorityApprovalCard(payload) {
   const decisionId = String(payload?.decision_id || '');
   const capability = String(payload?.capability?.name || 'requested action');
+  const target = String(payload?.capability?.target || 'tool');
+  const effect = String(payload?.action_effect || payload?.gate_reason || '');
+  const workspace = String(payload?.workspace || 'configured workspace');
+  const executionHost = String(payload?.execution?.host || '');
+  const executionUser = String(payload?.execution?.user || '');
   const chatBox = document.getElementById('chat-history');
   if (!decisionId || !chatBox) return null;
 
   chatBox.querySelectorAll('.authority-approval-card').forEach(node => node.remove());
   const card = document.createElement('div');
   card.className = 'ask-user-card authority-approval-card';
+  card.dataset.decisionId = decisionId;
   card.setAttribute('role', 'group');
   card.setAttribute('aria-label', `Approval required for ${capability}`);
 
@@ -2129,6 +2156,14 @@ export function renderAuthorityApprovalCard(payload) {
   question.className = 'ask-user-question';
   question.textContent = `Approval required: ${capability}`;
   card.appendChild(question);
+
+  const context = document.createElement('div');
+  context.className = 'authority-approval-context';
+  const executionIdentity = executionHost
+    ? `${executionHost}${executionUser ? ` as ${executionUser}` : ''}`
+    : '';
+  context.textContent = [effect, target, workspace, executionIdentity, decisionId].filter(Boolean).join(' · ');
+  card.appendChild(context);
 
   const preview = document.createElement('pre');
   preview.className = 'authority-approval-preview';
@@ -2148,16 +2183,12 @@ export function renderAuthorityApprovalCard(payload) {
       });
       if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
       question.textContent = choice === 'approve'
-        ? `Approved once: ${capability}. Repeat the command to run it.`
+        ? `Approved once: ${capability}. Running the exact pending action now.`
         : `Denied: ${capability}`;
       preview.remove();
       actions.remove();
       if (choice === 'approve') {
-        const input = uiModule.el('message');
-        if (input) {
-          input.value = `Retry the approved ${capability} command with the same arguments.`;
-          input.focus();
-        }
+        _resumeApprovedAction();
       }
     } catch (error) {
       actions.querySelectorAll('button').forEach(button => { button.disabled = false; });
@@ -2176,6 +2207,24 @@ export function renderAuthorityApprovalCard(payload) {
   chatBox.appendChild(card);
   card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   return card;
+}
+
+export async function restorePendingAuthorityDecision(sessionId) {
+  if (!sessionId) return null;
+  const response = await fetch('/api/authority', { credentials: 'same-origin' });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const state = await response.json();
+  const now = Date.now();
+  const pending = (state?.decisions || [])
+    .filter(row => (
+      row?.session_id === sessionId
+      && row?.decision === 'approval_required'
+      && row?.status !== 'resolved'
+      && row?.status !== 'expired'
+      && Date.parse(row?.expires_at || '') > now
+    ))
+    .sort((left, right) => String(right.created_at || '').localeCompare(String(left.created_at || '')))[0];
+  return pending ? renderAuthorityApprovalCard(pending) : null;
 }
 
 /**
@@ -2208,10 +2257,17 @@ export function renderAskUserCard(payload, options) {
   closeBtn.className = 'modal-close ask-user-close';
   closeBtn.setAttribute('aria-label', 'Dismiss question');
   closeBtn.textContent = '×';
-  closeBtn.addEventListener('click', () => {
+  const closeCard = () => {
     card.remove();
     const input = uiModule.el('message');
     if (input) input.focus();
+  };
+  closeBtn.addEventListener('click', closeCard);
+  card.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeCard();
   });
   head.appendChild(closeBtn);
   card.appendChild(head);
@@ -2248,16 +2304,19 @@ export function renderAskUserCard(payload, options) {
       checkbox.value = label;
       row.appendChild(checkbox);
     }
+    const copy = document.createElement('span');
+    copy.className = 'ask-user-option-copy';
     const labelText = document.createElement('span');
     labelText.className = 'ask-user-option-label';
     labelText.innerHTML = emojiText(label);
-    row.appendChild(labelText);
+    copy.appendChild(labelText);
     if (description) {
       const descriptionText = document.createElement('span');
       descriptionText.className = 'ask-user-option-desc';
       descriptionText.innerHTML = emojiText(description);
-      row.appendChild(descriptionText);
+      copy.appendChild(descriptionText);
     }
+    row.appendChild(copy);
     if (!multi) {
       row.type = 'button';
       row.addEventListener('click', () => send(label));
@@ -2823,6 +2882,8 @@ const chatRenderer = {
   safeToolScreenshotSrc,
   safeDisplayImageSrc,
   removeAskUserCards,
+  renderAuthorityApprovalCard,
+  restorePendingAuthorityDecision,
   renderAskUserCard,
   buildSourcesBox,
   buildFindingsBox,

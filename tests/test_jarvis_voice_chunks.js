@@ -38,9 +38,17 @@ assert.match(source, /function showChatFromExtension\(message = ''\)/);
 assert.match(source, /event\.key === 'Escape'[\s\S]*?disengageExtensionSurface\(\)/);
 assert.match(source, /window\.jarvisVoice = \{[\s\S]*?prepareExtensionTextTurn/);
 assert.match(chatSource, /const streamSessionId = sessionModule\.getCurrentSessionId\(\)[\s\S]*?prepareExtensionTextTurn\('oracle', streamSessionId\)/);
+assert.match(chatSource, /const streamAgentTarget = sessionModule\?\.getChatAgentTarget\?\.\(\) \|\| ''/);
+assert.equal((chatSource.match(/getChatAgentTarget\?\.\(\)/g) || []).length, 1);
+assert.match(chatSource, /if \(streamAgentTarget\) fd\.append\('agent_target', streamAgentTarget\)/);
 assert.match(chatSource, /json\.extension_call[\s\S]*?applyExtensionSurfaceControl/);
 assert.match(chatSource, /json\.type === 'authority_approval_required'[\s\S]*?renderAuthorityApprovalCard/);
 assert.match(rendererSource, /renderAuthorityApprovalCard[\s\S]*?\/api\/authority\/decisions\/[\s\S]*?Approve once/);
+assert.match(rendererSource, /Running the exact pending action now/);
+assert.match(rendererSource, /function _resumeApprovedAction[\s\S]*?input\.value = 'Approve'[\s\S]*?sendButton\.click\(\)/);
+assert.doesNotMatch(rendererSource, /Retry the approved[\s\S]*?command with the same arguments/);
+assert.match(source, /event\.type === 'authority_approval_required'[\s\S]*?showChatFromExtension[\s\S]*?renderAuthorityApprovalCard/);
+assert.match(rendererSource, /restorePendingAuthorityDecision[\s\S]*?\/api\/authority/);
 assert.doesNotMatch(chatSource, /thinking-toggle live-think-toggle expanded/);
 assert.match(source, /configureExtensionSurfaces\(config\.extension_surfaces\)/);
 assert.match(source, /compatibility: 'oracle-v1'/);
@@ -70,11 +78,11 @@ const pcmStreamBody = source.match(/async function playPcmAudioStream\([\s\S]*?\
 assert.doesNotMatch(pcmStreamBody, /createGain|linearRampToValueAtTime|setTimeout/);
 assert.match(source, /SPOKEN_WORKER_EVENTS = new Set\(\['progress', 'question', 'approval_required', 'result', 'error'\]\)/);
 assert.match(source, /DURABLE_SPEECH_TYPES = new Set\(\['question', 'approval_required', 'error'\]\)/);
-assert.match(source, /event\.spoken_text \|\| `\$\{label\} finished\. The full result is in chat\.`/);
-assert.doesNotMatch(source, /enqueueSpeech\(event\.text/);
-assert.match(source, /is requesting approval\. Please take a look\./);
-assert.match(source, /has a question\. Please take a look\./);
-assert.match(source, /hit a problem\. Please take a look\./);
+assert.match(source, /event\.type === 'error'[\s\S]*?event\.spoken_text \|\| fallback/);
+assert.match(source, /event\.speech_mode === 'verbatim'/);
+assert.match(source, /Approve or deny the exact request in chat/);
+assert.match(source, /The complete question is in chat/);
+assert.match(source, /Review the useful error and next action in chat/);
 assert.match(source, /WORKER_SPEECH_MAX_CHARS = 700/);
 assert.match(source, /VOICE_RMS_THRESHOLD = 0\.005/);
 assert.match(source, /VOICE_SAMPLE_INTERVAL_MS = 140/);
@@ -227,10 +235,10 @@ assert.match(source, /TERMINAL_TASK_STATES\.has\(task\.status \|\| ''\)/);
 assert.match(source, /events\.forEach\(event => \{\s*renderActivityEvent\(event\);\s*renderWorkerSummary\(event, task\);\s*if \(event\.event_id\) handledWorkerEventIds\.add/);
 assert.match(source, /taskMessageElements\(taskId\)\.find\(item => item\.dataset\.source === 'agent_worker'\)/);
 assert.match(source, /item\.dataset\.source === 'jarvis_worker_summary'/);
-assert.match(source, /const isResultSummary = event\.type === 'result'/);
+assert.doesNotMatch(source, /const isResultSummary = event\.type === 'result'/);
 assert.match(source, /metadata\.progress_summary === true \|\| metadata\.milestone === true/);
 assert.match(source, /source: 'jarvis_worker_summary'/);
-assert.match(source, /character_name: 'Jarvis'/);
+assert.match(source, /character_name: task\.presenter \|\| 'Jarvis'/);
 assert.match(source, /summary\.dataset\.workerEventId = eventId/);
 assert.match(source, /if \(eventId\) return item\.dataset\.workerEventId === eventId/);
 assert.match(source, /if \(afterResult\)/);
@@ -241,7 +249,14 @@ assert.match(source, /querySelectorAll\('\.jarvis-task-approval-actions button'\
 assert.doesNotMatch(source, /history\.setAttribute\('role', 'log'\)/);
 assert.doesNotMatch(source, /history\.setAttribute\('aria-live', 'polite'\)/);
 assert.match(source, /window\.chatModule\?\.addMessage\?\.\('assistant', event\.text, '', \{/);
-assert.match(source, /character_name: WORKER_LABELS\[event\.worker\] \|\| event\.worker \|\| 'Worker'/);
+assert.match(source, /character_name: task\.presenter \|\| 'Jarvis'/);
+assert.match(source, /renderWorkerResult\(completed, task, liveAssistantMessage\)/);
+assert.match(source, /Could not load completed foreground worker result/);
+assert.match(source, /replaceMessage\.remove\(\)/);
+assert.doesNotMatch(source, /setVoiceTarget\(event\.worker \|\| 'pc-codex', false\)/);
+assert.match(source, /task\?\.foreground !== true/);
+assert.match(source, /event\.diagnostics\?\.task_delivery_pending === true/);
+assert.match(source, /taskSnapshots\.get\(finalTaskId\) \|\| turnTasks\.find/);
 assert.match(source, /full result is in chat/i);
 assert.match(source, /END_VOICE_LABEL = 'End voice — task continues'/);
 assert.match(source, /window\.confirm\('Cancel the active task\?'\)/);
@@ -336,15 +351,19 @@ assert.match(index, /id="jarvis-activity-rail"[^>]*role="region"[^>]*aria-label=
 assert.match(index, /id="jarvis-agent-cancel"[^>]*hidden disabled/);
 assert.match(index, /title="End voice — task continues" aria-label="End voice — task continues"/);
 assert.match(index, /id="jarvis-call-view-chat"[^>]*>View chat<\/button>/);
-assert.match(index, /<button[^>]*data-worker="hermes"[^>]*>\s*<span>Gordon<\/span><small>Hermes laptop · gated<\/small>\s*<\/button>/);
-assert.match(index, /<button[^>]*data-worker="pc-codex"[^>]*>\s*<span>Friday<\/span><small>Local workstation · checking<\/small>\s*<\/button>/);
-assert.match(index, /style\.css\?v=20260904T132000Z/);
-assert.match(index, /sessions\.js\?v=20260719T024058Z/);
-assert.match(index, /jarvisVoice\.js\?v=20260906T003800Z/);
-assert.match(index, /app\.js\?v=20260719T024058Z/);
-assert.match(appSource, /sessions\.js\?v=20260719T024058Z/);
-assert.match(serviceWorker, /CACHE_NAME = 'pandamonium-v392'/);
-assert.match(source, /voiceMeterProcessor\.js\?v=20260906T003800Z/);
+assert.doesNotMatch(index, /data-worker="(?:hermes|pc-codex|vps-codex)"/);
+assert.match(index, /class="jarvis-selector-status"[^>]*>Discovering who you can talk to…<\/div>/);
+assert.match(source, /fetchJson\('\/api\/selector-catalog'\)/);
+assert.doesNotMatch(source, /\['(?:agent|worker|model)', '(?:Agents|Workers|Models)'\]/);
+assert.doesNotMatch(source, /jarvis-model-target|jarvis-selector-section/);
+assert.match(source, /selectorEntries\.forEach\(entry =>/);
+assert.match(index, /style\.css\?v=20260906T120000Z/);
+assert.match(index, /src="\/static\/js\/sessions\.js"/);
+assert.match(index, /jarvisVoice\.js\?v=20260906T120000Z/);
+assert.match(index, /app\.js\?v=20260906T120000Z/);
+assert.match(appSource, /from '\.\/js\/sessions\.js'/);
+assert.match(serviceWorker, /CACHE_NAME = 'pandamonium-v393'/);
+assert.match(source, /voiceMeterProcessor\.js\?v=20260906T120000Z/);
 assert.doesNotMatch(voiceMeter, /pcm: new Float32Array\(samples\)/);
 assert.match(voiceMeter, /samples: this\._count/);
 assert.match(index, /id="hamburger-btn"[^>]*aria-label="Toggle sidebar"[^>]*aria-controls="sidebar"/);
@@ -361,12 +380,13 @@ assert.match(queuedSpeechBody, /playBufferedAudio\('\/api\/tts\/synthesize'/);
 assert.doesNotMatch(queuedSpeechBody, /aiTTSManager|useBrowserTTS|\.play\(/);
 const startCallSource = source.match(/async function startCall\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
 const streamTurnSource = source.match(/async function streamTurn\([^)]*\) \{([\s\S]*?)\n\}/)?.[1] || '';
-assert.match(source, /const VOICE_TARGET_LABELS = \{ \.\.\.WORKER_LABELS, hermes: 'Gordon', friday: 'Friday' \}/);
-assert.match(source, /'pc-codex': 'Friday'/);
+assert.match(source, /const VOICE_TARGET_LABELS = \{ \.\.\.WORKER_LABELS, friday: 'ChatGPT Subscription' \}/);
+assert.match(source, /'pc-codex': 'PC Codex'/);
+assert.match(source, /workerCatalog\[target\]\?\.label/);
 assert.match(source, /jarvis: \{ enabled: true, machine: 'Self-hosted'/);
 assert.match(source, /event\.type === 'assistant_handoff'/);
 assert.match(source, /const previousAudio = turnAudioPromise \|\| Promise\.resolve\(\)/);
-assert.match(source, /includes\('chatgpt\.com\/backend-api\/codex'\)/);
+assert.doesNotMatch(source, /includes\('chatgpt\.com\/backend-api\/codex'\)/);
 assert.match(sessionsSource, /if \(_pendingChat && _pendingChat\.modelId\) return _pendingChat\.modelId/);
 assert.match(source, /document\.querySelectorAll\('\.jarvis-call-name'\)/);
 assert.match(source, /label\.textContent = voiceTargetLabel\(worker\)/);
@@ -382,14 +402,15 @@ assert.ok(
 const microphoneStart = startCallSource.indexOf('const microphoneReady = requestMicrophone(callGeneration)');
 const playbackUnlock = startCallSource.indexOf('unlockPlaybackAudio()');
 const sessionStart = startCallSource.indexOf('const sessionReady = createSession(callGeneration)');
-const selectedModelTarget = startCallSource.indexOf('const selectedTarget = voiceTargetForModel(');
+const jarvisDefault = startCallSource.indexOf("if (!pendingVoiceTargetState) setVoiceTarget('jarvis', false)");
 const readinessWait = startCallSource.indexOf('await Promise.all([microphoneReady, sessionReady])');
 const readinessCue = startCallSource.indexOf("await playVoiceCue('call')");
 const recorderStart = startCallSource.indexOf('await startListening(requestedStream, callGeneration)');
 assert.ok(microphoneStart >= 0 && microphoneStart < readinessWait);
 assert.ok(playbackUnlock >= 0 && playbackUnlock < microphoneStart, 'playback must unlock during the initiating tap');
 assert.ok(sessionStart >= 0 && sessionStart < readinessWait);
-assert.ok(selectedModelTarget >= 0 && selectedModelTarget < sessionStart);
+assert.ok(jarvisDefault >= 0 && jarvisDefault < sessionStart);
+assert.doesNotMatch(startCallSource, /voiceTargetForModel/);
 assert.ok(startCallSource.indexOf('prewarmVoiceStack().catch') < readinessWait);
 assert.ok(readinessWait < readinessCue && readinessCue < recorderStart);
 assert.doesNotMatch(startCallSource, /await prewarmVoiceStack/);
@@ -626,15 +647,42 @@ const executableSource = source
     "const collectClientState = () => ({ active_view: 'chat' }); const handleUIControl = () => {};",
   )
   .replace(
+    "import { renderAuthorityApprovalCard, restorePendingAuthorityDecision } from './chatRenderer.js';",
+    "const renderAuthorityApprovalCard = () => {}; const restorePendingAuthorityDecision = async () => null;",
+  )
+  .replace(
     "import voiceOrbMedia from './voiceOrbMedia.js';",
     "let testCameraOpen = false; const voiceOrbMedia = { getState: () => ({ cameraOpen: testCameraOpen }), captureFrame: () => ({ captured: true }), openCamera: async () => ({}), closeCamera: () => ({}), playClip: async () => ({}), stopMedia: () => ({}) };",
   )
   .replace(
     "import { getBrandName } from './brand.js';",
     "const getBrandName = () => 'Pandamonium';",
-  ) + '\n;globalThis.__activityPlacement = { positionActivityGroup, positionWorkerResult, positionWorkerSummary, restoreActivityGroupsToChat, findWorkerSummary, prewarmVoiceStack, mediaVoiceCommand, voiceRequestPayload, workerSpeech, workerApprovalAllowsOnce, rememberTask, requestMicrophone, deferCallPanelClose, startCall, endCall, sendTurn, streamTurn, awaitVoiceTargetReady, setVoiceTarget, setAudioSessionType, voiceTargetForModel, oracleProtocolResultMessage, configureExtensionSurfaces, configureOracleProtocol, prepareExtensionSurface, engageExtensionSurface, showChatFromExtension, disengageExtensionSurface, applyExtensionSurfaceControl, handleExtensionSurfaceMessage, getExtensionSurfaceState: () => ({ extensionSurfaceId, extensionSurfaceReady, pending: extensionSurfacePendingResults.size }), getVoiceTarget: () => voiceTarget, waitForTargetUpdate: () => targetUpdatePromise, getTargetSyncState: () => ({ voiceSessionReady, targetSelectionRevision, confirmedVoiceTargetState, pendingVoiceTargetState, targetUpdateFailure: targetUpdateFailure?.message || null }), enableWorker: worker => { workerCatalog[worker] = { ...(workerCatalog[worker] || {}), enabled: true, connection: { state: "connected" } }; }, getVoiceState: () => ({ sessionId, voiceCallGeneration, isActive, status }), setCameraOpen: value => { testCameraOpen = value; }, setActive: value => { isActive = value; }, setCallPanelMinimized, isCallPanelMinimized, unlockPlaybackAudio, stopPlaybackAudio, closePlaybackAudio, getPlaybackContext: () => playbackAudioContext };';
+  ) + '\n;globalThis.__activityPlacement = { positionActivityGroup, positionWorkerResult, renderWorkerResult, positionWorkerSummary, restoreActivityGroupsToChat, findWorkerSummary, prewarmVoiceStack, mediaVoiceCommand, voiceRequestPayload, workerSpeech, workerApprovalAllowsOnce, rememberTask, requestMicrophone, deferCallPanelClose, startCall, endCall, sendTurn, streamTurn, awaitVoiceTargetReady, setVoiceTarget, setAudioSessionType, oracleProtocolResultMessage, configureExtensionSurfaces, configureOracleProtocol, prepareExtensionSurface, engageExtensionSurface, showChatFromExtension, disengageExtensionSurface, applyExtensionSurfaceControl, handleExtensionSurfaceMessage, getExtensionSurfaceState: () => ({ extensionSurfaceId, extensionSurfaceReady, pending: extensionSurfacePendingResults.size }), getVoiceTarget: () => voiceTarget, waitForTargetUpdate: () => targetUpdatePromise, getTargetSyncState: () => ({ voiceSessionReady, targetSelectionRevision, confirmedVoiceTargetState, pendingVoiceTargetState, targetUpdateFailure: targetUpdateFailure?.message || null }), enableWorker: worker => { workerCatalog[worker] = { ...(workerCatalog[worker] || {}), enabled: true, connection: { state: "connected" } }; }, getVoiceState: () => ({ sessionId, voiceCallGeneration, isActive, status }), setCameraOpen: value => { testCameraOpen = value; }, setActive: value => { isActive = value; }, setCallPanelMinimized, isCallPanelMinimized, unlockPlaybackAudio, stopPlaybackAudio, closePlaybackAudio, getPlaybackContext: () => playbackAudioContext };';
 vm.runInNewContext(executableSource, sandbox);
 const placement = sandbox.__activityPlacement;
+let foregroundHandoffRemoved = false;
+let foregroundResultRender = null;
+sandbox.chatModule = {
+  addMessage(role, text, model, metadata) {
+    foregroundResultRender = { role, text, model, metadata };
+    return { dataset: { ...metadata }, parentElement: chat };
+  },
+};
+placement.renderWorkerResult(
+  { type: 'result', task_id: 'foreground-task', worker: 'pc-codex', text: 'The complete structured result.' },
+  { task_id: 'foreground-task', worker: 'pc-codex', presenter: 'Jarvis' },
+  { remove() { foregroundHandoffRemoved = true; } },
+);
+assert.equal(foregroundHandoffRemoved, true, 'the short foreground handoff must be replaced in live chat');
+assert.equal(JSON.stringify(foregroundResultRender), JSON.stringify({
+  role: 'assistant',
+  text: 'The complete structured result.',
+  model: '',
+  metadata: {
+    source: 'agent_worker', worker: 'pc-codex', task_id: 'foreground-task', character_name: 'Jarvis',
+  },
+}));
+delete sandbox.chatModule;
 assert.equal(
   placement.oracleProtocolResultMessage(
     { tool: 'set_visual_style', arguments: { style: 'thermal' } },
@@ -878,20 +926,14 @@ assert.equal(playbackCloses, 0, 'turn and orb cleanup must keep mobile playback 
 placement.closePlaybackAudio();
 assert.equal(playbackCloses, 1, 'ending voice closes the dedicated playback context');
 delete sandbox.AudioContext;
-assert.equal(placement.voiceTargetForModel('hermes-agent'), 'hermes');
-assert.equal(placement.voiceTargetForModel('provider/hermes-agent'), 'hermes');
-assert.equal(placement.voiceTargetForModel('qwen3.5-jarvis-v5:latest'), 'jarvis');
-assert.equal(placement.voiceTargetForModel('qwen3.5:9b'), 'jarvis');
-assert.equal(placement.voiceTargetForModel('gpt-5-codex', 'https://chatgpt.com/backend-api/codex'), 'friday');
-assert.equal(placement.voiceTargetForModel('unknown-model'), 'jarvis');
 exposeVoiceIdentity = true;
 assert.equal(placement.setVoiceTarget('hermes', false), true);
-assert.equal(callName.textContent, 'Gordon');
-assert.equal(callDetail.textContent, 'Gordon is standing by.');
-assert.equal(callTalk.title, 'Speak to Gordon');
-assert.equal(callTalk.attributes['aria-label'], 'Speak to Gordon');
-assert.equal(inputSphere.title, 'Gordon live call');
-assert.equal(inputSphere.attributes['aria-label'], 'Gordon live call');
+assert.equal(callName.textContent, 'Hermes');
+assert.equal(callDetail.textContent, 'Hermes is standing by.');
+assert.equal(callTalk.title, 'Speak to Hermes');
+assert.equal(callTalk.attributes['aria-label'], 'Speak to Hermes');
+assert.equal(inputSphere.title, 'Hermes live call');
+assert.equal(inputSphere.attributes['aria-label'], 'Hermes live call');
 assert.equal(placement.setVoiceTarget('jarvis', false), true);
 exposeVoiceIdentity = false;
 assert.equal(placement.findWorkerSummary('task-rail', 'summary-1', 'PC Codex verified the same result.'), summary);
@@ -970,9 +1012,9 @@ placement.setCameraOpen(true);
 assert.equal(placement.voiceRequestPayload('describe the camera').frame.captured, true);
 assert.equal(placement.voiceRequestPayload('tell me what you see').frame, undefined);
 placement.setCameraOpen(false);
-assert.equal(placement.workerSpeech({ type: 'approval_required', worker: 'hermes', text: 'Restart the service with these long arguments.' }), 'Gordon is requesting approval. Please take a look.');
-assert.equal(placement.workerSpeech({ type: 'question', worker: 'pc-codex', text: 'Which branch and why?' }), 'Friday has a question. Please take a look.');
-assert.equal(placement.workerSpeech({ type: 'error', worker: 'vps-codex', text: 'Long stack trace.' }), 'VPS Codex hit a problem. Please take a look.');
+assert.equal(placement.workerSpeech({ type: 'approval_required', worker: 'hermes', text: 'Restart the service with these long arguments.' }), 'Restart the service with these long arguments.');
+assert.equal(placement.workerSpeech({ type: 'question', worker: 'pc-codex', text: 'Which branch and why?' }), 'Which branch and why?');
+assert.equal(placement.workerSpeech({ type: 'error', worker: 'vps-codex', text: 'Long stack trace.' }), 'VPS Codex failed. Review the useful error and next action in chat.');
 placement.rememberTask({ task_id: 'read-only', permission_mode: 'read_only', approved: false });
 placement.rememberTask({ task_id: 'private-write', permission_mode: 'workspace_write', approved: true });
 assert.equal(placement.workerApprovalAllowsOnce({ task_id: 'read-only' }), false);
@@ -1206,11 +1248,10 @@ delete sandbox.matchMedia;
   assert.equal(typeof resolveSelectedSession, 'function');
   resolveSelectedSession();
   await selectedBeforeCall;
-  assert.equal(placement.getVoiceTarget(), 'hermes', 'the selected Hermes model must make Gordon the live voice target');
-  await placement.sendTurn('Is this Gordon?');
-  assert.deepEqual(selectionRespondTargets, ['hermes'], 'the first response request must use the model-derived Gordon target');
-  assert.deepEqual(selectionTargetRequests.map(payload => payload.target), ['hermes']);
-  assert.equal(selectionTargetRequests[0].workspace, 'home-lab', 'the pre-call workspace must persist with its target');
+  assert.equal(placement.getVoiceTarget(), 'jarvis', 'a text model must not transfer the Jarvis voice session');
+  await placement.sendTurn('Stay with Jarvis.');
+  assert.deepEqual(selectionRespondTargets, ['jarvis']);
+  assert.deepEqual(selectionTargetRequests, [], 'the existing Jarvis session must not need a redundant target write');
   placement.endCall();
   await Promise.resolve();
   assert.equal(selectionStreamStopped, true);
@@ -1219,15 +1260,16 @@ delete sandbox.matchMedia;
 
   selectionStreamStopped = false;
   resolveSelectedSession = null;
-  assert.equal(placement.setVoiceTarget('jarvis'), true);
+  assert.equal(placement.setVoiceTarget('hermes'), true);
   const explicitOverrideCall = placement.startCall();
   assert.equal(typeof resolveSelectedSession, 'function');
   resolveSelectedSession();
   await explicitOverrideCall;
-  assert.equal(placement.getVoiceTarget(), 'jarvis', 'an explicit pre-call Jarvis choice must override the Hermes model');
-  await placement.sendTurn('Stay with Jarvis.');
-  assert.deepEqual(selectionRespondTargets, ['hermes', 'jarvis']);
-  assert.deepEqual(selectionTargetRequests.map(payload => payload.target), ['hermes', 'jarvis']);
+  assert.equal(placement.getVoiceTarget(), 'hermes', 'an explicit pre-call transfer must override the Jarvis default');
+  await placement.sendTurn('Is this Gordon?');
+  assert.deepEqual(selectionRespondTargets, ['jarvis', 'hermes']);
+  assert.deepEqual(selectionTargetRequests.map(payload => payload.target), ['hermes']);
+  assert.equal(selectionTargetRequests[0].workspace, 'home-lab', 'the explicit pre-call workspace must persist with its target');
   placement.endCall();
   await Promise.resolve();
   assert.equal(selectionStreamStopped, true);
@@ -1243,7 +1285,7 @@ delete sandbox.matchMedia;
   assert.equal(placement.getVoiceTarget(), 'hermes', 'session creation must not reset a user selection');
   assert.deepEqual(
     selectionTargetRequests.map(payload => payload.target),
-    ['hermes', 'jarvis', 'hermes'],
+    ['hermes', 'hermes'],
     'the selection made during session creation must persist once the session is ready',
   );
   assert.equal(placement.getTargetSyncState().confirmedVoiceTargetState.target, 'hermes');
@@ -1291,7 +1333,7 @@ delete sandbox.matchMedia;
   assert.equal(placement.getVoiceTarget(), 'jarvis');
   assert.equal(placement.setVoiceTarget('hermes'), true);
   const failedTargetUpdate = placement.waitForTargetUpdate();
-  await assert.rejects(failedTargetUpdate, /Could not switch to Gordon\. Your message was not sent\./);
+  await assert.rejects(failedTargetUpdate, /Could not switch to Hermes\. Your message was not sent\./);
   assert.equal(placement.getVoiceTarget(), 'jarvis', 'a failed selection must visibly return to the confirmed target');
   await assert.rejects(
     placement.streamTurn('This must not reach the wrong agent.', {}, 0, placement.getVoiceState().voiceCallGeneration),

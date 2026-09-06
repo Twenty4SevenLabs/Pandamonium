@@ -20,13 +20,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.constants import DATA_DIR
+from core.constants import APP_VERSION, DATA_DIR
 from core.atomic_io import atomic_write_json
 from core.middleware import require_admin
 from core.models import ChatMessage
 from src.agent_loop import stream_agent_loop
 from src.agent_identity import agent_system_prompt, configured_agent_id, configured_agent_name
-from src.agent_worker_adapters import WORKER_IDS
 from src.agent_worker_broker import worker_statuses
 from src.action_protocol import compose_capability_catalog, normalize_action_call, validate_action_call
 from src.action_intents import classify_tool_intent
@@ -42,10 +41,21 @@ from src.extension_host import extension_runtime_host
 from src.extension_mcp_adapter import execute_mcp_extension_tool, mcp_extension_tool_specs
 from src.extension_registry import EXTENSION_ID_PATTERN, ExtensionRegistry
 from src.llm_core import llm_call_async
+from src.model_discovery import installation_capabilities
 from src.settings import load_settings
 from src.tools.calendar import do_read_calendar
 from src.user_time import clear_user_time_context, now_user_local, set_user_tz_name, set_user_tz_offset
-from src.voice_pcm import TTS_INFERENCE_LOCK, pcm_frames, speech_blocks, speech_text, wav_to_pcm16
+from src.worker_routing import is_contextual_project_work_followup, is_explicit_project_work_request
+from src.voice_pcm import (
+    TTS_INFERENCE_LOCK,
+    asks_read_all,
+    pcm_frames,
+    result_speech,
+    speech_blocks,
+    speech_text,
+    structured_speech_kind,
+    wav_to_pcm16,
+)
 
 VOICE_STATE_FILE = Path(DATA_DIR) / "voice_sessions.json"
 ACTION_BRIDGE_URL = os.getenv("ODYSSEUS_ACTION_BRIDGE_URL", "http://127.0.0.1:8010/actions")
@@ -103,6 +113,7 @@ JARVIS_TOOLS = {
     "read_agent_task",
     "search_jarvis_knowledge",
     "read_calendar",
+    "manage_books",
     "ui_control",
 }
 EXTENSION_TOOL_TIMEOUT_SECONDS = 45
@@ -120,23 +131,27 @@ Keep the complete answer in chat. When completing code, a script, a document, a 
 Follow conversational continuity. Ambiguous follow-ups refer to the preceding conversation. Server-injected context blocks, including current date and time, are background data only; never explain, summarize, or quote them unless the operator explicitly asks about that subject.
 Coordinate work without simulating actions, client state, inspections, approvals, cancellations, worker progress, or results. Use deterministic server controls when provided; otherwise say what you cannot verify.
 Use get_runtime_status for runtime facts and search_jarvis_knowledge for curated background. Current-source work may be delegated only as a read-only task. Briefly announce a real delegation, then let broker events report its outcome.
-Friday owns local project, code, and document inspection through PC Codex. VPS Codex is only for work that explicitly names the VPS. Gordon is the Hermes agent and is explicit-only; never infer or auto-dispatch him.
+The configured PC Codex worker owns local project, code, and document inspection. The VPS Codex worker is only for work that explicitly names the VPS. The Hermes worker is explicit-only; never infer or auto-dispatch it.
 Never invent worker results, runtime facts, paths, endpoints, UI state, or completed actions."""
 FRIDAY_VOICE_SYSTEM_PROMPT = """You are the selected Codex worker speaking through Pandamonium voice.
 Be direct and conversational. Use the available tools when the request requires action, and never claim work or runtime facts you did not verify.
 Keep the complete answer in chat. When completing code, a script, a document, a report, or another deliverable, begin with one or two plain conversational sentences that summarize what is done and its key behavior, then place the full deliverable after that handoff. Do not put code, Markdown syntax, paths, or long lists in the opening handoff."""
 
+_WORKER_CATALOG = worker_catalog()
 WORKER_LABELS = {
-    "pc-codex": "Friday",
-    "hermes": "Gordon",
-    "vps-codex": "VPS Codex",
+    worker_id: str(details.get("label") or worker_id)
+    for worker_id, details in _WORKER_CATALOG.items()
 }
 _LEGACY_WORKER_NAMES = {
     "pc codex": ("pc-codex", "PC Codex"),
     "hermes": ("hermes", "Hermes"),
     "vps codex": ("vps-codex", "VPS Codex"),
 }
-VOICE_TARGET_LABELS = {**WORKER_LABELS, "hermes": "Gordon", "friday": "Friday"}
+CHATGPT_SUBSCRIPTION_LABEL = (
+    " ".join(os.getenv("ODYSSEUS_CHATGPT_SUBSCRIPTION_LABEL", "ChatGPT Subscription").split())[:80]
+    or "ChatGPT Subscription"
+)
+VOICE_TARGET_LABELS = {**WORKER_LABELS, "friday": CHATGPT_SUBSCRIPTION_LABEL}
 DIRECT_MODEL_TARGETS = {"jarvis", "friday"}
 VOICE_TARGET_ENDPOINT_NAMES = {
     "jarvis": ("Jarvis",),
@@ -857,11 +872,7 @@ def _set_user_time_from_request(request: Request) -> None:
 
 
 def _asks_read_all(text: str) -> bool:
-    return bool(re.search(
-        r"\b(?:read|speak|say)\s+(?:it\s+all|all\s+of\s+it|everything|the\s+(?:whole|full)\s+(?:thing|response|answer))\b",
-        text,
-        re.IGNORECASE,
-    ))
+    return asks_read_all(text)
 
 
 def _bounded_spoken_text(text: str, limit: int = 1200) -> str:
@@ -895,6 +906,26 @@ def _requested_artifact_kind(prompt: str) -> str | None:
         ("presentation", r"\b(?:presentation|slide deck|slides)\b"),
     )
     return next((kind for kind, pattern in kinds if re.search(pattern, prompt, re.IGNORECASE)), None)
+
+
+def _requested_file_handoff(prompt: str) -> bool:
+    return bool(
+        re.search(r"\b(?:find|list|show|open|get|read|inspect|check|locate|fetch|send|give)\b", prompt, re.IGNORECASE)
+        and re.search(r"\b(?:files?|documents?|reports?|attachments?)\b", prompt, re.IGNORECASE)
+    )
+
+
+def _file_spoken_handoff(prompt: str, response_text: str) -> str | None:
+    if not _requested_file_handoff(prompt):
+        return None
+    if re.search(
+        r"\b(?:could not|couldn't|cannot|can't|not found|failed to|unavailable)\b",
+        response_text,
+        re.IGNORECASE,
+    ):
+        return "I couldn't complete that file request. The details are in the chat."
+    plural = bool(re.search(r"\b(?:files|documents|reports|attachments)\b", prompt, re.IGNORECASE))
+    return "I found the files. They're available in the chat." if plural else "I found the file. It's available in the chat."
 
 
 def _structured_artifact_kind(response_text: str) -> str | None:
@@ -933,17 +964,65 @@ def _artifact_spoken_handoff(prompt: str, response_text: str) -> str | None:
 
 async def _select_spoken_text(prompt: str, response_text: str) -> str:
     response_text = response_text.strip()
-    if _asks_read_all(prompt):
-        return speech_text(response_text)
+    file_handoff = _file_spoken_handoff(prompt, response_text)
     artifact_handoff = _artifact_spoken_handoff(prompt, response_text)
-    if artifact_handoff:
-        return speech_text(artifact_handoff)
-    return speech_text(response_text)
+    kind = "tool" if file_handoff or artifact_handoff or structured_speech_kind(response_text) else "conversation"
+    return result_speech(
+        response_text,
+        kind=kind,
+        explicit_read_all=_asks_read_all(prompt),
+        handoff_text=file_handoff or artifact_handoff,
+    )["spoken_text"]
+
+
+def _speech_contract_for_final(prompt: str, final: dict[str, Any]) -> dict[str, str]:
+    response_text = str(final["assistant_text"]).strip()
+    diagnostics = final.get("diagnostics") or {}
+    guard_reason = str(diagnostics.get("guard_reason") or "").lower()
+    task_ids = final.get("task_ids") or diagnostics.get("task_ids") or []
+    tool_names = diagnostics.get("tool_names") or []
+    failure = any(marker in guard_reason for marker in ("failed", "blocked", "cancelled", "not_connected"))
+    approval = "approval_required" in guard_reason
+    worker = bool(task_ids) or "completed" in guard_reason
+    intent = classify_tool_intent(prompt)
+    prompted_tool = bool(
+        _requested_artifact_kind(prompt)
+        or _requested_file_handoff(prompt)
+        or (intent and intent.needs_tools)
+    )
+    kind = "approval" if approval else "failure" if failure else "worker" if worker else "tool" if tool_names or prompted_tool else "conversation"
+    label = "The agent" if worker or failure else "The tool"
+    file_handoff = _file_spoken_handoff(prompt, response_text) if kind == "tool" else None
+    artifact_handoff = _artifact_spoken_handoff(prompt, response_text) if kind == "tool" else None
+    return result_speech(
+        response_text,
+        kind=kind,
+        label=label,
+        explicit_read_all=_asks_read_all(prompt),
+        provided_spoken_text=str(final.get("spoken_text") or "") or None,
+        provided_speech_mode=str(final.get("speech_mode") or "") or None,
+        handoff_text=file_handoff or artifact_handoff,
+    )
 
 
 async def _spoken_text_for_final(prompt: str, final: dict[str, Any]) -> str:
-    response_text = str(final["assistant_text"]).strip()
-    return await _select_spoken_text(prompt, response_text)
+    return _speech_contract_for_final(prompt, final)["spoken_text"]
+
+
+def _should_stream_spoken_response(prompt: str, voice_session: dict[str, Any]) -> bool:
+    """Stream conversational speech, but wait for bounded handoff policy turns."""
+    if _asks_read_all(prompt):
+        return True
+    if _requested_artifact_kind(prompt) or _requested_file_handoff(prompt):
+        return False
+    intent = classify_tool_intent(prompt)
+    if intent and intent.needs_tools:
+        return False
+    if re.search(r"\b(?:code|logs?|tables?|raw\s+files?|file\s+contents?)\b", prompt, re.IGNORECASE):
+        return False
+    if str(voice_session.get("target") or "jarvis") not in DIRECT_MODEL_TARGETS:
+        return False
+    return _background_delegation(prompt) is None
 
 
 def _tts_voice_for_final(final: dict[str, Any]) -> str | None:
@@ -1314,7 +1393,7 @@ async def _handoff_greeting(
         elif target == "pc-codex":
             # The Codex bridge is a task harness, not a foreground chat API.
             # Keep the handoff instant instead of launching a deep task just to say hello.
-            reply = f"Friday here{_operator_vocative()}. What are we working on?"
+            reply = f"{label} here{_operator_vocative()}. What are we working on?"
             model = "odysseus-router"
         else:
             reply = f"{label} here{_operator_vocative()}. What do you need?"
@@ -1369,7 +1448,22 @@ def _num_predict_for_text(text: str) -> int:
 
 
 def _asks_runtime_status(text: str) -> bool:
-    return bool(re.search(r"\b(what|which|identify|runtime|model|architecture|quantization)\b.*\b(model|running|runtime|architecture|quantization)\b", text, re.IGNORECASE))
+    return bool(re.search(r"\b(what|which|identify|runtime|model|architecture|quantization|version)\b.*\b(model|running|runtime|architecture|quantization|version)\b", text, re.IGNORECASE))
+
+
+def _voice_runtime_status_reply(voice_session: dict[str, Any], chat_session: Any) -> str:
+    model = str(getattr(chat_session, "model", "") or "unknown model")
+    character = _voice_character_name(voice_session)
+    settings = load_settings()
+    provider = str(settings.get("tts_provider") or "disabled")
+    voice = (
+        _tts_voice_for_final({"diagnostics": {"character_name": character}})
+        or str(settings.get("tts_voice") or "default")
+    )
+    return (
+        f"Pandamonium is running version {APP_VERSION}. I am {character}, using {model} for this voice call. "
+        f"Speech is rendered through {provider}, using {voice}."
+    )
 
 
 def _asks_current_business(text: str) -> bool:
@@ -1606,16 +1700,8 @@ def _background_delegation(text: str) -> tuple[str, str] | None:
 
 
 def _selected_pc_codex_task_request(text: str) -> bool:
-    """Keep selected Friday conversational unless the operator clearly requests work."""
-    value = _voice_command_words(text)
-    return bool(re.match(
-        r"^(?:(?:task|job)(?: for)? friday(?: to| with)? )?"
-        r"(?:analy[sz]e|audit|build|change|check|compare|create|debug|deploy|diagnose|edit|"
-        r"find|fix|implement|inspect|investigate|load|open|patch|pull|push|read|restart|review|"
-        r"run|search|start|stop|test|update|verify|write)\b",
-        value,
-        re.IGNORECASE,
-    ))
+    """Use the same project-work boundary as selected Friday text chat."""
+    return is_explicit_project_work_request(text)
 
 
 def _is_document_open_request(text: str) -> bool:
@@ -1859,17 +1945,6 @@ def _setup_voice_speed(value: Any) -> float:
     return speed if 0.25 <= speed <= 4 else 1.0
 
 
-def _setup_logical_names(value: Any, *, limit: int = 16) -> list[str]:
-    if not isinstance(value, (list, tuple, set)):
-        return []
-    names = {
-        str(item).strip()
-        for item in value
-        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", str(item).strip())
-    }
-    return sorted(names)[:limit]
-
-
 async def _voice_status_snapshot(owner: str, stt_service: Any, tts_service: Any) -> dict[str, Any]:
     """Build one redacted setup snapshot shared by HTTP status and voice."""
     stt = _safe_service_stats(stt_service, "STT")
@@ -1891,17 +1966,22 @@ async def _voice_status_snapshot(owner: str, stt_service: Any, tts_service: Any)
     if not isinstance(raw_workers, dict):
         raw_workers = {}
     workers: list[dict[str, Any]] = []
-    for worker_id in WORKER_IDS:
-        details = raw_workers.get(worker_id)
-        details = details if isinstance(details, dict) else {}
-        configured = bool(details.get("configured"))
-        ready = bool(configured and details.get("ready"))
+    for worker_id, details in sorted(raw_workers.items()):
+        if (
+            not isinstance(details, dict)
+            or details.get("configured") is not True
+            or details.get("ready") is not True
+        ):
+            continue
+        capabilities = installation_capabilities(details)
+        if not capabilities:
+            continue
         workers.append({
             "id": worker_id,
-            "configured": configured,
-            "ready": ready,
-            "status": "ready" if ready else ("unavailable" if configured else "not_configured"),
-            "capabilities": _setup_logical_names(details.get("capabilities")),
+            "configured": True,
+            "ready": True,
+            "status": "ready",
+            "capabilities": capabilities,
         })
     stt_available = bool(stt.get("available"))
     tts_available = bool(tts.get("available"))
@@ -1916,9 +1996,9 @@ async def _voice_status_snapshot(owner: str, stt_service: Any, tts_service: Any)
             guidance.append("Enable an available text-to-speech provider.")
     ready_workers = sum(1 for worker in workers if worker["ready"])
     if ready_workers:
-        guidance.append(f"{ready_workers} of {len(workers)} optional fixed read-only workers are ready.")
+        guidance.append(f"{ready_workers} configured installation identities are reachable.")
     else:
-        guidance.append("Optional fixed read-only workers are not ready.")
+        guidance.append("No configured installation identities are reachable.")
     setup = {
         "version": 1,
         "command": "Check voice setup.",
@@ -2649,6 +2729,17 @@ async def _dispatch_worker_request(
     )
     catalog = compose_capability_catalog(fallback_names={"start_agent_task"})
     call["capability_version"] = catalog["version"]
+    record_operational_event(
+        request_id=request_id,
+        session_id=chat_session_id,
+        call_id=call["call_id"],
+        operator_id=operator_identity(owner),
+        actor=call["actor"],
+        component=call["target"],
+        event_type="started",
+        status="requested",
+        metadata={"capability": call["name"]},
+    )
     validation_error = validate_action_call(call, catalog)
     if validation_error:
         raise PermissionError(validation_error["category"])
@@ -2666,12 +2757,29 @@ async def _dispatch_worker_request(
         actor="odysseus:authority",
         component="control_plane",
         event_type="approval",
-        status={"allow": "succeeded", "deny": "denied"}.get(decision["decision"], "approval_required"),
+        status={"allow": "authorized", "deny": "denied"}.get(decision["decision"], "approval_required"),
         evidence_refs=[{"decision_id": decision["decision_id"]}],
-        metadata={"permission_mode": decision["permission_mode"], "policy_basis": decision["policy_basis"]},
+        metadata={
+            "permission_mode": decision["permission_mode"],
+            "action_effect": decision["action_effect"],
+            "gate_reason": decision["gate_reason"],
+            "policy_basis": decision["policy_basis"],
+        },
     )
     if decision["decision"] != "allow":
         raise PermissionError("worker_dispatch_not_authorized")
+    record_operational_event(
+        request_id=request_id,
+        session_id=chat_session_id,
+        call_id=call["call_id"],
+        operator_id=operator_identity(owner),
+        actor=call["actor"],
+        component=call["target"],
+        event_type="progress",
+        status="executed",
+        evidence_refs=[{"decision_id": decision["decision_id"]}],
+        metadata={"capability": call["name"]},
+    )
 
     started = time.monotonic()
     action = "blocked"
@@ -2701,6 +2809,10 @@ async def _dispatch_worker_request(
                 permission_mode,
                 False,
                 owner,
+                presenter=_voice_character_name(voice_session),
+                request_id=request_id,
+                call_id=call["call_id"],
+                authority_ref=call["authority_ref"],
             )
             action = "blocked" if task.get("status") == "blocked" or not task.get("task_id") else "started"
     except Exception as exc:
@@ -3016,25 +3128,27 @@ async def _server_routed_events(chat_session_id: str, text: str, owner: str, voi
                 workspace="home-lab",
             )
         except Exception as exc:
-            logger.warning("Direct Gordon turn failed: %s", str(exc)[:200])
-            reply = "Gordon is unavailable, so I did not send that through Jarvis."
+            label = WORKER_LABELS.get("hermes", "Hermes")
+            logger.warning("Direct Hermes turn failed: %s", str(exc)[:200])
+            reply = f"{label} is unavailable, so I did not send that through Jarvis."
             yield {"type": "assistant_delta", "text": reply, "model": "Pandamonium"}
             yield _server_final_event(
                 text,
                 reply,
-                "direct_gordon_unavailable",
+                "direct_hermes_unavailable",
                 direct_target="hermes",
                 character_name="Pandamonium",
                 model="odysseus-router",
             )
             return
-        yield {"type": "assistant_delta", "text": reply, "model": "Gordon"}
+        label = WORKER_LABELS.get("hermes", "Hermes")
+        yield {"type": "assistant_delta", "text": reply, "model": label}
         yield _server_final_event(
             text,
             reply,
-            "direct_gordon",
+            "direct_hermes",
             direct_target="hermes",
-            character_name="Gordon",
+            character_name=label,
             model="hermes-agent",
         )
         return
@@ -3128,6 +3242,7 @@ async def _server_routed_events(chat_session_id: str, text: str, owner: str, voi
                     "worker": worker,
                     "workspace": workspace,
                     "foreground": False,
+                    "presenter": task.get("presenter") or _voice_character_name(voice_session),
                 }
 
         if not compound:
@@ -3209,13 +3324,7 @@ async def _server_routed_events(chat_session_id: str, text: str, owner: str, voi
         chat_session = _voice_chat_session(chat_session_id)
         model = str(getattr(chat_session, "model", "") or "unknown model")
         character = _voice_character_name(voice_session)
-        settings = load_settings()
-        provider = str(settings.get("tts_provider") or "disabled")
-        voice = _tts_voice_for_final({"diagnostics": {"character_name": character}}) or str(settings.get("tts_voice") or "default")
-        reply = (
-            f"I am {character}, using {model} for this voice call. "
-            f"Speech is rendered through {provider}, using {voice}."
-        )
+        reply = _voice_runtime_status_reply(voice_session, chat_session)
         yield {"type": "assistant_delta", "text": reply}
         yield {
             "type": "final",
@@ -3254,6 +3363,7 @@ async def _server_routed_events(chat_session_id: str, text: str, owner: str, voi
                 "worker": worker,
                 "workspace": workspace,
                 "foreground": True,
+                "presenter": task.get("presenter") or _voice_character_name(voice_session),
             }
         foreground_status = ""
         foreground_reply = ""
@@ -3274,7 +3384,13 @@ async def _server_routed_events(chat_session_id: str, text: str, owner: str, voi
         else:
             reply = f"{label} is not connected, so I could not start the request."
         yield {"type": "assistant_delta", "text": reply}
-        yield _server_final_event(text, reply, f"selected_{action}_{worker}", task_ids)
+        yield _server_final_event(
+            text,
+            reply,
+            f"selected_{action}_{worker}",
+            task_ids,
+            task_delivery_pending=action in {"started", "steered"},
+        )
         return
 
     if _asks_current_business(text):
@@ -3308,6 +3424,7 @@ async def _server_routed_events(chat_session_id: str, text: str, owner: str, voi
                 "worker": "pc-codex",
                 "workspace": "business",
                 "foreground": False,
+                "presenter": task.get("presenter") or _voice_character_name(voice_session),
             }
         yield {"type": "assistant_delta", "text": reply}
         yield _server_final_event(
@@ -3325,6 +3442,27 @@ async def _jarvis_events(chat_session_id: str, text: str, owner: str, voice_sess
     chat_session = _SESSION_MANAGER.get_session(chat_session_id) if _SESSION_MANAGER else None
     if not chat_session:
         raise RuntimeError("voice_chat_session_not_found")
+    operator_text = text
+    approval_reply = authority_store.resolve_natural_reply(
+        text,
+        operator_id=str(operator_identity(owner) or ""),
+        session_id=chat_session_id,
+    )
+    if approval_reply and approval_reply["choice"] in {"deny", "stale", "repeat"}:
+        capability = str((approval_reply["decision"].get("capability") or {}).get("name") or "action")
+        if approval_reply["choice"] == "deny":
+            reply = f"Denied: {capability}. I will not run it."
+        elif approval_reply["choice"] == "repeat":
+            reply = f"That approval for {capability} was already handled. Nothing ran again."
+        else:
+            reply = f"That approval for {capability} is stale. Nothing ran; request the action again."
+        yield {"type": "assistant_delta", "text": reply}
+        yield _server_final_event(operator_text, reply, f"authority_{approval_reply['choice']}")
+        return
+    approved_action = approval_reply.get("pending_action") if approval_reply else None
+    if approval_reply:
+        decision = approval_reply["decision"]
+        capability = str((decision.get("capability") or {}).get("name") or "the pending action")
     voice_session["_protocol_request_id"] = str(uuid.uuid4())
     selected_target = str(voice_session.get("target") or "jarvis")
     origin_target = _voice_origin_target(voice_session, chat_session)
@@ -3332,8 +3470,23 @@ async def _jarvis_events(chat_session_id: str, text: str, owner: str, voice_sess
         selected_target == "pc-codex" and _selected_pc_codex_task_request(text)
     )
     if (
-        _oracle_protocol_intent(text, voice_session)
-        or _media_command(text)
+        selected_target == "pc-codex"
+        and not selected_pc_codex_task
+        and is_contextual_project_work_followup(text)
+    ):
+        try:
+            from src.jarvis_agent import find_active_task
+
+            selected_pc_codex_task = find_active_task(
+                chat_session_id,
+                "pc-codex",
+                str(voice_session.get("workspace") or "home-lab"),
+                owner,
+            ) is not None
+        except Exception:
+            selected_pc_codex_task = False
+    if (
+        _media_command(text)
         or _foreground_command(text)
         or _calendar_read_args(text)
         or _setup_status_command(text)
@@ -3375,6 +3528,8 @@ async def _jarvis_events(chat_session_id: str, text: str, owner: str, voice_sess
     full_response = ""
     task_ids: list[str] = []
     extension_tools_used: list[str] = []
+    tools_used: list[str] = []
+    pending_authority: dict[str, Any] | None = None
     started = time.perf_counter()
     first_token_ms: int | None = None
     metrics: dict[str, Any] = {}
@@ -3383,6 +3538,8 @@ async def _jarvis_events(chat_session_id: str, text: str, owner: str, voice_sess
         if selected_target == "pc-codex"
         else JARVIS_TOOLS
     )
+    if approval_reply:
+        voice_tools = voice_tools | {capability}
     extension_specs = _extension_tool_specs(voice_session) if selected_target == "jarvis" else []
     extension_names = {tool["name"] for tool in extension_specs}
     extension_schemas = _extension_tool_schemas(extension_specs)
@@ -3417,6 +3574,13 @@ async def _jarvis_events(chat_session_id: str, text: str, owner: str, voice_sess
             else None
         ),
         context_extensions=extension_context,
+        presenter=_voice_character_name(voice_session),
+        approved_action=approved_action,
+        persist_worker_results=selected_target != "pc-codex",
+        worker_workspace=(
+            str(voice_session.get("workspace") or "home-lab")
+            if selected_target == "pc-codex" else None
+        ),
     ):
         if not chunk.startswith("data: "):
             continue
@@ -3427,7 +3591,30 @@ async def _jarvis_events(chat_session_id: str, text: str, owner: str, voice_sess
             data = json.loads(payload)
         except json.JSONDecodeError:
             continue
-        if "delta" in data and not data.get("thinking"):
+        if data.get("type") == "authority_approval_required" and isinstance(data.get("data"), dict):
+            pending_authority = data["data"]
+            capability = str((pending_authority.get("capability") or {}).get("name") or "this action")
+            summary = f"Approval required for {capability}. I opened the exact decision in chat."
+            full_response = summary
+            if first_token_ms is None:
+                first_token_ms = int((time.perf_counter() - started) * 1000)
+            yield {"type": "authority_approval_required", "data": pending_authority}
+            yield {"type": "assistant_delta", "text": summary}
+        elif data.get("type") == "ui_control" and isinstance(data.get("data"), dict):
+            control = dict(data["data"])
+            ui_event = str(control.get("ui_event") or "")
+            if ui_event in {"oracle_protocol_engage", "oracle_protocol_shutdown"}:
+                active = ui_event == "oracle_protocol_engage"
+                voice_session["oracle_protocol_pending"] = False
+                voice_session["oracle_protocol_active"] = active
+                _set_extension_engaged(voice_session, "oracle", active)
+                voice_session_id = str(voice_session.get("id") or "")
+                if voice_session_id:
+                    _set_oracle_protocol_state(voice_session_id, pending=False, active=active)
+            yield {"type": "ui_control", **control}
+        elif "delta" in data and not data.get("thinking"):
+            if pending_authority:
+                continue
             delta = str(data.get("delta") or "")
             if delta and first_token_ms is None:
                 first_token_ms = int((time.perf_counter() - started) * 1000)
@@ -3447,6 +3634,8 @@ async def _jarvis_events(chat_session_id: str, text: str, owner: str, voice_sess
             }
         elif data.get("type") == "tool_output":
             tool = str(data.get("tool") or "")
+            if tool and tool not in tools_used:
+                tools_used.append(tool)
             if tool in extension_names:
                 extension_tools_used.append(tool)
             if tool == "start_agent_task":
@@ -3455,7 +3644,12 @@ async def _jarvis_events(chat_session_id: str, text: str, owner: str, voice_sess
                     task_id = str(tool_data.get("task_id") or "")
                     if task_id and task_id not in task_ids:
                         task_ids.append(task_id)
-                        yield {"type": "agent_task", "task_id": task_id, "worker": tool_data.get("worker")}
+                        yield {
+                            "type": "agent_task",
+                            "task_id": task_id,
+                            "worker": tool_data.get("worker"),
+                            "presenter": tool_data.get("presenter") or _voice_character_name(voice_session),
+                        }
                 except json.JSONDecodeError:
                     pass
         elif data.get("type") == "metrics":
@@ -3473,11 +3667,13 @@ async def _jarvis_events(chat_session_id: str, text: str, owner: str, voice_sess
         "num_predict": _num_predict_for_text(text),
         "inference": True,
         "guard_reason": (
-            "friday_conversation" if selected_target == "pc-codex"
+            "authority_approval_required" if pending_authority
+            else "friday_conversation" if selected_target == "pc-codex"
             else "extension_native_tools" if extension_tools_used
             else None
         ),
         "agent_metrics": metrics,
+        "tool_names": tools_used,
         "character_name": _voice_character_name(voice_session),
         "task_ids": task_ids,
     }
@@ -3536,6 +3732,25 @@ def _append_chat_message(session_manager, session: dict, role: str, text: str, *
         **{k: v for k, v in metadata.items() if v is not None},
     }
     try:
+        task_id = str(safe_metadata.get("task_id") or "")
+        if role == "assistant" and task_id and hasattr(session_manager, "get_session"):
+            try:
+                chat_session = session_manager.get_session(chat_session_id)
+                diagnostics = safe_metadata.get("diagnostics") or {}
+                foreground_result_consumed = (
+                    str(diagnostics.get("guard_reason") or "") == "selected_completed_pc-codex"
+                    and diagnostics.get("task_delivery_pending") is False
+                )
+                if any(
+                    message.role == "assistant"
+                    and str((message.metadata or {}).get("task_id") or "") == task_id
+                    and str((message.metadata or {}).get("source") or "") == "agent_worker"
+                    and (message.content == text or foreground_result_consumed)
+                    for message in (getattr(chat_session, "history", []) or [])[-8:]
+                ):
+                    return
+            except Exception:
+                pass
         session_manager.add_message(chat_session_id, ChatMessage(role, text, metadata=safe_metadata))
     except Exception as exc:
         logger.warning("Failed to append Jarvis voice turn to chat session %s: %s", chat_session_id, exc)
@@ -3979,7 +4194,7 @@ def setup_voice_routes(session_manager=None, stt_service=None, tts_service=None)
                 final: dict[str, Any] | None = None
                 handoff_greetings: list[dict[str, Any]] = []
                 audio_announced = False
-                stream_speech = _requested_artifact_kind(text) is None
+                stream_speech = _should_stream_spoken_response(text, turn_session)
                 yield f"data: {json.dumps({'type': 'state', 'state': 'thinking'})}\n\n"
                 async for event in _voice_events_with_heartbeats(
                     _jarvis_events(chat_session_id, text, owner, turn_session)
@@ -4040,8 +4255,12 @@ def setup_voice_routes(session_manager=None, stt_service=None, tts_service=None)
                     elif final_text.startswith(speech_turn.raw_text):
                         speech_turn.feed(final_text[len(speech_turn.raw_text):])
                     await speech_turn.complete()
+                    final["spoken_text"] = speech_turn.text
+                    final["speech_mode"] = "verbatim"
                 else:
-                    await speech_turn.complete(await _spoken_text_for_final(text, final))
+                    speech_contract = _speech_contract_for_final(text, final)
+                    final.update(speech_contract)
+                    await speech_turn.complete(speech_contract["spoken_text"])
                 spoken_text = speech_turn.text
                 final["diagnostics"]["spoken_chars"] = len(spoken_text)
                 if not audio_announced:

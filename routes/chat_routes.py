@@ -53,8 +53,11 @@ from src.tool_policy import (
     is_web_search_explicitly_denied,
     web_search_enabled_for_turn,
 )
-from src.authority_protocol import operator_identity
+from src.authority_protocol import authority_store, operator_identity
 from src.operational_protocol import record_operational_event
+from src.worker_routing import (
+    selected_worker_workspace as _selected_worker_workspace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,68 @@ _active_streams: Dict[str, dict] = {}
 _IMAGE_MODEL_PREFIXES = ("gpt-image", "dall-e", "chatgpt-image")
 _HERMES_AGENT_ENDPOINT_NAME = "Hermes API"
 _HERMES_AGENT_MODEL = "hermes-agent"
+
+
+def _authoritative_agent_target(session, requested: str = "") -> str:
+    """Prefer the persisted session target over caller-supplied routing state."""
+    stored_value = getattr(session, "agent_target", "")
+    stored = stored_value.strip() if isinstance(stored_value, str) else ""
+    return stored or str(requested or "").strip()
+
+
+def _selected_agent_context(label: str) -> str:
+    return (
+        f"The operator explicitly selected {label} for this conversation. Present every response as {label}; "
+        "the configured reasoning model remains a replaceable inference engine and does not change identity."
+    )
+
+
+async def _direct_selected_identity_turn(
+    worker: str,
+    *,
+    session_id: str,
+    message: str,
+    owner: str,
+    workspace: str,
+    presenter: str,
+    codex_thread_id: str | None = None,
+) -> tuple[str, Any, str]:
+    """Route non-Jarvis selections without sending them through Jarvis's model."""
+    from src.jarvis_agent import direct_codex_turn, direct_hermes_turn
+
+    if worker == "hermes":
+        return "response", await direct_hermes_turn(
+            session_id, message, owner=owner, workspace=workspace,
+        ), "completed"
+    if worker == "pc-codex":
+        task, action = await direct_codex_turn(
+            session_id,
+            message,
+            owner=owner,
+            workspace=workspace,
+            presenter=presenter,
+            codex_thread_id=codex_thread_id,
+        )
+        return "task", task, action
+    raise ValueError("unsupported_conversation_target")
+
+
+def _retire_synthesized_worker_results(metrics: dict, owner: str, session_id: str) -> None:
+    """Remove provisional raw worker messages only after Jarvis is durably saved."""
+    from src.jarvis_agent import consume_task_result
+
+    task_ids = {
+        str(event.get("task_id") or "")
+        for event in (metrics.get("tool_events") or [])
+        if event.get("tool") == "read_agent_task"
+        and event.get("task_status") == "completed"
+        and event.get("task_id")
+    }
+    for task_id in task_ids:
+        try:
+            consume_task_result(task_id, owner=owner, session_id=session_id)
+        except Exception:
+            logger.exception("Could not retire synthesized worker result %s", task_id)
 
 
 def _resolve_hermes_agent_backend(owner: Optional[str] = None):
@@ -644,11 +709,25 @@ def setup_chat_routes(
         use_research = form_data.get("use_research")
         time_filter = form_data.get("time_filter")
         preset_id = form_data.get("preset_id")
+        agent_target = str(form_data.get("agent_target") or "").strip()
+        worker_workspace = str(form_data.get("worker_workspace") or "").strip()
+        worker_thread_id = str(form_data.get("worker_thread_id") or "").strip()
         # Issue #3229: API callers send JSON, not FormData.  Read from the
         # JSON body as fallback so callers who send {"allow_bash": true}
         # actually get bash enabled.
-        allow_bash = form_data.get("allow_bash") or (body or {}).get("allow_bash")
-        allow_web_search = form_data.get("allow_web_search") or (body or {}).get("allow_web_search")
+        allow_bash = form_data.get("allow_bash")
+        allow_web_search = form_data.get("allow_web_search")
+        if isinstance(body, dict):
+            if allow_bash is None and "allow_bash" in body:
+                allow_bash = body["allow_bash"]
+            if allow_web_search is None and "allow_web_search" in body:
+                allow_web_search = body["allow_web_search"]
+            if not agent_target:
+                agent_target = str(body.get("agent_target") or "").strip()
+            if not worker_workspace:
+                worker_workspace = str(body.get("worker_workspace") or "").strip()
+            if not worker_thread_id:
+                worker_thread_id = str(body.get("worker_thread_id") or "").strip()
         use_rag = form_data.get("use_rag")
         search_context = form_data.get("search_context")  # pre-fetched web search results (compare mode)
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
@@ -781,6 +860,30 @@ def setup_chat_routes(
             _verify_session_owner(request, session)
             sess = session_manager.get_session(session)
             owner = effective_user(request)
+            # The session row owns conversational routing. A stale or forged
+            # browser value cannot silently move an established conversation.
+            agent_target = _authoritative_agent_target(sess, agent_target)
+            selected_agent_label = ""
+            selected_agent_workspace = None
+            selected_agent_worker = ""
+            if agent_target:
+                from src.agent_worker_adapters import worker_catalog
+                from src.agent_identity import configured_agent_name
+
+                details = worker_catalog().get(agent_target)
+                if agent_target == "jarvis":
+                    selected_agent_label = configured_agent_name()
+                    selected_agent_worker = "jarvis"
+                elif not details or not details.get("configured"):
+                    raise HTTPException(400, "Selected agent is not configured")
+                else:
+                    selected_agent_label = str(details.get("label") or agent_target)[:80]
+                    selected_agent_worker = agent_target
+                    selected_agent_workspace = _selected_worker_workspace(agent_target, str(message or ""))
+                    if agent_target == "pc-codex" and worker_workspace:
+                        if worker_workspace not in set(details.get("workspaces") or []):
+                            raise HTTPException(400, "Selected project is not allowlisted")
+                        selected_agent_workspace = worker_workspace
             if _clear_orphaned_session_endpoint(sess, owner=owner):
                 raise HTTPException(400, "Selected model endpoint was removed. Pick another model in Settings.")
             # Issue #587: picker shows a model from the endpoint cache but
@@ -806,6 +909,11 @@ def setup_chat_routes(
                     _tool_intent.category,
                     _tool_intent.reason,
                 )
+            _approval_reply = authority_store.resolve_natural_reply(
+                message,
+                operator_id=str(operator_identity(owner) or ""),
+                session_id=session,
+            )
         except SessionNotFoundError as e:
             raise HTTPException(404, str(e))
         except (ValueError, ValidationError):
@@ -875,8 +983,15 @@ def setup_chat_routes(
             agent_mode=(chat_mode == "agent" and not hermes_agent_api),
             allow_tool_preprocessing=allow_tool_preprocessing,
         )
+        active_character_name = selected_agent_label or ctx.preset.character_name
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope
+        _model_message = message
+        _approved_action = (
+            _approval_reply.get("pending_action")
+            if _approval_reply and _approval_reply.get("choice") == "approve"
+            else None
+        )
 
         # Query active document — prefer explicit ID from frontend, fall back to session lookup
         active_doc = None
@@ -967,22 +1082,22 @@ def setup_chat_routes(
         finally:
             _doc_db.close()
 
-        # Build disabled-tools set from frontend toggles + user privileges
+        # Build disabled-tools from legacy caller constraints and privileges.
+        # First-party adaptive requests omit per-turn Web/Shell flags; prompt
+        # intent selects schemas while these explicit legacy flags only narrow.
         disabled_tools = set()
         # Only disable bash when the caller *explicitly* set it to a falsy
         # value. When unset (None), defer to per-user privilege checks below.
-        # Web search is per-turn opt-in: either the chat pre-search setting
-        # (`use_web=true`) or agent web toggle (`allow_web_search=true`) must
-        # explicitly enable it.
         if allow_bash is not None and str(allow_bash).lower() != "true":
             disabled_tools.add("bash")
         _explicit_web_intent = bool(_tool_intent and _tool_intent.category == "web")
-        if is_web_search_explicitly_denied(allow_web_search) or not _search_enabled:
+        _web_explicitly_denied = is_web_search_explicitly_denied(allow_web_search)
+        if _web_explicitly_denied:
             disabled_tools.update(WEB_TOOL_NAMES)
         if _explicit_web_intent:
             # A direct lookup/search request should not drift into personal
             # tools or shell fallbacks. It can only use web_search/web_fetch
-            # when the request's explicit web setting enabled them.
+            # when configured policy has not explicitly denied them.
             disabled_tools.update({
                 "bash", "python",
                 "search_chats", "manage_skills", "manage_memory",
@@ -992,7 +1107,7 @@ def setup_chat_routes(
                 "manage_notes", "manage_calendar", "read_calendar", "manage_tasks",
                 "api_call", "builtin_browser",
             })
-            if _search_enabled:
+            if not _web_explicitly_denied:
                 disabled_tools.difference_update(WEB_TOOL_NAMES)
             else:
                 disabled_tools.update(WEB_TOOL_NAMES)
@@ -1158,6 +1273,133 @@ def setup_chat_routes(
             if ctx.used_memories:
                 yield f"data: {json.dumps({'type': 'memories_used', 'data': ctx.used_memories})}\n\n"
 
+            if _approval_reply and _approval_reply["choice"] in {"deny", "stale", "repeat"}:
+                _capability = str((_approval_reply["decision"].get("capability") or {}).get("name") or "action")
+                if _approval_reply["choice"] == "deny":
+                    reply = f"Denied: {_capability}. I will not run it."
+                elif _approval_reply["choice"] == "repeat":
+                    reply = f"That approval for {_capability} was already handled. Nothing ran again."
+                else:
+                    reply = f"That approval for {_capability} is stale. Nothing ran; request the action again."
+                metrics = {
+                    "model": "pandamonium-authority",
+                    "requested_model": sess.model,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_time": 0,
+                    "response_time": 0,
+                    "agent_rounds": 0,
+                    "tool_calls": 0,
+                }
+                yield f'data: {json.dumps({"type": "model_info", "model": sess.model})}\n\n'
+                yield f'data: {json.dumps({"delta": reply})}\n\n'
+                _saved_id = save_assistant_response(
+                    sess,
+                    session_manager,
+                    session,
+                    reply,
+                    metrics,
+                    character_name=active_character_name,
+                    incognito=incognito,
+                )
+                if _saved_id:
+                    yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                yield f'data: {json.dumps({"type": "metrics", "data": metrics})}\n\n'
+                yield "data: [DONE]\n\n"
+                _stream_set(session, status="done")
+                _active_streams.pop(session, None)
+                return
+
+            if selected_agent_worker in {"hermes", "pc-codex"}:
+                route_started = time.monotonic()
+                route_model = selected_agent_label or selected_agent_worker
+                metrics = {
+                    "model": route_model,
+                    "requested_model": route_model,
+                    "route": selected_agent_worker,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "response_time": 0,
+                    "agent_rounds": 0,
+                    "tool_calls": 0,
+                }
+                yield f'data: {json.dumps({"type": "model_info", "model": route_model, "character_name": selected_agent_label})}\n\n'
+                try:
+                    session_manager.save_sessions()
+                    kind, payload, action = await _direct_selected_identity_turn(
+                        selected_agent_worker,
+                        session_id=session,
+                        message=str(message or ""),
+                        owner=_user,
+                        workspace=selected_agent_workspace or "home-lab",
+                        presenter=selected_agent_label,
+                        codex_thread_id=worker_thread_id or None,
+                    )
+                    if kind == "response":
+                        reply = str(payload or "").strip()
+                        if not reply:
+                            raise RuntimeError("selected_agent_returned_no_response")
+                        yield f'data: {json.dumps({"delta": reply})}\n\n'
+                        saved_id = save_assistant_response(
+                            sess,
+                            session_manager,
+                            session,
+                            reply,
+                            metrics,
+                            character_name=selected_agent_label,
+                            incognito=incognito,
+                        )
+                        if saved_id:
+                            yield f'data: {json.dumps({"type": "message_saved", "id": saved_id})}\n\n'
+                    else:
+                        from src.jarvis_agent import list_session_tasks
+
+                        safe_task = next(
+                            (
+                                row for row in list_session_tasks(session, _user)
+                                if row.get("task_id") == payload.get("task_id")
+                            ),
+                            {},
+                        )
+                        if not safe_task:
+                            raise RuntimeError("selected_task_snapshot_unavailable")
+                        yield f'data: {json.dumps({"type": "agent_task", "action": action, **safe_task})}\n\n'
+                        if action == "blocked":
+                            reply = f"{selected_agent_label} is unavailable. The request was not rerouted."
+                            yield f'data: {json.dumps({"delta": reply})}\n\n'
+                            saved_id = save_assistant_response(
+                                sess,
+                                session_manager,
+                                session,
+                                reply,
+                                metrics,
+                                character_name=selected_agent_label,
+                                incognito=incognito,
+                            )
+                            if saved_id:
+                                yield f'data: {json.dumps({"type": "message_saved", "id": saved_id})}\n\n'
+                except Exception:
+                    logger.exception("Direct selected-identity route failed for %s", selected_agent_worker)
+                    reply = f"{selected_agent_label} is unavailable. The request was not rerouted."
+                    yield f'data: {json.dumps({"delta": reply})}\n\n'
+                    saved_id = save_assistant_response(
+                        sess,
+                        session_manager,
+                        session,
+                        reply,
+                        metrics,
+                        character_name=selected_agent_label,
+                        incognito=incognito,
+                    )
+                    if saved_id:
+                        yield f'data: {json.dumps({"type": "message_saved", "id": saved_id})}\n\n'
+                metrics["response_time"] = round(time.monotonic() - route_started, 3)
+                yield f'data: {json.dumps({"type": "metrics", "data": metrics})}\n\n'
+                yield "data: [DONE]\n\n"
+                _stream_set(session, status="done")
+                _active_streams.pop(session, None)
+                return
+
             # Run research as a background task (survives page refresh)
             if effective_do_research:
                 _r_ep, _r_model, _r_headers = _resolve_research_endpoint(sess)
@@ -1282,12 +1524,18 @@ def setup_chat_routes(
             if hermes_agent_api:
                 raw_history_count = len(sess.get_context_messages())
                 messages = _hermes_agent_context_messages(sess)
-                messages = _ensure_current_request_is_latest_user(messages, message)
+                messages = _ensure_current_request_is_latest_user(messages, _model_message)
                 logger.info(
                     "Hermes API passthrough: stripped Pandamonium context preface and local-chat assistant turns (%d ctx -> %d raw -> %d sent messages)",
                     len(ctx.messages), raw_history_count, len(messages))
             else:
-                messages = _ensure_current_request_is_latest_user(ctx.messages, message)
+                messages = _ensure_current_request_is_latest_user(ctx.messages, _model_message)
+            if selected_agent_worker == "jarvis" and selected_agent_label:
+                messages = [
+                    *messages[:-1],
+                    {"role": "system", "content": _selected_agent_context(selected_agent_label)},
+                    messages[-1],
+                ]
             if text_extension_bridge:
                 messages = [
                     *messages[:-1],
@@ -1327,8 +1575,8 @@ def setup_chat_routes(
             _model_info = {"type": "model_info", "model": sess.model}
             if _model_suffix:
                 _model_info["suffix"] = _model_suffix
-            if ctx.preset.character_name:
-                _model_info["character_name"] = ctx.preset.character_name
+            if active_character_name:
+                _model_info["character_name"] = active_character_name
             yield f'data: {json.dumps(_model_info)}\n\n'
 
             if _is_image_generation_session(sess, owner=_user):
@@ -1496,7 +1744,7 @@ def setup_chat_routes(
                                     _metrics_to_save["thinking"] = thinking_response.strip()
                                 _saved_id = save_assistant_response(
                                     sess, session_manager, session, full_response, _metrics_to_save,
-                                    character_name=ctx.preset.character_name,
+                                    character_name=active_character_name,
                                     web_sources=web_sources,
                                     rag_sources=ctx.rag_sources,
                                     research_sources=research_sources,
@@ -1510,7 +1758,7 @@ def setup_chat_routes(
                                     sess, session_manager, session, message, full_response,
                                     _metrics_to_save, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
                                     incognito=incognito, compare_mode=compare_mode,
-                                    character_name=ctx.preset.character_name,
+                                    character_name=active_character_name,
                                     owner=_user,
                                     allow_background_extraction=(not hermes_agent_api and not tool_policy.block_all_tool_calls),
                                 )
@@ -1600,7 +1848,9 @@ def setup_chat_routes(
                     if text_extension_bridge:
                         _forced_tools.update(text_extension_bridge["tool_names"])
                         _forced_tools.add("ui_control")
-
+                    if _approval_reply and _approval_reply["choice"] == "approve":
+                        _forced_tools.add(str((_approval_reply["decision"].get("capability") or {}).get("name") or ""))
+                        _forced_tools.discard("")
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
                         sess.model,
@@ -1629,6 +1879,15 @@ def setup_chat_routes(
                         context_extensions=(text_extension_bridge or {}).get("context_extensions"),
                         uploaded_files=ctx.uploaded_files,
                         base_context_manifest=ctx.context_manifest,
+                        presenter=active_character_name or None,
+                        approved_action=_approved_action,
+                        persist_worker_results=not bool(selected_agent_label),
+                        worker_workspace=selected_agent_workspace,
+                        worker_target=(
+                            selected_agent_worker
+                            if selected_agent_worker and selected_agent_worker != "jarvis"
+                            else None
+                        ),
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1710,19 +1969,21 @@ def setup_chat_routes(
                                     _metrics_to_save["thinking"] = thinking_response.strip()
                                 _saved_id = save_assistant_response(
                                     sess, session_manager, session, _response_to_save, _metrics_to_save,
-                                    character_name=ctx.preset.character_name,
+                                    character_name=active_character_name,
                                     web_sources=web_sources,
                                     rag_sources=ctx.rag_sources,
                                     used_memories=ctx.used_memories,
                                     incognito=incognito,
                                 )
                                 if _saved_id:
+                                    if full_response:
+                                        _retire_synthesized_worker_results(_metrics_to_save, _user, session)
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
                                 run_post_response_tasks(
                                     sess, session_manager, session, message, _response_to_save,
                                     _metrics_to_save, ctx.uprefs, memory_manager, memory_vector, webhook_manager,
                                     incognito=incognito, compare_mode=compare_mode,
-                                    character_name=ctx.preset.character_name,
+                                    character_name=active_character_name,
                                                             agent_rounds=_agent_rounds,
                                     agent_tool_calls=_agent_tool_calls,
                                     skills_manager=skills_manager,

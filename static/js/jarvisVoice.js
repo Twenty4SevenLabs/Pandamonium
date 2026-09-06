@@ -3,6 +3,7 @@
 
 import markdownModule from './markdown.js';
 import { collectClientState, handleUIControl } from './chatStream.js';
+import { renderAuthorityApprovalCard, restorePendingAuthorityDecision } from './chatRenderer.js';
 import voiceOrbMedia from './voiceOrbMedia.js';
 import { getBrandName } from './brand.js';
 
@@ -151,31 +152,27 @@ const VOICE_PROTOCOL_CONTROL_ALLOWLIST = new Set([
 ]);
 const WORKER_LABELS = {
   jarvis: 'Jarvis',
-  'pc-codex': 'Friday',
-  hermes: 'Gordon',
+  'pc-codex': 'PC Codex',
+  hermes: 'Hermes',
   'vps-codex': 'VPS Codex',
 };
-const VOICE_TARGET_LABELS = { ...WORKER_LABELS, hermes: 'Gordon', friday: 'Friday' };
+const VOICE_TARGET_LABELS = { ...WORKER_LABELS, friday: 'ChatGPT Subscription' };
 let workerCatalog = {
   jarvis: { enabled: true, machine: 'Self-hosted', connection: { state: 'connected' } },
-  'pc-codex': { enabled: true, machine: 'Local workstation', connection: { state: 'checking' } },
-  hermes: { enabled: false, machine: 'Hermes laptop', connection: { state: 'gated' } },
+  'pc-codex': { enabled: false, machine: 'Local workstation', connection: { state: 'gated' } },
+  hermes: { enabled: false, machine: 'Remote agent', connection: { state: 'gated' } },
   'vps-codex': { enabled: false, machine: 'Remote server', connection: { state: 'gated' } },
 };
-
-function voiceTargetForModel(modelId, endpointUrl = '') {
-  const model = String(modelId || '').trim().toLowerCase().split('/').pop();
-  if (model === 'hermes-agent') return 'hermes';
-  if (String(endpointUrl || '').toLowerCase().includes('chatgpt.com/backend-api/codex')) return 'friday';
-  return 'jarvis';
-}
+let selectorEntries = [];
+let selectorCatalogState = 'loading';
 
 function $(id) {
   return document.getElementById(id);
 }
 
 function voiceTargetLabel(target = voiceTarget) {
-  return target === 'jarvis' ? getBrandName() : (VOICE_TARGET_LABELS[target] || target);
+  return workerCatalog[target]?.label
+    || (target === 'jarvis' ? getBrandName() : (VOICE_TARGET_LABELS[target] || target));
 }
 
 function isCurrentVoiceCall(callGeneration) {
@@ -1707,6 +1704,44 @@ function refreshAgentControl() {
   });
 }
 
+function renderSelectorMenu() {
+  const menu = $('jarvis-agent-menu');
+  const cancel = $('jarvis-agent-cancel');
+  if (!menu || !cancel) return;
+  menu.querySelectorAll('.jarvis-selector-generated, .jarvis-selector-status').forEach(node => node.remove());
+  if (selectorCatalogState === 'loading' || selectorCatalogState === 'error' || !selectorEntries.length) {
+    const statusNode = document.createElement('div');
+    statusNode.className = `jarvis-selector-status${selectorCatalogState === 'error' ? ' is-error' : ''}`;
+    statusNode.setAttribute('role', selectorCatalogState === 'error' ? 'alert' : 'status');
+    statusNode.textContent = selectorCatalogState === 'loading'
+      ? 'Discovering who you can talk to…'
+      : (selectorCatalogState === 'error'
+        ? 'Selector discovery failed. The active target was not rerouted.'
+        : 'No configured identities are available.');
+    menu.insertBefore(statusNode, cancel);
+    if (!selectorEntries.length) return;
+  }
+  selectorEntries.forEach(entry => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'jarvis-target jarvis-selector-generated';
+    button.setAttribute('role', 'menuitemradio');
+    button.dataset.worker = entry.target;
+    button.setAttribute('aria-checked', entry.target === voiceTarget ? 'true' : 'false');
+    button.classList.toggle('is-active', entry.target === voiceTarget);
+    button.disabled = !entry.selectable;
+    button.title = entry.selectable ? entry.display : `${entry.display} is unavailable: ${entry.reason}`;
+    const name = document.createElement('span');
+    name.textContent = entry.display;
+    const detail = document.createElement('small');
+    detail.textContent = entry.selectable
+      ? entry.detail
+      : `${entry.detail} · unavailable: ${entry.reason.replace(/_/g, ' ')}`;
+    button.append(name, detail);
+    menu.insertBefore(button, cancel);
+  });
+}
+
 function refreshVoiceIdentity(refreshDetail = false) {
   const voiceName = voiceTargetLabel();
   document.querySelectorAll('.jarvis-call-name').forEach(element => {
@@ -1735,18 +1770,63 @@ function refreshVoiceIdentity(refreshDetail = false) {
 }
 
 async function loadWorkerCatalog() {
+  selectorCatalogState = 'loading';
+  renderSelectorMenu();
   try {
-    const workers = await fetchJson('/api/agent-workers');
-    workerCatalog = { ...workerCatalog, ...workers };
+    const payload = await fetchJson('/api/selector-catalog');
+    if (payload?.discovery?.schema_version !== 'pandamonium.discovery.v1') {
+      throw new Error('invalid_selector_catalog');
+    }
+    const entities = Array.isArray(payload?.discovery?.entities) ? payload.discovery.entities : [];
+    const entityById = new Map(entities.map(entity => [entity.id, entity]));
+    selectorEntries = (Array.isArray(payload?.selections) ? payload.selections : []).flatMap(selection => {
+      const entity = entityById.get(selection.entity_id);
+      if (!entity || !['agent', 'worker'].includes(entity.kind) || !selection.target) return [];
+      const capabilities = Array.isArray(selection.capabilities) ? selection.capabilities : [];
+      return [{
+        kind: entity.kind,
+        target: String(selection.target || ''),
+        display: String(entity.display_name || 'Configured choice'),
+        detail: capabilities.includes('codex')
+          ? 'Workstation Codex'
+          : (capabilities.includes('hermes')
+            ? 'Hermes'
+            : (capabilities.includes('claude')
+              ? 'Claude'
+              : (capabilities.includes('model') ? 'Self-hosted model' : 'Configured identity'))),
+        selectable: selection.selectable === true,
+        reason: String(selection.reason || entity.health?.reason || 'unavailable'),
+        health: String(entity.health?.state || 'unknown'),
+      }];
+    });
+    selectorEntries.filter(entry => entry.kind !== 'model' && entry.target).forEach(entry => {
+      workerCatalog[entry.target] = {
+        ...(workerCatalog[entry.target] || {}),
+        label: entry.display,
+        enabled: entry.selectable,
+        configured: true,
+        machine: entry.detail,
+        connection: { state: entry.selectable ? 'connected' : entry.reason },
+      };
+      WORKER_LABELS[entry.target] = entry.display;
+      VOICE_TARGET_LABELS[entry.target] = entry.display;
+    });
+    selectorCatalogState = 'ready';
+    const pcLabel = $('set-ttsPcCodexLabel');
+    const hermesLabel = $('set-ttsHermesLabel');
+    if (pcLabel) pcLabel.textContent = voiceTargetLabel('pc-codex');
+    if (hermesLabel) hermesLabel.textContent = voiceTargetLabel('hermes');
   } catch (error) {
-    console.warn('Could not load Jarvis worker status:', error);
+    selectorCatalogState = 'error';
+    console.warn('Could not load the shared selector catalog:', error);
   }
+  renderSelectorMenu();
   refreshAgentControl();
 }
 
 function setVoiceTarget(worker, persist = true) {
   const details = workerCatalog[worker];
-  if (worker !== 'jarvis' && details && !details.enabled) {
+  if (worker !== 'jarvis' && worker !== 'friday' && (!details || !details.enabled)) {
     showToast(`${voiceTargetLabel(worker)} is not connected yet.`);
     return false;
   }
@@ -1943,7 +2023,7 @@ function updateActivitySummary(group, task) {
   const duration = group.querySelector('.jarvis-task-duration');
   const worker = group.querySelector('.jarvis-task-worker');
   if (duration) duration.textContent = activityTitle(task);
-  if (worker) worker.textContent = WORKER_LABELS[task.worker] || task.worker || 'Worker';
+  if (worker) worker.textContent = task.presenter || WORKER_LABELS[task.worker] || task.worker || 'Worker';
 }
 
 function ensureActivityTicker() {
@@ -1995,6 +2075,27 @@ function restoreActivityGroupsToChat() {
 function positionWorkerResult(result, taskId) {
   const group = taskActivityElement(taskId);
   if (group && result && group.parentElement !== result.parentElement) group.after(result);
+}
+
+function renderWorkerResult(event, task, replaceMessage = null) {
+  const taskId = String(task?.task_id || event?.task_id || '');
+  if (!taskId || !event?.text) return null;
+  let result = taskMessageElements(taskId).find(item => item.dataset.source === 'agent_worker');
+  if (!result) {
+    result = window.chatModule?.addMessage?.('assistant', event.text, '', {
+      source: 'agent_worker',
+      worker: event.worker || task?.worker,
+      task_id: taskId,
+      character_name: task?.presenter || 'Jarvis',
+    }) || null;
+  }
+  if (result && replaceMessage && replaceMessage !== result) {
+    replaceMessage.remove();
+    if (liveAssistantMessage === replaceMessage) liveAssistantMessage = null;
+  }
+  positionWorkerResult(result, taskId);
+  window.uiModule?.scrollHistory?.();
+  return result;
 }
 
 function setActivityStatus(group, task, status) {
@@ -2092,6 +2193,13 @@ function appendActivityAction(row, event) {
     row.appendChild(open);
   }
   if (event.type === 'artifact' && event.metadata?.document_id) {
+    const citation = document.createElement('code');
+    citation.className = 'jarvis-task-artifact-citation';
+    citation.textContent = String(event.metadata.citation || event.metadata.source_path || 'workspace artifact');
+    citation.title = event.metadata.review_mode === 'reversible_edit'
+      ? 'Reversible edit ready for review'
+      : 'Read-only workspace citation';
+    row.appendChild(citation);
     const open = document.createElement('button');
     open.type = 'button';
     open.className = 'jarvis-task-event-action';
@@ -2225,18 +2333,15 @@ function positionWorkerSummary(summary, taskId, afterResult = false) {
 function renderWorkerSummary(event, task) {
   const metadata = event.metadata || {};
   const text = String(event.spoken_text || '').trim();
-  const isResultSummary = event.type === 'result';
-  const isBrokerSummary = isResultSummary || (
-    event.type === 'progress'
-    && (metadata.progress_summary === true || metadata.milestone === true)
-  );
+  const isBrokerSummary = event.type === 'progress'
+    && (metadata.progress_summary === true || metadata.milestone === true);
   if (!isBrokerSummary || !text || !taskVisible(task)) return null;
 
   const eventId = String(event.event_id || '').trim();
   const existing = findWorkerSummary(event.task_id, eventId, text);
   if (existing) {
-    existing.dataset.summaryType = isResultSummary ? 'result' : 'progress';
-    positionWorkerSummary(existing, event.task_id, isResultSummary);
+    existing.dataset.summaryType = 'progress';
+    positionWorkerSummary(existing, event.task_id);
     return existing;
   }
 
@@ -2245,11 +2350,11 @@ function renderWorkerSummary(event, task) {
     worker: event.worker,
     task_id: event.task_id,
     worker_event_id: eventId,
-    character_name: 'Jarvis',
+    character_name: task.presenter || 'Jarvis',
   }) || null;
   if (summary && eventId) summary.dataset.workerEventId = eventId;
-  if (summary) summary.dataset.summaryType = isResultSummary ? 'result' : 'progress';
-  positionWorkerSummary(summary, event.task_id, isResultSummary);
+  if (summary) summary.dataset.summaryType = 'progress';
+  positionWorkerSummary(summary, event.task_id);
   window.uiModule?.scrollHistory?.();
   return summary;
 }
@@ -2325,16 +2430,18 @@ function enqueueSpeech(text, type = 'speech', source = 'jarvis', timings = {}) {
 }
 
 function workerSpeech(event) {
-  const label = WORKER_LABELS[event.worker] || event.worker || 'Worker';
-  if (event.type === 'approval_required') return `${label} is requesting approval. Please take a look.`;
-  if (event.type === 'question') return `${label} has a question. Please take a look.`;
-  if (event.type === 'error') return `${label} hit a problem. Please take a look.`;
-  const source = event.type === 'result'
-    ? (event.spoken_text || `${label} finished. The full result is in chat.`)
-    : event.type === 'progress'
-      ? (event.spoken_text || '')
-      : '';
+  const label = event.presenter || WORKER_LABELS[event.worker] || event.worker || 'Worker';
+  const fallback = {
+    approval_required: `${label} is requesting approval. Approve or deny the exact request in chat.`,
+    question: `${label} has a question. The complete question is in chat.`,
+    error: `${label} failed. Review the useful error and next action in chat.`,
+    result: `${label} finished. The full result is in chat.`,
+  }[event.type] || '';
+  const source = event.type === 'error'
+    ? (event.spoken_text || fallback)
+    : (event.spoken_text || event.text || fallback);
   const clean = (window.aiTTSManager?.extractPlainText?.(source) || source).trim();
+  if (event.speech_mode === 'verbatim') return clean;
   if (clean.length <= WORKER_SPEECH_MAX_CHARS) return clean;
   const clipped = clean.slice(0, WORKER_SPEECH_MAX_CHARS - 1);
   const boundary = Math.max(clipped.lastIndexOf('. '), clipped.lastIndexOf(' '));
@@ -2466,6 +2573,7 @@ async function handleWorkerEvent(event) {
     ...prior,
     task_id: taskId,
     worker: event.worker || prior.worker,
+    presenter: event.presenter || prior.presenter,
     events,
     updated_at: event.created_at || Date.now() / 1000,
   });
@@ -2483,23 +2591,14 @@ async function handleWorkerEvent(event) {
   }
   if (event.type === 'artifact' && isActive) await openWorkerArtifact(event);
   if (event.type === 'result'
+      && task?.foreground !== true
       && event.text
       && taskVisible(task)) {
-    let result = taskMessageElements(taskId).find(item => item.dataset.source === 'agent_worker');
-    if (!result) {
-      result = window.chatModule?.addMessage?.('assistant', event.text, '', {
-        source: 'agent_worker',
-        worker: event.worker,
-        task_id: taskId,
-        character_name: WORKER_LABELS[event.worker] || event.worker || 'Worker',
-      });
-    }
-    positionWorkerResult(result, taskId);
-    renderWorkerSummary(event, task);
-    window.uiModule?.scrollHistory?.();
+    renderWorkerResult(event, task);
   }
   if (isActive
       && SPOKEN_WORKER_EVENTS.has(event.type)
+      && task?.foreground !== true
       && (event.type !== 'progress' || Boolean(event.spoken_text))) {
     enqueueSpeech(workerSpeech(event), event.type, event.worker || 'worker');
   }
@@ -2551,18 +2650,39 @@ function followWorkerTask(taskId, affectVoiceLayout = true) {
   stream.onerror = refreshAgentControl;
 }
 
+function trackExternalWorkerTask(task) {
+  task = rememberTask(task);
+  if (!task || !taskVisible(task)) return;
+  ensureActivityGroup(task);
+  if (!TERMINAL_TASK_STATES.has(String(task.status || ''))) {
+    followWorkerTask(task.task_id);
+    if (isActive) setAgentWorkspaceActive(true);
+  }
+  refreshAgentControl();
+}
+
 async function restoreSessionTasks(targetSessionId) {
   const sessionIdToRestore = String(targetSessionId || '');
   if (!sessionIdToRestore || currentChatSessionId() !== sessionIdToRestore) return;
   const revision = ++activityRestoreRevision;
+  let listedTasks = [];
+  try {
+    const listed = await fetchJson(`/api/agent-tasks?session_id=${encodeURIComponent(sessionIdToRestore)}&limit=100`);
+    listedTasks = Array.isArray(listed.tasks) ? listed.tasks : [];
+  } catch (error) {
+    console.warn('Could not list session worker tasks:', error);
+  }
+  const listedById = new Map(listedTasks.map(task => [String(task.task_id || ''), task]));
   const taskIds = new Set(
     Array.from(document.querySelectorAll('#chat-history .msg[data-task-id]'))
       .map(item => item.dataset.taskId)
       .filter(Boolean),
   );
+  listedById.forEach((_task, taskId) => { if (taskId) taskIds.add(taskId); });
   if (!taskIds.size) return;
 
   const snapshots = await Promise.all(Array.from(taskIds, async taskId => {
+    if (listedById.has(taskId)) return listedById.get(taskId);
     try { return await fetchJson(`/api/agent-tasks/${encodeURIComponent(taskId)}`); }
     catch (error) {
       console.warn(`Could not restore worker task ${taskId}:`, error);
@@ -2733,6 +2853,10 @@ async function streamTurn(text, timings, turnStarted, callGeneration) {
       else if (event.type === 'ui_control' && isCurrentVoiceCall(callGeneration)) {
         applyVoiceUIControl({ ...event, voice_session_id: turnSessionId });
       }
+      else if (event.type === 'authority_approval_required' && isCurrentVoiceCall(callGeneration)) {
+        showChatFromExtension('Approval required in chat.');
+        renderAuthorityApprovalCard(event.data || {});
+      }
       else if (event.type === 'agent_task') {
         const currentCall = isCurrentVoiceCall(callGeneration);
         const taskWorkspace = event.workspace || (currentCall ? activeWorkspace : 'home-lab');
@@ -2742,6 +2866,8 @@ async function streamTurn(text, timings, turnStarted, callGeneration) {
           task_id: event.task_id,
           session_id: turnChatSessionId,
           worker: event.worker || 'pc-codex',
+          presenter: event.presenter || existingTask?.presenter,
+          foreground: event.foreground === true,
           workspace: taskWorkspace,
           status: 'running',
           created_at: existingTask?.created_at || Date.now() / 1000,
@@ -2753,8 +2879,7 @@ async function streamTurn(text, timings, turnStarted, callGeneration) {
         if (currentCall) {
           activeWorkerTaskId = event.task_id;
           activeWorkspace = taskWorkspace;
-          if (event.foreground !== false) setVoiceTarget(event.worker || 'pc-codex', false);
-          else setAgentWorkspaceActive(true);
+          setAgentWorkspaceActive(true);
           queueVoiceTargetUpdate(
             { task_id: activeWorkerTaskId },
             { failSafe: event.foreground !== false },
@@ -2766,7 +2891,29 @@ async function streamTurn(text, timings, turnStarted, callGeneration) {
       else if (event.type === 'final') {
         final = event;
         const finalTaskId = (event.task_ids || [])[0];
-        const task = turnTasks.find(item => item.task_id === finalTaskId) || taskSnapshots.get(finalTaskId) || turnTasks[0];
+        let task = taskSnapshots.get(finalTaskId) || turnTasks.find(item => item.task_id === finalTaskId) || turnTasks[0];
+        if (task && event.diagnostics?.task_delivery_pending === true) {
+          task.foreground = false;
+          rememberTask(task);
+          const buffered = [...(task.events || [])].reverse().find(item => item.type === 'result');
+          if (buffered) {
+            const bufferedId = String(buffered.event_id || '').trim();
+            if (bufferedId) handledWorkerEventIds.delete(bufferedId);
+            queueWorkerEvent(buffered);
+          }
+        }
+        if (task?.foreground === true && event.diagnostics?.task_delivery_pending === false) {
+          let completed = [...(task.events || [])].reverse().find(item => item.type === 'result');
+          if (!completed) {
+            try {
+              task = rememberTask(await fetchJson(`/api/agent-tasks/${encodeURIComponent(task.task_id)}`)) || task;
+              completed = [...(task.events || [])].reverse().find(item => item.type === 'result');
+            } catch (error) {
+              console.warn('Could not load completed foreground worker result:', error);
+            }
+          }
+          if (completed && taskVisible(task)) renderWorkerResult(completed, task, liveAssistantMessage);
+        }
         if (isCurrentVoiceCall(callGeneration)) applyLiveTaskMetadata(liveAssistantMessage, task);
       }
       else if (event.type === 'error') throw new Error(event.text || 'Jarvis brain request failed');
@@ -3822,7 +3969,7 @@ function bind() {
   const agentChip = $('jarvis-agent-chip');
   const cancelTaskBtn = $('jarvis-agent-cancel');
   const agentSelector = document.querySelector('.jarvis-agent-selector');
-  const targetButtons = document.querySelectorAll('.jarvis-target');
+  const agentMenu = $('jarvis-agent-menu');
 
   if (railBtn) {
     railBtn.innerHTML = ICON_PHONE;
@@ -3872,13 +4019,11 @@ function bind() {
   });
   $('extension-surface-chat')?.addEventListener('click', () => showChatFromExtension());
   $('extension-surface-close')?.addEventListener('click', () => disengageExtensionSurface());
-  targetButtons.forEach(button => {
-    button.addEventListener('click', () => {
-      if (!button.disabled) {
-        activeWorkspace = button.dataset.workspace || activeWorkspace;
-        setVoiceTarget(button.dataset.worker || 'jarvis');
-      }
-    });
+  agentMenu?.addEventListener('click', event => {
+    const button = event.target.closest('.jarvis-target');
+    if (!button || button.disabled) return;
+    activeWorkspace = button.dataset.workspace || activeWorkspace;
+    setVoiceTarget(button.dataset.worker || 'jarvis');
   });
   document.addEventListener('click', event => {
     if (!agentSelector?.contains(event.target)) setAgentMenuOpen(false);
@@ -3894,6 +4039,9 @@ function bind() {
   window.addEventListener('odysseus:session-rendered', event => {
     restoreSessionTasks(event.detail?.sessionId).catch(error => {
       console.warn('Could not restore Jarvis task activity:', error);
+    });
+    restorePendingAuthorityDecision(event.detail?.sessionId).catch(error => {
+      console.warn('Could not restore authority decision:', error);
     });
   });
   window.addEventListener('instance-brand-changed', () => {
@@ -3928,6 +4076,7 @@ window.jarvisVoice = {
   interrupt,
   isActive: isCallActive,
   restoreSessionTasks,
+  trackWorkerTask: trackExternalWorkerTask,
   applyExtensionSurfaceControl,
   prepareExtensionTextTurn,
   showChatForApproval: () => showChatFromExtension('Approval required in chat.'),

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import getpass
 import hashlib
 import json
 import os
 import re
+import socket
 import threading
 import uuid
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -20,6 +23,44 @@ from core.constants import DATA_DIR
 
 AUTHORITY_FILE = Path(DATA_DIR) / "authority_receipts.json"
 APPROVAL_SCOPES = frozenset({"once", "session", "time_bounded", "persistent"})
+NATURAL_APPROVAL_REPLIES = {
+    "yes": "approve",
+    "yeah": "approve",
+    "yep": "approve",
+    "approved": "approve",
+    "approve": "approve",
+    "go ahead": "approve",
+    "do it": "approve",
+    "proceed": "approve",
+    "no": "deny",
+    "nope": "deny",
+    "deny": "deny",
+    "denied": "deny",
+    "cancel": "deny",
+    "stop": "deny",
+}
+ACTION_EFFECTS = frozenset(
+    {
+        "read",
+        "reversible_write",
+        "destructive_or_difficult_to_recover",
+        "external_publication_or_communication",
+        "purchase",
+        "credential_or_auth_change",
+        "privilege_expansion",
+        "outside_workspace_boundary",
+    }
+)
+SEPARATE_GATE_EFFECTS = frozenset(
+    {
+        "destructive_or_difficult_to_recover",
+        "external_publication_or_communication",
+        "purchase",
+        "credential_or_auth_change",
+        "privilege_expansion",
+        "outside_workspace_boundary",
+    }
+)
 _SECRET_KEY = re.compile(r"token|secret|password|credential|private.?key|authorization|api.?key", re.I)
 _SECRET_TEXT_PATTERNS = (
     re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}"),
@@ -27,43 +68,74 @@ _SECRET_TEXT_PATTERNS = (
     re.compile(r"(?i)\b((?:api[_-]?key|token|secret|password|credential)\s*[:=]\s*['\"]?)[^\s'\",;}]{4,}"),
 )
 
-_READ_ONLY_NAMES = frozenset(
-    {
-        "get_workspace", "read_file", "grep", "glob", "ls", "web_search", "web_fetch",
-        "get_runtime_status", "read_agent_task", "search_jarvis_knowledge", "read_calendar",
-        "list_sessions", "search_chats", "list_email_accounts", "list_emails", "read_email",
-        "list_models", "list_cached_models", "list_downloads", "list_serve_presets",
-        "list_served_models", "list_cookbook_servers", "search_hf_models", "vault_search",
-        "vault_get", "resolve_contact",
-        "manage_books",
-    }
-)
-_LOCAL_WRITES = frozenset(
-    {
-        "create_document", "edit_document", "update_document", "suggest_document",
-        "write_file", "edit_file", "manage_notes", "manage_tasks", "manage_memory",
-        "manage_skills", "manage_research", "manage_contact", "manage_session",
-        "create_session", "send_to_session", "generate_image", "edit_image", "ui_control",
-        "update_plan", "ask_user", "trigger_research", "start_agent_task", "manage_bg_jobs",
-    }
-)
-_EXTERNAL = frozenset(
-    {"send_email", "reply_to_email", "bulk_email", "manage_calendar", "api_call", "app_api"}
-)
-_DESTRUCTIVE = frozenset(
-    {"delete_email", "archive_email", "mark_email_read", "cancel_download", "stop_served_model"}
-)
-_ADMINISTRATIVE = frozenset(
-    {
-        "bash", "python",
-        "manage_settings", "manage_endpoints", "manage_mcp", "manage_tokens", "manage_webhooks",
-        "vault_unlock",
-    }
-)
+_DEFAULT_EFFECT_BY_CAPABILITY = {
+    **{
+        name: "read"
+        for name in {
+            "get_workspace", "read_file", "grep", "glob", "ls", "web_search", "web_fetch",
+            "get_runtime_status", "read_agent_task", "search_jarvis_knowledge", "read_calendar",
+            "list_sessions", "search_chats", "list_email_accounts", "list_emails", "read_email",
+            "list_models", "list_cached_models", "list_downloads", "list_serve_presets",
+            "list_served_models", "list_cookbook_servers", "search_hf_models", "vault_search",
+            "vault_get", "resolve_contact", "manage_books",
+        }
+    },
+    **{
+        name: "reversible_write"
+        for name in {
+            "create_document", "edit_document", "update_document", "suggest_document",
+            "write_file", "edit_file", "manage_notes", "manage_tasks", "manage_memory",
+            "manage_skills", "manage_research", "manage_contact", "manage_session",
+            "create_session", "send_to_session", "generate_image", "edit_image", "ui_control",
+            "update_plan", "ask_user", "trigger_research", "start_agent_task", "manage_bg_jobs",
+            "bash", "python", "download_model", "serve_model", "serve_preset", "adopt_served_model",
+            "manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks",
+            "hermes_ssh", "hermes_kanban",
+        }
+    },
+    **{
+        name: "external_publication_or_communication"
+        for name in {"send_email", "reply_to_email", "bulk_email", "manage_calendar", "api_call", "app_api"}
+    },
+    **{
+        name: "destructive_or_difficult_to_recover"
+        for name in {"delete_email", "archive_email", "mark_email_read", "cancel_download", "stop_served_model"}
+    },
+    "manage_tokens": "credential_or_auth_change",
+    "vault_unlock": "credential_or_auth_change",
+}
 _READ_ACTIONS = frozenset({"inventory", "list", "get", "read", "view", "search", "find", "status", "health"})
 _PUBLIC_READS = frozenset({"web_search", "web_fetch", "get_runtime_status"})
-_EXTENSION_PERMISSION_MODES = frozenset(
-    {"read_only", "bounded_write", "external_side_effect", "destructive", "controlled_administrative"}
+_LEGACY_EFFECTS = {
+    "read_only": "read",
+    "bounded_write": "reversible_write",
+    "controlled_administrative": "reversible_write",
+    "external_side_effect": "external_publication_or_communication",
+    "destructive": "destructive_or_difficult_to_recover",
+}
+_EFFECT_STRICTNESS = {
+    "read": 0,
+    "reversible_write": 1,
+    "destructive_or_difficult_to_recover": 2,
+    "external_publication_or_communication": 3,
+    "purchase": 4,
+    "credential_or_auth_change": 5,
+    "privilege_expansion": 6,
+    "outside_workspace_boundary": 7,
+}
+_DESTRUCTIVE_ACTIONS = frozenset(
+    {"delete", "remove", "purge", "revoke", "restore", "overwrite", "bulk_delete", "drop", "reset"}
+)
+_PURCHASE_ACTIONS = frozenset({"buy", "purchase", "subscribe", "checkout", "order", "pay"})
+_EXTERNAL_ACTIONS = frozenset({"send", "publish", "post", "submit", "invite", "communicate"})
+_CREDENTIAL_ACTIONS = frozenset(
+    {"authenticate", "login", "logout", "oauth", "rotate_token", "set_token", "add_credential", "remove_credential", "change_password", "mfa"}
+)
+_PRIVILEGE_ACTIONS = frozenset(
+    {"grant", "elevate", "enable_privileged", "assign_role", "widen_permissions", "change_permissions"}
+)
+_PATH_ARGUMENT_KEYS = frozenset(
+    {"path", "paths", "cwd", "directory", "root", "source_path", "target_path", "destination_path"}
 )
 
 _MCP_READONLY_TOOLS = frozenset({
@@ -122,6 +194,16 @@ def operator_identity(owner: str | None) -> str | None:
     return None
 
 
+def natural_approval_choice(text: str) -> str | None:
+    """Map one unambiguous ordinary reply to approve-once or deny."""
+    value = " ".join(re.sub(r"[^a-z ]", " ", str(text or "").lower()).split())
+    if value.startswith("please "):
+        value = value[7:]
+    if value.endswith(" please"):
+        value = value[:-7]
+    return NATURAL_APPROVAL_REPLIES.get(value)
+
+
 def argument_fingerprint(call: Mapping[str, Any]) -> str:
     material = {
         "name": call.get("name"),
@@ -178,7 +260,85 @@ def audit_safe_action_call(call: Mapping[str, Any]) -> dict[str, Any]:
     return safe
 
 
-def permission_mode_for(call: Mapping[str, Any]) -> str:
+def _declared_effect(call: Mapping[str, Any]) -> str | None:
+    policy = call.get("capability_policy") if isinstance(call.get("capability_policy"), Mapping) else {}
+    declared = str(policy.get("action_effect") or "")
+    if declared in ACTION_EFFECTS:
+        return declared
+    return _LEGACY_EFFECTS.get(str(policy.get("permission_mode") or ""))
+
+
+def _path_values(value: Any, *, key: str = ""):
+    if isinstance(value, Mapping):
+        for child_key, child in value.items():
+            yield from _path_values(child, key=str(child_key).lower())
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            yield from _path_values(child, key=key)
+    elif key in _PATH_ARGUMENT_KEYS and isinstance(value, str):
+        yield value
+
+
+def _contains_credential_field(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return any(
+            _SECRET_KEY.search(str(key)) or _contains_credential_field(child)
+            for key, child in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_credential_field(child) for child in value)
+    return False
+
+
+def _outside_configured_workspace(call: Mapping[str, Any]) -> bool:
+    arguments = call.get("arguments") if isinstance(call.get("arguments"), Mapping) else {}
+    policy = call.get("capability_policy") if isinstance(call.get("capability_policy"), Mapping) else {}
+    if arguments.get("outside_workspace") is True:
+        return True
+    configured_scopes = policy.get("configured_scopes")
+    requested_scope = str(arguments.get("workspace") or "")
+    if requested_scope and isinstance(configured_scopes, (list, tuple, set)):
+        if requested_scope not in {str(item) for item in configured_scopes}:
+            return True
+    workspace = str(policy.get("configured_workspace") or "").strip()
+    if not workspace:
+        return False
+    base = os.path.realpath(os.path.expanduser(workspace))
+    for raw_path in _path_values(arguments):
+        if not raw_path or "://" in raw_path:
+            continue
+        expanded = os.path.expanduser(raw_path)
+        resolved = os.path.realpath(expanded if os.path.isabs(expanded) else os.path.join(base, expanded))
+        try:
+            if os.path.commonpath([base, resolved]) != base:
+                return True
+        except ValueError:
+            return True
+    return False
+
+
+def _shell_effect(command: str) -> str:
+    value = str(command or "").strip().lower()
+    if re.search(
+        r"(?:^|[;&|]\s*)(?:rm|shred|mkfs|wipefs|dd)\b"
+        r"|git\s+(?:reset\s+--hard|clean\s+-[a-z]*f)"
+        r"|(?:os\.)?(?:remove|unlink)\s*\(|shutil\.rmtree\s*\(",
+        value,
+    ):
+        return "destructive_or_difficult_to_recover"
+    if re.search(r"\b(?:sudo|su)\b|\bchmod\s+(?:[0-7]*[2367]|[ugo]*\+.*[wx])|\bchown\b", value):
+        return "privilege_expansion"
+    if re.search(r"\b(?:login|oauth|passwd|chpasswd)\b|\b(?:token|credential|api[_-]?key)\b", value):
+        return "credential_or_auth_change"
+    if re.search(r"\b(?:curl|wget)\b.*(?:-x\s+(?:post|put|patch|delete)|--data|-d\s)", value):
+        return "external_publication_or_communication"
+    if re.fullmatch(r"(?:pwd|ls(?:\s+[^;&|]+)?|git\s+(?:status|diff|log)(?:\s+[^;&|]+)?|rg(?:\s+[^;&|]+)?)", value):
+        return "read"
+    return "reversible_write"
+
+
+def action_effect_for(call: Mapping[str, Any]) -> str:
+    """Classify the concrete action; delegated metadata can only make it stricter."""
     name = str(call.get("name") or "")
     arguments = call.get("arguments") if isinstance(call.get("arguments"), Mapping) else {}
     action = str(arguments.get("action") or "").lower()
@@ -187,31 +347,68 @@ def permission_mode_for(call: Mapping[str, Any]) -> str:
     mcp_tool = _mcp_tool_basename(name)
     if mcp_tool is not None:
         if mcp_tool in _MCP_READONLY_TOOLS or mcp_tool.startswith(("list_", "get_", "read_", "search_", "show_")):
-            return "read_only"
+            return "read"
         if mcp_tool in _MCP_EXTERNAL_TOOLS:
-            return "external_side_effect"
+            return "external_publication_or_communication"
         if mcp_tool.startswith("kanban_"):
-            return "bounded_write"
-        return "bounded_write"
-    if name in ("bash", "python") and _SUDO_COMMAND_RE.search(_shell_command_text(call)):
-        return "external_side_effect"
-    if name == "hermes_ssh" or name == "hermes_kanban":
-        return "bounded_write"
-    if target.startswith("extension:"):
-        policy = call.get("capability_policy") if isinstance(call.get("capability_policy"), Mapping) else {}
-        declared = str(policy.get("permission_mode") or "")
-        return declared if declared in _EXTENSION_PERMISSION_MODES else "unclassified"
-    if name in _READ_ONLY_NAMES or action in _READ_ACTIONS or (name == "api_call" and method == "GET"):
-        return "read_only"
-    if name in _LOCAL_WRITES:
-        return "bounded_write"
-    if name in _EXTERNAL:
-        return "external_side_effect"
-    if name in _DESTRUCTIVE or action in {"delete", "remove", "revoke", "restore", "overwrite", "bulk_delete"}:
-        return "destructive"
-    if name in _ADMINISTRATIVE:
-        return "controlled_administrative"
-    return "unclassified"
+            return "reversible_write"
+        return "reversible_write"
+    if name in {"hermes_ssh", "hermes_kanban"}:
+        return "reversible_write"
+    selector = " ".join(
+        str(arguments.get(key) or "").lower()
+        for key in ("key", "setting", "field", "kind", "operation")
+    )
+    candidates = []
+    declared = _declared_effect(call)
+    if declared:
+        candidates.append(declared)
+    if _outside_configured_workspace(call):
+        candidates.append("outside_workspace_boundary")
+    elif name in {"bash", "python"}:
+        candidates.append(_shell_effect(str(arguments.get("command") or arguments.get("code") or "")))
+    elif action in _PURCHASE_ACTIONS or re.search(r"(?:buy|purchase|subscribe|checkout|order|payment)", name):
+        candidates.append("purchase")
+    elif (
+        action in _CREDENTIAL_ACTIONS
+        or name in {"manage_tokens", "vault_unlock"}
+        or (action not in _READ_ACTIONS and _contains_credential_field(arguments))
+        or (action not in _READ_ACTIONS and re.search(r"(?:auth|oauth|login|mfa|password|credential|token|api[_-]?key)", selector))
+    ):
+        candidates.append("credential_or_auth_change")
+    elif (
+        action in _PRIVILEGE_ACTIONS
+        or (name == "manage_mcp" and action in {"add", "connect", "enable", "install"})
+        or (
+            action not in _READ_ACTIONS
+            and re.search(r"(?:privilege|permission|role|sudo|root|shell|bash)", selector)
+        )
+    ):
+        candidates.append("privilege_expansion")
+    elif action in _DESTRUCTIVE_ACTIONS:
+        candidates.append("destructive_or_difficult_to_recover")
+    elif name == "api_call":
+        candidates.append("read" if method == "GET" else "external_publication_or_communication")
+    elif action in _EXTERNAL_ACTIONS:
+        candidates.append("external_publication_or_communication")
+    elif action in _READ_ACTIONS:
+        candidates.append("read")
+    elif name in _DEFAULT_EFFECT_BY_CAPABILITY:
+        candidates.append(_DEFAULT_EFFECT_BY_CAPABILITY[name])
+    elif not candidates and not target.startswith("extension:"):
+        return "unclassified"
+    return max(candidates, key=lambda effect: _EFFECT_STRICTNESS[effect]) if candidates else "unclassified"
+
+
+def permission_mode_for(call: Mapping[str, Any]) -> str:
+    """Legacy compatibility projection; authorization uses ``action_effect_for``."""
+    effect = action_effect_for(call)
+    return {
+        "read": "read_only",
+        "reversible_write": "bounded_write",
+        "destructive_or_difficult_to_recover": "destructive",
+        "external_publication_or_communication": "external_side_effect",
+    }.get(effect, effect if effect == "unclassified" else "separate_gate")
 
 
 class AuthorityStore:
@@ -224,7 +421,57 @@ class AuthorityStore:
             and os.getenv("DATABASE_URL", "").lower() == "sqlite:///:memory:"
         )
         self._memory_state: dict[str, Any] = {"decisions": {}, "receipts": {}}
+        # Exact executable calls stay process-local. The durable ledger stores
+        # only the redacted preview + fingerprint; after a restart an old
+        # approval therefore fails stale instead of replaying secret-bearing
+        # arguments from disk.
+        self._pending_actions: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
+
+    @staticmethod
+    def _runtime_binding(configured_workspace: str | None = None) -> dict[str, str | None]:
+        return {
+            "host": socket.gethostname(),
+            "user": getpass.getuser(),
+            "workspace": str(configured_workspace or "").strip() or None,
+        }
+
+    @staticmethod
+    def _binding_matches(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+        return all(str(left.get(key) or "") == str(right.get(key) or "") for key in ("host", "user"))
+
+    def _resumable_approval(
+        self,
+        state: Mapping[str, Any],
+        *,
+        operator_id: str,
+        session_id: str,
+        now: datetime,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+        matches = []
+        for decision in state.get("decisions", {}).values():
+            if (
+                decision.get("operator_id") != operator_id
+                or str(decision.get("session_id") or "") != session_id
+                or decision.get("status") != "resolved"
+            ):
+                continue
+            receipt = state.get("receipts", {}).get(str(decision.get("receipt_id") or ""))
+            pending = self._pending_actions.get(str(decision.get("decision_id") or ""))
+            if not receipt or not pending:
+                continue
+            expires = _parse_time(receipt.get("expires_at"))
+            if (
+                receipt.get("decision") != "allow"
+                or receipt.get("status") != "active"
+                or (expires and expires <= now)
+            ):
+                continue
+            matches.append((decision, receipt, pending))
+        if len(matches) != 1:
+            return None
+        decision, receipt, pending = matches[0]
+        return dict(decision), dict(receipt), deepcopy(pending)
 
     def _read(self) -> dict[str, Any]:
         if self._ephemeral:
@@ -255,6 +502,7 @@ class AuthorityStore:
         request_id: str,
         fingerprint: str,
         now: datetime,
+        execution_binding: Mapping[str, Any],
     ) -> dict[str, Any] | None:
         matches = []
         dirty = False
@@ -270,6 +518,10 @@ class AuthorityStore:
                 continue
             if receipt.get("argument_fingerprint") != fingerprint:
                 continue
+            if not self._binding_matches(receipt.get("execution") or {}, execution_binding):
+                continue
+            if str((receipt.get("execution") or {}).get("workspace") or "") != str(execution_binding.get("workspace") or ""):
+                continue
             if receipt.get("decision") == "deny" and receipt.get("request_id") != request_id:
                 continue
             if receipt.get("scope") == "session" and receipt.get("session_id") != session_id:
@@ -279,6 +531,122 @@ class AuthorityStore:
             self._write(state)
         return sorted(matches, key=lambda row: str(row.get("issued_at") or ""), reverse=True)[0] if matches else None
 
+    def _active_pending(
+        self,
+        state: dict[str, Any],
+        *,
+        operator_id: str,
+        session_id: str,
+        now: datetime,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        active = []
+        dirty = False
+        for decision in state["decisions"].values():
+            if (
+                decision.get("operator_id") != operator_id
+                or str(decision.get("session_id") or "") != session_id
+                or decision.get("decision") != "approval_required"
+                or decision.get("status") in {"resolved", "expired"}
+            ):
+                continue
+            expires = _parse_time(decision.get("expires_at"))
+            if not expires or expires <= now:
+                decision["status"] = "expired"
+                dirty = True
+                continue
+            active.append(decision)
+        active.sort(key=lambda row: str(row.get("created_at") or ""))
+        return active, dirty
+
+    def resolve_natural_reply(
+        self,
+        text: str,
+        *,
+        operator_id: str,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve exactly one active decision from a natural reply, once."""
+        choice = natural_approval_choice(text)
+        if not choice:
+            return None
+        with self._lock:
+            state = self._read()
+            active, dirty = self._active_pending(
+                state,
+                operator_id=operator_id,
+                session_id=session_id,
+                now=_now(),
+            )
+            if dirty:
+                self._write(state)
+            if not active and choice == "approve":
+                resumed = self._resumable_approval(
+                    state,
+                    operator_id=operator_id,
+                    session_id=session_id,
+                    now=_now(),
+                )
+                if resumed:
+                    decision, receipt, pending = resumed
+                    return {
+                        "choice": choice,
+                        "decision": decision,
+                        "receipt": receipt,
+                        "pending_action": pending,
+                    }
+                recently_resolved = []
+                explicit_repeat = " ".join(
+                    re.sub(r"[^a-z ]", " ", str(text or "").lower()).split()
+                ) in {"approve", "approved"}
+                if explicit_repeat:
+                    for row in state["decisions"].values():
+                        resolved_at = _parse_time(row.get("resolved_at"))
+                        if (
+                            row.get("operator_id") == operator_id
+                            and str(row.get("session_id") or "") == session_id
+                            and row.get("status") == "resolved"
+                            and row.get("decision") == "approval_required"
+                            and resolved_at
+                            and _now() - resolved_at <= timedelta(minutes=10)
+                        ):
+                            recently_resolved.append(row)
+                if recently_resolved:
+                    latest = max(recently_resolved, key=lambda row: str(row.get("resolved_at") or ""))
+                    return {
+                        "choice": "repeat",
+                        "decision": dict(latest),
+                        "error": "authority_decision_already_resolved",
+                    }
+            if len(active) != 1:
+                return None
+            decision = dict(active[0])
+            try:
+                receipt = self.resolve(
+                    decision["decision_id"],
+                    operator_id=operator_id,
+                    choice=choice,
+                    scope="once",
+                )
+            except ValueError as exc:
+                if str(exc) in {
+                    "authority_execution_context_unavailable",
+                    "authority_execution_context_changed",
+                    "authority_decision_expired",
+                }:
+                    return {
+                        "choice": "stale",
+                        "decision": decision,
+                        "error": str(exc),
+                    }
+                raise
+            pending = deepcopy(self._pending_actions.get(decision["decision_id"]))
+        return {
+            "choice": choice,
+            "decision": decision,
+            "receipt": receipt,
+            **({"pending_action": pending} if pending else {}),
+        }
+
     def decide(
         self,
         call: Mapping[str, Any],
@@ -287,32 +655,40 @@ class AuthorityStore:
         session_id: str | None,
         disabled_reason: str | None = None,
         native_approval_gate: bool = False,
+        configured_workspace: str | None = None,
     ) -> dict[str, Any]:
         now = _now()
         operator = str(operator_id or "").strip()
         agent_id = str(call.get("agent_id") or configured_agent_id())
         session = str(session_id or "")
+        classified_call = dict(call)
+        if configured_workspace:
+            policy = dict(call.get("capability_policy") or {})
+            policy["configured_workspace"] = configured_workspace
+            classified_call["capability_policy"] = policy
+        effect = action_effect_for(classified_call)
         mode = permission_mode_for(call)
         fingerprint = argument_fingerprint(call)
         decision_id = str(uuid.uuid4())
         decision = "allow"
         basis = "owner_scope"
         receipt_id = None
+        receipt = None
 
-        if not operator and mode == "read_only" and str(call.get("name") or "") in _PUBLIC_READS:
+        if not operator and effect == "read" and str(call.get("name") or "") in _PUBLIC_READS:
             decision, basis = "allow", "public_non_owner_read"
         elif not operator:
             decision, basis = "deny", "authenticated_operator_required"
         elif disabled_reason:
             decision, basis = "deny", disabled_reason
-        elif mode == "unclassified":
+        elif effect == "unclassified":
             decision, basis = "deny", "unclassified_capability"
-        elif mode == "read_only":
+        elif effect == "read":
             decision, basis = "allow", "owner_scoped_read"
         elif native_approval_gate:
             decision, basis = "allow", "native_staged_approval"
-        elif mode in {"bounded_write", "controlled_administrative"}:
-            decision, basis = "allow", "existing_scoped_policy"
+        elif effect == "reversible_write":
+            decision, basis = "allow", "authenticated_explicit_request"
         else:
             with self._lock:
                 state = self._read()
@@ -324,6 +700,7 @@ class AuthorityStore:
                     request_id=str(call.get("request_id") or ""),
                     fingerprint=fingerprint,
                     now=now,
+                    execution_binding=self._runtime_binding(configured_workspace),
                 )
                 if receipt:
                     receipt_id = receipt["receipt_id"]
@@ -331,12 +708,30 @@ class AuthorityStore:
                         decision, basis = "deny", "denial_receipt"
                     else:
                         decision, basis = "allow", f"approval_receipt:{receipt.get('scope')}"
+                        self._pending_actions.pop(str(receipt.get("decision_id") or ""), None)
                         if receipt.get("scope") == "once":
                             receipt["status"] = "consumed"
                             receipt["consumed_at"] = _iso(now)
                             self._write(state)
                 else:
-                    decision, basis = "approval_required", "exact_operator_approval"
+                    active, dirty = self._active_pending(
+                        state,
+                        operator_id=operator,
+                        session_id=session,
+                        now=now,
+                    )
+                    if dirty:
+                        self._write(state)
+                    matching = next(
+                        (row for row in active if row.get("argument_fingerprint") == fingerprint),
+                        None,
+                    )
+                    if matching:
+                        return dict(matching)
+                    if active:
+                        decision, basis = "deny", "authority_decision_already_pending"
+                    else:
+                        decision, basis = "approval_required", "exact_operator_approval"
 
         record = {
             "decision_id": decision_id,
@@ -346,18 +741,35 @@ class AuthorityStore:
             "request_id": call.get("request_id"),
             "call_id": call.get("call_id"),
             "capability": {"name": call.get("name"), "target": call.get("target")},
+            "workspace": (
+                str((call.get("arguments") or {}).get("workspace") or "").strip()
+                if isinstance(call.get("arguments"), Mapping)
+                else ""
+            ) or (Path(configured_workspace).name if configured_workspace else None),
             "argument_fingerprint": fingerprint,
+            "action_effect": effect,
+            "gate_reason": effect if effect in SEPARATE_GATE_EFFECTS else None,
             "permission_mode": mode,
             "decision": decision,
             "policy_basis": basis,
             "receipt_id": receipt_id,
+            "approval_decision_id": (
+                receipt.get("decision_id") if receipt_id and receipt else None
+            ),
             "preview": safe_preview(call.get("arguments") or {}),
+            "execution": self._runtime_binding(configured_workspace),
             "created_at": _iso(now),
             "expires_at": _iso(now + timedelta(minutes=10)),
         }
         with self._lock:
             state = self._read()
             state["decisions"][decision_id] = record
+            if decision == "approval_required":
+                self._pending_actions[decision_id] = {
+                    "decision_id": decision_id,
+                    "call": deepcopy(dict(call)),
+                    "binding": self._runtime_binding(configured_workspace),
+                }
             self._write(state)
         return record
 
@@ -387,6 +799,20 @@ class AuthorityStore:
                 raise ValueError("invalid_authority_choice")
             if scope not in APPROVAL_SCOPES:
                 raise ValueError("invalid_authority_scope")
+            if choice == "approve":
+                pending = self._pending_actions.get(decision_id)
+                if not pending:
+                    decision["status"] = "expired"
+                    self._write(state)
+                    raise ValueError("authority_execution_context_unavailable")
+                current_binding = self._runtime_binding(
+                    (pending.get("binding") or {}).get("workspace")
+                )
+                if not self._binding_matches(pending.get("binding") or {}, current_binding):
+                    decision["status"] = "expired"
+                    self._pending_actions.pop(decision_id, None)
+                    self._write(state)
+                    raise ValueError("authority_execution_context_changed")
             receipt_id = str(uuid.uuid4())
             receipt_expires = None
             if scope == "time_bounded":
@@ -402,6 +828,7 @@ class AuthorityStore:
                 "call_id": decision.get("call_id"),
                 "capability": decision.get("capability"),
                 "argument_fingerprint": decision["argument_fingerprint"],
+                "execution": deepcopy(decision.get("execution") or {}),
                 "decision": "allow" if choice == "approve" else "deny",
                 "scope": scope,
                 "status": "active",
@@ -412,6 +839,8 @@ class AuthorityStore:
             decision["resolved_at"] = _iso(now)
             decision["receipt_id"] = receipt_id
             state["receipts"][receipt_id] = receipt
+            if choice == "deny":
+                self._pending_actions.pop(decision_id, None)
             self._write(state)
             return receipt
 
@@ -429,6 +858,17 @@ class AuthorityStore:
     def list_state(self, *, operator_id: str) -> dict[str, list[dict[str, Any]]]:
         with self._lock:
             state = self._read()
+            now = _now()
+            dirty = False
+            for decision in state["decisions"].values():
+                if decision.get("decision") != "approval_required" or decision.get("status") in {"resolved", "expired"}:
+                    continue
+                expires = _parse_time(decision.get("expires_at"))
+                if not expires or expires <= now:
+                    decision["status"] = "expired"
+                    dirty = True
+            if dirty:
+                self._write(state)
         return {
             "decisions": [dict(row) for row in state["decisions"].values() if row.get("operator_id") == operator_id],
             "receipts": [dict(row) for row in state["receipts"].values() if row.get("operator_id") == operator_id],

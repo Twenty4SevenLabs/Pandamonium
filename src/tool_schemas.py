@@ -103,24 +103,6 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_calendar",
-            "description": "Synchronize and read the authenticated user's calendars without changing them. Resolve relative dates against the current user time and pass explicit ISO start/end values.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["list_events", "list_calendars"]},
-                    "start": {"type": "string", "description": "Inclusive range start as an ISO datetime"},
-                    "end": {"type": "string", "description": "Exclusive range end as an ISO datetime"},
-                    "calendar": {"type": "string", "description": "Optional calendar name or identifier"},
-                },
-                "required": ["action"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "python",
             "description": "Execute Python code to compute a result or test something. Prefer a dedicated tool whenever one fits the job (reading, writing, or searching files); use python only for computation, data processing, or scripting no dedicated tool covers.",
             "parameters": {
@@ -1328,7 +1310,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_runtime_status",
-            "description": "Return server-verified runtime facts including the actual brain model, architecture, quantization, context allocation, TTS provider, and worker availability. Use this whenever the operator asks what model or runtime is active.",
+            "description": "Return the running Pandamonium application version and server-verified runtime facts including the actual brain model, architecture, quantization, context allocation, reported cache evidence, TTS provider, and worker availability. Use this whenever the operator asks what version, model, or runtime is active.",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },

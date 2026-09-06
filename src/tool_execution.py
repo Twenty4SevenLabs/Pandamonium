@@ -585,6 +585,10 @@ async def execute_tool_block(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     workspace: Optional[str] = None,
     tool_policy: Optional[Any] = None,
+    presenter: Optional[str] = None,
+    persist_worker_result: bool = True,
+    worker_workspace: Optional[str] = None,
+    worker_target: Optional[str] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -601,6 +605,10 @@ async def execute_tool_block(
             owner=owner,
             progress_cb=progress_cb,
             tool_policy=tool_policy,
+            presenter=presenter,
+            persist_worker_result=persist_worker_result,
+            worker_workspace=worker_workspace,
+            worker_target=worker_target,
         )
         return output
     finally:
@@ -614,6 +622,10 @@ async def _execute_tool_block_impl(
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     tool_policy: Optional[Any] = None,
+    presenter: Optional[str] = None,
+    persist_worker_result: bool = True,
+    worker_workspace: Optional[str] = None,
+    worker_target: Optional[str] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -953,14 +965,22 @@ async def _execute_tool_block_impl(
             if not owner:
                 raise PermissionError("owner_required")
             args = json.loads(content or "{}")
+            requested_worker = str(args.get("worker") or "pc-codex")
+            if worker_target:
+                requested_worker = worker_target
+            requested_workspace = str(args.get("workspace") or "home-lab")
+            if worker_workspace:
+                requested_workspace = worker_workspace
             task = await start_task(
-                worker=str(args.get("worker") or "pc-codex"),
+                worker=requested_worker,
                 session_id=str(session_id or ""),
-                workspace=str(args.get("workspace") or "home-lab"),
+                workspace=requested_workspace,
                 prompt=str(args.get("prompt") or ""),
                 permission_mode="read_only",
                 approved=False,
                 owner=owner,
+                presenter=presenter,
+                persist_result=persist_worker_result,
             )
             result = {**task, "output": json.dumps(task, ensure_ascii=False), "exit_code": 0}
         except Exception as exc:

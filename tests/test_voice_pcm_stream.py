@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from routes import tts_routes, voice_routes
-from src.voice_pcm import pcm_frames, speech_blocks, speech_text, wav_to_pcm16
+from src.voice_pcm import pcm_frames, result_speech, speech_blocks, speech_text, wav_to_pcm16
 
 
 @pytest.fixture(autouse=True)
@@ -95,6 +95,47 @@ def test_speech_text_expands_clock_times_for_tts():
     assert speech_text("Midnight is 00:15.") == "Midnight is twelve fifteen AM."
     assert speech_text("UTC-05:00 stays an offset.") == "UTC-05:00 stays an offset."
     assert speech_text("https://example.com:443/setup") == ""
+
+
+def test_result_speech_contract_uses_word_thresholds_and_structured_handoffs():
+    short = "verified " * 75
+    long = "verified " * 76
+
+    assert result_speech(short, kind="tool")["speech_mode"] == "verbatim"
+    assert result_speech(long, kind="tool") == {
+        "spoken_text": "The tool finished. The complete result is in chat.",
+        "speech_mode": "handoff",
+    }
+    assert result_speech('{"status":"complete","items":[1,2]}', kind="tool") == {
+        "spoken_text": "The tool finished. The complete structured result is in chat.",
+        "speech_mode": "handoff",
+    }
+
+
+def test_result_speech_contract_reuses_safe_bounded_envelope_and_redacts():
+    long = "detail " * 100
+    provided = "The audit finished and the full evidence is in chat."
+
+    assert result_speech(
+        long,
+        kind="worker",
+        provided_spoken_text=provided,
+        provided_speech_mode="summary",
+    ) == {"spoken_text": provided, "speech_mode": "summary"}
+    spoken = result_speech("Failed with token=super-secret-value", kind="failure", label="PC Codex")
+    assert "super-secret-value" not in spoken["spoken_text"]
+    assert "try again" in spoken["spoken_text"]
+    assert len(spoken["spoken_text"].split()) <= 40
+
+
+def test_result_speech_explicit_read_all_cleans_format_but_keeps_wording():
+    result = result_speech(
+        "```text\nFirst line.\nSecond line.\n```",
+        kind="tool",
+        explicit_read_all=True,
+    )
+
+    assert result == {"spoken_text": "First line. Second line.", "speech_mode": "verbatim"}
 
 
 def test_speech_turn_exposes_finished_sentences_before_completion():

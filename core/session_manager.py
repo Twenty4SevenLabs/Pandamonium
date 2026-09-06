@@ -133,6 +133,7 @@ class SessionManager:
             headers=headers,
             history=[],
             owner=getattr(db_session, "owner", None),
+            agent_target=getattr(db_session, "agent_target", None) or "jarvis",
             is_important=getattr(db_session, "is_important", False) or False,
         )
         session.message_count = getattr(db_session, "message_count", 0) or 0
@@ -191,6 +192,7 @@ class SessionManager:
             headers=headers,
             history=history,
             owner=getattr(db_session, 'owner', None),
+            agent_target=getattr(db_session, 'agent_target', None) or 'jarvis',
             is_important=getattr(db_session, 'is_important', False) or False,
         )
 
@@ -329,6 +331,44 @@ class SessionManager:
         finally:
             db.close()
 
+    def delete_message(self, session_id: str, message_id: str) -> bool:
+        """Delete one exact persisted message and its in-memory counterpart."""
+        session = self.get_session(session_id)
+        if not message_id:
+            return False
+
+        db = SessionLocal()
+        try:
+            deleted = db.query(DbChatMessage).filter(
+                DbChatMessage.id == message_id,
+                DbChatMessage.session_id == session_id,
+            ).delete(synchronize_session=False)
+            if not deleted:
+                return False
+
+            remaining = db.query(DbChatMessage).filter(
+                DbChatMessage.session_id == session_id,
+            ).count()
+            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if db_session:
+                db_session.message_count = remaining
+                db_session.updated_at = datetime.now(timezone.utc)
+            db.commit()
+
+            session.history[:] = [
+                message for message in session.history
+                if str((message.metadata or {}).get("_db_id") or "") != message_id
+            ]
+            session._history = session.history
+            session.message_count = len(session.history)
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting message: {e}")
+            db.rollback()
+            return False
+        finally:
+            db.close()
+
     def replace_messages(self, session_id: str, messages: list) -> bool:
         """Replace a session's persisted and in-memory history atomically."""
         session = self.get_session(session_id)
@@ -443,6 +483,7 @@ class SessionManager:
             session.rag = db_session.rag
             session.archived = db_session.archived
             session.owner = getattr(db_session, "owner", None)
+            session.agent_target = getattr(db_session, "agent_target", None) or "jarvis"
             session.is_important = getattr(db_session, "is_important", False) or False
             session.message_count = getattr(db_session, "message_count", session.message_count) or 0
             return True
@@ -513,6 +554,7 @@ class SessionManager:
                 rag=rag,
                 headers={},
                 owner=owner,
+                agent_target="jarvis",
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc)
             )
@@ -527,6 +569,7 @@ class SessionManager:
                 rag=rag,
                 headers={},
                 owner=owner,
+                agent_target="jarvis",
             )
 
             self.sessions[session_id] = session
