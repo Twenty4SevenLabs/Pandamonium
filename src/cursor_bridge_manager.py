@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from src.constants import DATA_DIR
+from src.cursor_bridge_nodes import resolve_execution_node, sidecar_url_for_node
 from src.secret_storage import decrypt, encrypt
 
 logger = logging.getLogger(__name__)
@@ -214,13 +215,35 @@ async def bridge_request(
     json_body: dict[str, Any] | None = None,
     timeout: float = 20,
     stream: bool = False,
+    node: str | None = None,
 ) -> httpx.Response:
-    url = f"{DEFAULT_URL}{path}"
+    base_url = sidecar_url_for_node(node) if node else DEFAULT_URL
+    url = f"{base_url}{path}"
     async with httpx.AsyncClient(timeout=timeout) as client:
         if stream:
             return await client.build_request(method, url, headers=_bridge_headers(), json=json_body)
         response = await client.request(method, url, headers=_bridge_headers(), json=json_body)
     return response
+
+
+async def bridge_request_for_agent(
+    method: str,
+    path: str,
+    agent_meta: dict[str, Any],
+    *,
+    json_body: dict[str, Any] | None = None,
+    timeout: float = 20,
+    stream: bool = False,
+) -> httpx.Response:
+    node = resolve_execution_node(agent_meta)
+    return await bridge_request(
+        method,
+        path,
+        json_body=json_body,
+        timeout=timeout,
+        stream=stream,
+        node=node,
+    )
 
 
 def _pc_ide_headers() -> dict[str, str]:
