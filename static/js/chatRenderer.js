@@ -477,10 +477,20 @@ const DSML_TOOL_RE = /<\s*[｜|]+\s*DSML\s*[｜|]+\s*tool_calls\s*>[\s\S]*?(?:<\
 const DSML_STRAY_RE = /<\s*\/?\s*[｜|]+\s*DSML\s*[｜|]+[^>]*>/gi;
 const DSML_INVOKE_RE = /<\s*[｜|]+\s*DSML\s*[｜|]+\s*invoke\b[^>]*>[\s\S]*?(?:<\s*\/\s*[｜|]+\s*DSML\s*[｜|]+\s*invoke\s*>|$)/gi;
 const RAW_OPENAI_TOOL_JSON_RE = /(?:\[\s*)?\{\s*"function"\s*:\s*\{[\s\S]*?\}\s*,\s*"id"\s*:\s*"[^"]*"\s*,\s*"type"\s*:\s*"function"\s*\}\s*\]?/gi;
-const QWEN_ROLE_MARKER_RE = /<\/?\|(?:assistant|assistan|user|system|tool)\|>?|<\/\|end\|>?/gi;
+const QWEN_ROLE_MARKER_RE = /<\/?\|(?:assistant|assistan|user|system|tool|end)\|>?/gi;
 const QWEN_BARE_MARKER_RE = /(?:^|[\t\r\n ])(?:\|?end\|?|\/?\|end\|)(?=[\t\r\n ]|$)|(?:^|[\t\r\n ])assistan(?:t)?(?=[\t\r\n ]|$)/gi;
 // Self-narration about tool results (model echoing stdout/exit_code)
 const TOOL_NARRATION_RE = /(?:The (?:result|output) shows?:?\s*)?-?\s*(?:stdout|stderr|exit_code):\s*.+/gi;
+
+function replaceOutsideCodeFences(text, pattern, replacement) {
+  return String(text || '')
+    // Match the same completed-fence shape that mdToHtml renders. Backticks
+    // without an opening-line newline are ordinary prose, so role markers in
+    // them must still be stripped before display.
+    .split(/(```(?:\w+)?\n[\s\S]*?```)/g)
+    .map((part, index) => index % 2 ? part : part.replace(pattern, replacement))
+    .join('');
+}
 
 
 // Model pricing table — per million tokens
@@ -921,8 +931,8 @@ export function stripToolBlocks(text) {
   cleaned = cleaned.replace(XML_TOOL_CALL_RE, '');
   cleaned = cleaned.replace(XML_INVOKE_RE, '');
   cleaned = cleaned.replace(RAW_OPENAI_TOOL_JSON_RE, '');
-  cleaned = cleaned.replace(QWEN_ROLE_MARKER_RE, '');
-  cleaned = cleaned.replace(QWEN_BARE_MARKER_RE, ' ');
+  cleaned = replaceOutsideCodeFences(cleaned, QWEN_ROLE_MARKER_RE, '');
+  cleaned = replaceOutsideCodeFences(cleaned, QWEN_BARE_MARKER_RE, ' ');
   cleaned = cleaned.replace(TOOL_NARRATION_RE, '');
   cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
   return cleaned.trim();
@@ -2110,28 +2120,8 @@ export function displayMetrics(messageElement, metrics) {
 /** Remove any unanswered multiple-choice cards currently in the chat. */
 export function removeAskUserCards(root) {
   const scope = root || document.getElementById('chat-history') || document;
-  scope.querySelectorAll('.ask-user-card').forEach((node) => node.remove());
-}
-
-function _resumeApprovedAction(attempt = 0) {
-  const input = uiModule.el('message');
-  const sendButton = document.querySelector('.send-btn');
-  const busy = sendButton && (
-    sendButton.disabled
-    || sendButton.dataset.mode === 'streaming'
-    || sendButton.classList.contains('send-pending')
-  );
-  if ((!input || !sendButton || busy) && attempt < 100) {
-    setTimeout(() => _resumeApprovedAction(attempt + 1), 50);
-    return;
-  }
-  if (!input || !sendButton || busy) {
-    uiModule.showError('Approved, but automatic continuation could not start. Send “Approve” once to resume.');
-    return;
-  }
-  input.value = 'Approve';
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  sendButton.click();
+  scope.querySelectorAll('.ask-user-card:not(.authority-approval-card):not(.authority-receipt-card)')
+    .forEach((node) => node.remove());
 }
 
 export function renderAuthorityApprovalCard(payload) {
@@ -2172,40 +2162,116 @@ export function renderAuthorityApprovalCard(payload) {
 
   const actions = document.createElement('div');
   actions.className = 'authority-approval-actions';
-  const resolve = async (choice) => {
+  const resolve = (choice, scope) => {
     actions.querySelectorAll('button').forEach(button => { button.disabled = true; });
-    try {
-      const response = await fetch(`/api/authority/decisions/${encodeURIComponent(decisionId)}`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ choice, scope: 'once' }),
-      });
-      if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
-      question.textContent = choice === 'approve'
-        ? `Approved once: ${capability}. Running the exact pending action now.`
-        : `Denied: ${capability}`;
-      preview.remove();
-      actions.remove();
-      if (choice === 'approve') {
-        _resumeApprovedAction();
-      }
-    } catch (error) {
-      actions.querySelectorAll('button').forEach(button => { button.disabled = false; });
-      uiModule.showError(`Approval failed: ${error.message || error}`);
-    }
+    question.textContent = choice === 'approve'
+      ? `${scope === 'persistent' ? 'Approving always' : 'Approving once'}: ${capability}…`
+      : `Denying: ${capability}…`;
+    window.dispatchEvent(new CustomEvent('odysseus:authority-decision', {
+      detail: { decisionId, choice, scope },
+    }));
   };
-  for (const [choice, label] of [['approve', 'Approve once'], ['deny', 'Deny']]) {
+  for (const [choice, scope, label] of [
+    ['approve', 'once', 'Approve once'],
+    ['approve', 'persistent', 'Approve always'],
+    ['deny', 'once', 'Deny'],
+  ]) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'ask-user-option';
     button.textContent = label;
-    button.addEventListener('click', () => resolve(choice));
+    button.addEventListener('click', () => resolve(choice, scope));
     actions.appendChild(button);
   }
   card.appendChild(actions);
   chatBox.appendChild(card);
   card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  return card;
+}
+
+export function renderAuthorityDecisionResolved(payload) {
+  const decision = payload?.decision || {};
+  const decisionId = String(decision.decision_id || '');
+  const capability = String(decision?.capability?.name || 'requested action');
+  const card = decisionId
+    ? document.querySelector(`.authority-approval-card[data-decision-id="${CSS.escape(decisionId)}"]`)
+    : null;
+  if (card) {
+    const question = card.querySelector('.ask-user-question');
+    const preview = card.querySelector('.authority-approval-preview');
+    const actions = card.querySelector('.authority-approval-actions');
+    if (question) {
+      question.textContent = payload?.choice === 'approve'
+        ? `Approved ${payload?.receipt?.scope === 'persistent' ? 'always' : 'once'}: ${capability}. Running the exact pending action now.`
+        : payload?.choice === 'deny'
+          ? `Denied: ${capability}`
+          : `Approval is no longer active: ${capability}`;
+    }
+    preview?.remove();
+    actions?.remove();
+  }
+  if (payload?.choice === 'approve' && payload?.receipt?.scope === 'persistent') {
+    renderAuthorityReceiptCard(payload.receipt);
+  }
+}
+
+export function resetAuthorityApprovalCard(decisionId) {
+  const id = String(decisionId || '');
+  const card = id
+    ? document.querySelector(`.authority-approval-card[data-decision-id="${CSS.escape(id)}"]`)
+    : null;
+  if (!card) return;
+  const capability = String(card.getAttribute('aria-label') || '')
+    .replace(/^Approval required for\s*/, '') || 'requested action';
+  const question = card.querySelector('.ask-user-question');
+  if (question) question.textContent = `Approval required: ${capability}`;
+  card.querySelectorAll('.authority-approval-actions button').forEach(button => {
+    button.disabled = false;
+  });
+}
+
+export function renderAuthorityReceiptCard(receipt) {
+  const receiptId = String(receipt?.receipt_id || '');
+  const chatBox = document.getElementById('chat-history');
+  if (!receiptId || !chatBox || receipt?.status !== 'active' || receipt?.scope !== 'persistent') return null;
+  if (chatBox.querySelector(`.authority-receipt-card[data-receipt-id="${CSS.escape(receiptId)}"]`)) return null;
+  const card = document.createElement('div');
+  card.className = 'ask-user-card authority-receipt-card';
+  card.dataset.receiptId = receiptId;
+  card.setAttribute('role', 'status');
+  const title = document.createElement('div');
+  title.className = 'ask-user-question';
+  title.textContent = `Always approved: ${String(receipt?.capability?.name || 'requested action')}`;
+  const context = document.createElement('div');
+  context.className = 'authority-approval-context';
+  context.textContent = [
+    receipt?.action_effect,
+    receipt?.capability?.target,
+    receipt?.workspace,
+    receiptId,
+  ].filter(Boolean).join(' · ');
+  const preview = document.createElement('pre');
+  preview.className = 'authority-approval-preview';
+  preview.textContent = JSON.stringify(receipt?.preview || {}, null, 2);
+  const revoke = document.createElement('button');
+  revoke.type = 'button';
+  revoke.className = 'ask-user-option';
+  revoke.textContent = 'Revoke';
+  revoke.addEventListener('click', async () => {
+    revoke.disabled = true;
+    try {
+      const response = await fetch(`/api/authority/receipts/${encodeURIComponent(receiptId)}`, {
+        method: 'DELETE', credentials: 'same-origin',
+      });
+      if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
+      card.remove();
+    } catch (error) {
+      revoke.disabled = false;
+      uiModule.showError(`Revocation failed: ${error.message || error}`);
+    }
+  });
+  card.append(title, context, preview, revoke);
+  chatBox.appendChild(card);
   return card;
 }
 
@@ -2215,6 +2281,10 @@ export async function restorePendingAuthorityDecision(sessionId) {
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const state = await response.json();
   const now = Date.now();
+  (state?.receipts || [])
+    .filter(row => row?.scope === 'persistent' && row?.status === 'active')
+    .slice(-5)
+    .forEach(renderAuthorityReceiptCard);
   const pending = (state?.decisions || [])
     .filter(row => (
       row?.session_id === sessionId
@@ -2378,6 +2448,196 @@ function applyTaskMessageMetadata(wrap, metadata) {
   if (metadata.worker_event_id) wrap.dataset.workerEventId = String(metadata.worker_event_id);
 }
 
+function _createAssistantActivityDisclosure() {
+  const shell = document.createElement('div');
+  shell.innerHTML = markdownModule.createCollapsible('', 'thinking process');
+  const section = shell.firstElementChild;
+  section.classList.add('assistant-turn-disclosure');
+  return section;
+}
+
+function _appendAssistantActivityText(parent, text, className) {
+  const value = String(text || '').trim();
+  if (!value) return null;
+  const block = document.createElement('div');
+  block.className = className;
+  block.innerHTML = markdownModule.mdToHtml(markdownModule.squashOutsideCode(value));
+  parent.appendChild(block);
+  return block;
+}
+
+function _buildPersistedToolNode(event) {
+  const ev = event || {};
+  const esc = uiModule.esc;
+  const actionStatus = ev.action_result?.status || '';
+  const approvalRequired = ev.authority_decision?.decision === 'approval_required';
+  const ok = !approvalRequired
+    && (ev.exit_code === 0 || ev.exit_code == null)
+    && !['failed', 'denied', 'timed_out', 'cancelled'].includes(actionStatus);
+  const status = approvalRequired ? 'approval required' : (ok ? 'done' : (actionStatus || 'failed'));
+  let outputHtml = '';
+  if (ev.output && ev.output.trim()) {
+    outputHtml += `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(ev.output)}</pre></details>`;
+  }
+  const screenshotSrc = safeToolScreenshotSrc(ev.screenshot);
+  if (screenshotSrc) {
+    outputHtml += `<details class="agent-tool-output"><summary>Screenshot</summary><img src="${esc(screenshotSrc)}" style="max-width:100%;border-radius:6px;margin-top:6px;border:1px solid var(--border)" /></details>`;
+  }
+  const imageSrc = safeDisplayImageSrc(ev.image_url);
+  if (imageSrc) {
+    outputHtml += `<details class="agent-tool-output"><summary>Generated image</summary><img src="${esc(imageSrc)}" alt="${esc(ev.image_prompt || 'Generated image')}" style="max-width:100%;border-radius:6px;margin-top:6px;border:1px solid var(--border)" /></details>`;
+  }
+
+  let diffHtml = '';
+  if (ev.diff && ev.diff.text) {
+    const d = ev.diff;
+    const stat = [
+      d.new_file ? '<span class="diff-stat-new">new</span>' : '',
+      d.added ? `<span class="diff-stat-add">+${d.added}</span>` : '',
+      d.removed ? `<span class="diff-stat-del">−${d.removed}</span>` : '',
+    ].filter(Boolean).join(' ');
+    const rows = d.text.split('\n').map(line => {
+      let cls = 'diff-ctx';
+      let value = line;
+      if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-meta';
+      else if (line.startsWith('@@')) cls = 'diff-hunk';
+      else if (line.startsWith('+')) { cls = 'diff-add'; value = line.slice(1); }
+      else if (line.startsWith('-')) { cls = 'diff-del'; value = line.slice(1); }
+      else if (line.startsWith(' ')) value = line.slice(1);
+      return `<span class="${cls}">${esc(value) || '&nbsp;'}</span>`;
+    }).join('');
+    diffHtml = `<details class="agent-tool-output agent-tool-diff"><summary><span class="diff-file">${esc(d.file || 'diff')}</span> <span class="diff-summary-stats">${stat}</span></summary><pre class="diff-pre">${rows}</pre></details>`;
+  }
+
+  const node = document.createElement('div');
+  node.className = 'agent-thread-node' + (ok ? '' : ' error');
+  const commandHtml = (ev.command && !(ev.diff && ev.diff.text))
+    ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>`
+    : '';
+  node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(ev.tool || 'tool')}</span><span class="agent-thread-status">${esc(status)}</span><span class="agent-thread-chevron">▶</span></div><div class="agent-thread-content">${commandHtml}${outputHtml}${diffHtml}</div>`;
+  return node;
+}
+
+/** Render one completed assistant turn using the same grouping for live completion and replay. */
+export function renderAssistantTurnBody(body, content, metadata) {
+  if (!body) return { pendingAskUser: null, finalText: '' };
+  const md = metadata || {};
+  const rawContent = resolveDocumentPlaceholderLinks(
+    markdownModule.squashOutsideCode(stripToolBlocks(content || '')),
+    md,
+  );
+  const roundTexts = Array.isArray(md.round_texts) ? md.round_texts : [];
+  const parsedRounds = roundTexts.map(value => {
+    const text = resolveDocumentPlaceholderLinks(String(value || '').trim(), md);
+    return { text, ...markdownModule.extractThinkingBlocks(text) };
+  });
+  let finalRound = -1;
+  for (let index = parsedRounds.length - 1; index >= 0; index--) {
+    if ((parsedRounds[index].content || '').trim()) {
+      finalRound = index;
+      break;
+    }
+  }
+  const parsedContent = markdownModule.extractThinkingBlocks(rawContent);
+  const finalText = finalRound >= 0
+    ? parsedRounds[finalRound].content.trim()
+    : parsedContent.content.trim();
+  const toolEvents = Array.isArray(md.tool_events) ? md.tool_events : [];
+  const toolsByRound = new Map();
+  let pendingAskUser = null;
+  for (const event of toolEvents) {
+    const round = Number(event?.round || 1);
+    if (!toolsByRound.has(round)) toolsByRound.set(round, []);
+    toolsByRound.get(round).push(event);
+    if (event?.ask_user) pendingAskUser = event.ask_user;
+  }
+
+  body.innerHTML = '';
+  if (md.web_sources?.length) body.insertAdjacentHTML('beforeend', buildSourcesBox(md.web_sources, 'web'));
+  else if (md.research_sources?.length) body.insertAdjacentHTML('beforeend', buildSourcesBox(md.research_sources, 'research'));
+
+  const disclosure = _createAssistantActivityDisclosure();
+  const activity = disclosure.querySelector('.thinking-content-inner');
+  let hasActivity = false;
+  const hasRoundThinking = parsedRounds.some(round => round.thinkingBlocks?.length);
+  if (!hasRoundThinking && md.thinking) {
+    _appendAssistantActivityText(activity, md.thinking, 'assistant-turn-reasoning');
+    hasActivity = true;
+  }
+  if (!parsedRounds.length && parsedContent.thinkingBlocks?.length) {
+    for (const thinking of parsedContent.thinkingBlocks) {
+      _appendAssistantActivityText(activity, thinking, 'assistant-turn-reasoning');
+      hasActivity = true;
+    }
+  }
+
+  const maxRound = Math.max(parsedRounds.length, ...toolsByRound.keys(), 0);
+  for (let index = 0; index < maxRound; index++) {
+    const parsed = parsedRounds[index];
+    if (parsed) {
+      for (const thinking of parsed.thinkingBlocks || []) {
+        _appendAssistantActivityText(activity, thinking, 'assistant-turn-reasoning');
+        hasActivity = true;
+      }
+      if (index !== finalRound && (parsed.content || '').trim()) {
+        _appendAssistantActivityText(activity, parsed.content, 'assistant-turn-status');
+        hasActivity = true;
+      }
+    }
+    const events = toolsByRound.get(index + 1) || [];
+    if (events.length) {
+      const thread = document.createElement('div');
+      thread.className = 'agent-thread';
+      for (const event of events) thread.appendChild(_buildPersistedToolNode(event));
+      activity.appendChild(thread);
+      hasActivity = true;
+    }
+  }
+
+  if (md.rounds_exhausted) {
+    const exhausted = _appendAssistantActivityText(
+      activity,
+      `Reached the ${md.rounds_exhausted}-step limit — not finished.`,
+      'assistant-turn-status stopped-indicator rounds-exhausted',
+    );
+    const continueButton = document.createElement('button');
+    continueButton.type = 'button';
+    continueButton.className = 'continue-btn';
+    continueButton.title = 'Continue the task';
+    continueButton.textContent = 'Continue ▸';
+    continueButton.addEventListener('click', () => {
+      exhausted.remove();
+      const wrap = body.closest('.msg-ai');
+      window.chatModule?.setHideUserBubble?.();
+      if (wrap) window.chatModule?.setPendingContinue?.(wrap);
+      const input = document.getElementById('message');
+      if (input) {
+        input.value = 'You hit the step limit before finishing — the task is not complete. Continue from exactly where you left off and keep going until it is done. Do NOT repeat work already done.';
+        document.querySelector('.send-btn')?.click();
+      }
+    });
+    exhausted.appendChild(continueButton);
+    hasActivity = true;
+  }
+  const terminalMessages = [];
+  if (md.tool_budget_exceeded) terminalMessages.push(`Tool budget reached (${md.tool_budget_exceeded.used}/${md.tool_budget_exceeded.limit} calls). Agent stopped.`);
+  if (md.guard_message) terminalMessages.push(String(md.guard_message));
+  for (const message of terminalMessages) {
+    _appendAssistantActivityText(activity, message, 'assistant-turn-status stopped-indicator');
+    hasActivity = true;
+  }
+  if (hasActivity) body.appendChild(disclosure);
+
+  const final = document.createElement('div');
+  final.className = 'assistant-turn-final';
+  final.innerHTML = markdownModule.mdToHtml(markdownModule.squashOutsideCode(finalText));
+  body.appendChild(final);
+  if (md.research_findings?.length) body.insertAdjacentHTML('beforeend', buildFindingsBox(md.research_findings));
+  if (md.rag_sources?.length) body.insertAdjacentHTML('beforeend', buildRagSourcesBox(md.rag_sources));
+  body.dataset.raw = finalText;
+  return { pendingAskUser, finalText };
+}
+
 export function addMessage(role, content, modelName, metadata) {
   try {
     hideWelcomeScreen();
@@ -2389,163 +2649,7 @@ export function addMessage(role, content, modelName, metadata) {
     // appended, even when the user did not click one of its buttons.
     if (role === 'user') removeAskUserCards(box);
 
-    var esc = uiModule.esc;
     const textRaw = Array.isArray(content) ? markdownModule.renderContent(content) : content;
-
-    // --- Agent multi-bubble reconstruction from saved metadata ---
-    if (role === 'assistant' && metadata && metadata.tool_events && metadata.tool_events.length > 0) {
-      const roundTexts = metadata.round_texts || [];
-      const toolEvents = metadata.tool_events;
-      let pendingAskUser = null;
-      let lastWrap = null;
-      let firstMsgAi = null;
-      let lastMsgAi = null;
-
-      const toolsByRound = {};
-      for (const ev of toolEvents) {
-        const r = ev.round || 1;
-        if (!toolsByRound[r]) toolsByRound[r] = [];
-        toolsByRound[r].push(ev);
-      }
-
-      const maxRound = Math.max(...Object.keys(toolsByRound).map(Number), roundTexts.length);
-
-      for (let r = 0; r < maxRound; r++) {
-        const roundNum = r + 1;
-        const txt = resolveDocumentPlaceholderLinks((roundTexts[r] || '').trim(), metadata);
-
-        if (txt) {
-          const wrap = document.createElement('div');
-          wrap.className = 'msg msg-ai' + (r > 0 ? ' msg-continuation' : '');
-          applyTaskMessageMetadata(wrap, metadata);
-          const roleEl = document.createElement('div');
-          roleEl.className = 'role';
-          const pair = replyModelPair(modelName, metadata);
-          const contModel = pair.actualModel || pair.requestedModel;
-          roleEl.textContent = modelRouteLabel(pair.requestedModel, contModel);
-          if (pair.requestedModel && contModel && !sameModelName(pair.requestedModel, contModel)) {
-            roleEl.title = pair.requestedModel + ' -> ' + contModel;
-          }
-          applyModelColor(roleEl, contModel);
-          if (r === 0) roleEl.appendChild(roleTimestamp(metadata?.timestamp));
-          wrap.appendChild(roleEl);
-          const body = document.createElement('div');
-          body.className = 'body';
-          // Check if this is the last text round — sources go on top of final response
-          var agentSourcesPrefix = '';
-          var isLastTextRound = true;
-          for (let rr = r + 1; rr < maxRound; rr++) {
-            if ((roundTexts[rr] || '').trim()) { isLastTextRound = false; break; }
-          }
-          var agentFindingsSuffix = '';
-          if (isLastTextRound && metadata?.web_sources?.length) {
-            agentSourcesPrefix = buildSourcesBox(metadata.web_sources, 'web');
-          } else if (isLastTextRound && metadata?.research_sources?.length) {
-            agentSourcesPrefix = buildSourcesBox(metadata.research_sources, 'research');
-          }
-          if (isLastTextRound && metadata?.research_findings?.length) {
-            agentFindingsSuffix = buildFindingsBox(metadata.research_findings);
-          }
-          // RAG document sources — restored on the final text round.
-          if (isLastTextRound && metadata?.rag_sources?.length) {
-            agentFindingsSuffix += buildRagSourcesBox(metadata.rag_sources);
-          }
-          body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(markdownModule.squashOutsideCode(txt)) + agentFindingsSuffix;
-          wrap.appendChild(body);
-          wrap.dataset.raw = txt;
-          if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
-          box.appendChild(wrap);
-          lastWrap = wrap;
-          if (!firstMsgAi) firstMsgAi = wrap;
-          lastMsgAi = wrap;
-        }
-
-        const roundTools = toolsByRound[roundNum] || [];
-        if (roundTools.length > 0) {
-          // Reuse previous thread if no text separated us (merge consecutive tool rounds)
-          let threadWrap = null;
-          if (!txt && lastWrap && lastWrap.classList.contains('agent-thread')) {
-            threadWrap = lastWrap;
-          } else {
-            threadWrap = document.createElement('div');
-            threadWrap.className = 'agent-thread';
-            // Extend line up if there's a chat bubble above
-            if (txt) threadWrap.classList.add('has-top');
-            box.appendChild(threadWrap);
-          }
-          for (const ev of roundTools) {
-            if (ev.ask_user) pendingAskUser = ev.ask_user;
-            const ok = (ev.exit_code === 0 || ev.exit_code == null);
-            let outHtml = '';
-            if (ev.output && ev.output.trim()) {
-              outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(ev.output)}</pre></details>`;
-            }
-            const screenshotSrc = safeToolScreenshotSrc(ev.screenshot);
-            if (screenshotSrc) {
-              outHtml += `<details class="agent-tool-output"><summary>Screenshot</summary><img src="${esc(screenshotSrc)}" style="max-width:100%;border-radius:6px;margin-top:6px;border:1px solid var(--border)" /></details>`;
-            }
-            // File-write/edit diff (persisted in the tool event) \u2014 re-render it
-            // so it survives reload, matching the live stream.
-            let evDiffHtml = '';
-            if (ev.diff && ev.diff.text) {
-              const d = ev.diff;
-              const stat = [
-                d.new_file ? '<span class="diff-stat-new">new</span>' : '',
-                d.added ? `<span class="diff-stat-add">+${d.added}</span>` : '',
-                d.removed ? `<span class="diff-stat-del">\u2212${d.removed}</span>` : '',
-              ].filter(Boolean).join(' ');
-              const rows = d.text.split('\n').map(line => {
-                let cls = 'diff-ctx', text = line;
-                if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-meta';
-                else if (line.startsWith('@@')) cls = 'diff-hunk';
-                // Drop the leading diff marker (+/-/space) — colour encodes add/del.
-                else if (line.startsWith('+')) { cls = 'diff-add'; text = line.slice(1); }
-                else if (line.startsWith('-')) { cls = 'diff-del'; text = line.slice(1); }
-                else if (line.startsWith(' ')) { text = line.slice(1); }
-                return `<span class="${cls}">${esc(text) || '&nbsp;'}</span>`;
-              }).join('');  // spans are display:block \u2014 a literal \n would double-space
-              evDiffHtml = `<details class="agent-tool-output agent-tool-diff"><summary><span class="diff-file">${esc(d.file || 'diff')}</span> <span class="diff-summary-stats">${stat}</span></summary><pre class="diff-pre">${rows}</pre></details>`;
-            }
-            const node = document.createElement('div');
-            node.className = 'agent-thread-node' + (ok ? '' : ' error');
-            // Hide the raw JSON command when a diff says it better (same as live).
-            const evCmdHtml = (ev.command && !(ev.diff && ev.diff.text)) ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : '';
-            node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(ev.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
-            // Click handling is delegated globally \u2014 see chat.js init.
-            threadWrap.appendChild(node);
-          }
-          // Check if next round has text — extend line down to connect
-          const nextTxt = (roundTexts[r + 1] || '').trim();
-          if (nextTxt) threadWrap.classList.add('has-bottom');
-          lastWrap = threadWrap;
-
-          for (const ev of roundTools) {
-            if (ev.image_url) {
-              box.appendChild(buildImageBubble(ev.image_url, ev.image_prompt, ev.image_model, ev.image_size, ev.image_quality, ev.image_id));
-            }
-          }
-        }
-      }
-
-      const firstWrap = lastMsgAi || lastWrap;
-      if (firstWrap && firstWrap.classList.contains('msg-ai')) {
-        if (metadata?.memories_used?.length) firstWrap._memoriesUsed = metadata.memories_used;
-        firstWrap.appendChild(createMsgFooter(firstWrap));
-        if (metadata) displayMetrics(firstWrap, metadata);
-      }
-
-      if (window.hljs) {
-        box.querySelectorAll('pre code:not(.hljs)').forEach(b => window.hljs.highlightElement(b));
-      }
-      if (markdownModule.renderMermaid) markdownModule.renderMermaid(box);
-      if (pendingAskUser) {
-        // Session history is rendered oldest-to-newest.  A later user message
-        // removes this card; if there is none, the pending choice survives a
-        // refresh.  Avoid stealing focus while the history is loading.
-        renderAskUserCard(pendingAskUser, { focus: false, scroll: false });
-      }
-      return lastWrap;
-    }
 
     // --- Wake-task / supervisor system check-in ---
     // The self-wake mechanism injects "Did you finish?" as a user message
@@ -2647,16 +2751,22 @@ export function addMessage(role, content, modelName, metadata) {
     if (role === 'assistant' && metadata?.rag_sources?.length) {
       findingsSuffix += buildRagSourcesBox(metadata.rag_sources);
     }
+    let pendingAskUser = null;
+    if (role === 'assistant' && metadata?.tool_events?.length) {
+      pendingAskUser = renderAssistantTurnBody(b, text, metadata).pendingAskUser;
     // If thinking is stored in metadata (not in text), reconstruct the full display
-    if (role === 'assistant' && metadata?.thinking) {
+    } else if (role === 'assistant' && metadata?.thinking) {
       const thinkTime = metadata.thinking_time || null;
       const thinkHtml = markdownModule.processWithThinking(
         '<think' + (thinkTime ? ` time="${thinkTime}"` : '') + '>' + metadata.thinking + '</think>\n\n' + text
       );
       b.innerHTML = sourcesPrefix + thinkHtml + findingsSuffix;
-	    } else {
-	      b.innerHTML = sourcesPrefix + markdownModule.processWithThinking(text) + findingsSuffix;
-	    }
+    } else {
+      const renderedText = role === 'assistant'
+        ? markdownModule.processWithThinking(text)
+        : markdownModule.mdToHtml(text);
+      b.innerHTML = sourcesPrefix + renderedText + findingsSuffix;
+    }
 	    b.dataset.raw = text;
 
     // The vision/OCR caption is stripped from the displayed text above (so the
@@ -2687,7 +2797,7 @@ export function addMessage(role, content, modelName, metadata) {
         // Extract instruction text (after "Instruction: ")
         const instrMatch = b.textContent.match(/Instruction:\s*([\s\S]*)$/);
         const instrText = instrMatch ? instrMatch[1].trim() : '';
-        b.innerHTML = '<span class="doc-edit-tag">Doc edit: ' + lineRef + '</span> ' + markdownModule.processWithThinking(instrText);
+        b.innerHTML = '<span class="doc-edit-tag">Doc edit: ' + lineRef + '</span> ' + markdownModule.mdToHtml(instrText);
       }
 
       // Render attachment cards
@@ -2818,6 +2928,7 @@ export function addMessage(role, content, modelName, metadata) {
         wrap.dataset.raw = sv.raw;
         wrap.dataset.variantIndex = String(newIdx);
         if (window.hljs) wrap.querySelectorAll('pre code').forEach(bl => window.hljs.highlightElement(bl));
+        if (markdownModule.renderMermaid) markdownModule.renderMermaid(wrap);
         tagLabel.textContent = _icons[sv.label] || '';
         tagLabel.className = 'variant-tag' + (sv.label === 'shorter' ? ' variant-tag-scissors' : '');
         numLeft.textContent = String(newIdx + 1);
@@ -2851,6 +2962,12 @@ export function addMessage(role, content, modelName, metadata) {
 
     box.appendChild(wrap);
 
+    if (pendingAskUser) {
+      // A later user history row removes this card; until then the structured
+      // question remains available after close/reopen hydration.
+      renderAskUserCard(pendingAskUser, { focus: false, scroll: false });
+    }
+
     // TTS is now part of the msg-actions system
     if (role === 'assistant' && markdownModule.renderMermaid) {
       markdownModule.renderMermaid(wrap);
@@ -2883,6 +3000,9 @@ const chatRenderer = {
   safeDisplayImageSrc,
   removeAskUserCards,
   renderAuthorityApprovalCard,
+  renderAuthorityDecisionResolved,
+  renderAuthorityReceiptCard,
+  resetAuthorityApprovalCard,
   restorePendingAuthorityDecision,
   renderAskUserCard,
   buildSourcesBox,
@@ -2893,6 +3013,7 @@ const chatRenderer = {
   showWelcomeScreen,
   createMsgFooter,
   displayMetrics,
+  renderAssistantTurnBody,
   addMessage,
   buildAttachCards,
   updateMessageAttachments,

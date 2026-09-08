@@ -3,16 +3,29 @@
 import os
 import hashlib
 import logging
+import mimetypes
 import re
 import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
 
-from core.database import SessionLocal, GalleryImage, GalleryAlbum, ModelEndpoint
+from core.database import SessionLocal, GalleryImage, GalleryAlbum, GallerySource, ModelEndpoint
 from core.database import Session as DbSession
-from src.auth_helpers import get_current_user, owner_filter, require_privilege
+from src.auth_helpers import get_current_user, owner_filter, require_privilege, require_user
+from src.gallery_sources import (
+    _reconcile_owner_images,
+    discover_gallery_roots,
+    resolve_source_file,
+    scan_gallery_source,
+    source_owner,
+    source_status,
+    sync_gallery_sources,
+    validate_source_root,
+)
 from src.upload_limits import (
     read_upload_limited,
     GALLERY_UPLOAD_MAX_BYTES,
@@ -20,9 +33,10 @@ from src.upload_limits import (
 )
 from src.constants import GENERATED_IMAGES_DIR
 from src.optional_deps import patch_realesrgan_torchvision_compat
+from src import immich_gallery
 
 from routes.gallery.gallery_helpers import (
-    GalleryPatch, _extract_exif, _image_to_dict, _owner_filter, _human_size,
+    GalleryPatch, _extract_exif, _image_to_dict, _image_url, _owner_filter, _human_size,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,6 +53,14 @@ def _current_user_is_admin(request: Request, user: str | None) -> bool:
         return bool(is_admin(user))
     except Exception:
         return False
+
+
+def _require_gallery_source_operator(request: Request) -> str:
+    """Allow host-folder mapping only to an admin or a single-user install."""
+    user = require_user(request)
+    if user and not _current_user_is_admin(request, user):
+        raise HTTPException(403, "Only an administrator can connect local folders")
+    return user
 
 
 def _sanitize_gallery_filename(filename: str) -> str:
@@ -68,6 +90,223 @@ def _gallery_image_path(filename: str) -> Path:
     if safe_name != original:
         raise HTTPException(400, "Unsafe gallery filename")
     return path
+
+
+def _gallery_row_path(db, img: GalleryImage, user: str | None, *, writable: bool = False) -> Path:
+    if not img.source_file_id:
+        return _gallery_image_path(img.filename)
+    if writable:
+        raise HTTPException(409, "Connected folder originals are read-only")
+    try:
+        return resolve_source_file(db, img, source_owner(user))
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc))
+
+
+class GallerySourceChange(BaseModel):
+    path: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+class ImmichConnectionChange(BaseModel):
+    server_url: str | None = Field(default=None, max_length=2048)
+    api_key: str | None = Field(default=None, max_length=4096)
+    enabled: bool | None = None
+
+    model_config = {"extra": "forbid"}
+
+
+def _immich_owner(request: Request) -> str | None:
+    return require_user(request) or None
+
+
+def _raise_immich(exc: immich_gallery.ImmichError) -> None:
+    raise HTTPException(exc.status_code, exc.public())
+
+
+def _compose_gallery_discovery(
+    local: dict[str, Any],
+    immich: dict[str, Any],
+    tailnet: dict[str, Any],
+) -> dict[str, Any]:
+    """Project provider-specific checks into one list of distinct gallery sources."""
+    sources: list[dict[str, Any]] = []
+    self_name = str(tailnet.get("self_name") or "This device")
+    connected_paths: set[str] = set()
+    for source in local.get("sources", []):
+        path = str(source.get("path") or "")
+        connected_paths.add(path)
+        enabled = bool(source.get("enabled"))
+        sources.append(
+            {
+                "id": f"folder:{source['id']}",
+                "source_id": source["id"],
+                "kind": "device_folder",
+                "provider": "Device folder",
+                "label": source.get("label") or "Pictures",
+                "device": self_name,
+                "location": path,
+                "state": "connected" if enabled else "disabled",
+                "connected": True,
+                "connectable": True,
+                "enabled": enabled,
+                "indexed": int(source.get("indexed") or 0),
+                "last_scan_at": source.get("last_scan_at"),
+                "error": source.get("error"),
+            }
+        )
+    for candidate in local.get("candidates", []):
+        path = str(candidate.get("path") or "")
+        if not path or path in connected_paths:
+            continue
+        sources.append(
+            {
+                "id": f"folder:{hashlib.sha256(path.encode()).hexdigest()[:16]}",
+                "kind": "device_folder",
+                "provider": "Device folder",
+                "label": candidate.get("label") or "Pictures",
+                "device": self_name,
+                "location": path,
+                "state": "available" if candidate.get("available") else "unavailable",
+                "connected": False,
+                "connectable": bool(candidate.get("available")),
+                "reason": candidate.get("reason"),
+            }
+        )
+
+    configured_url = str(immich.get("server_url") or "").rstrip("/")
+    matched = False
+    for candidate in tailnet.get("candidates", []):
+        item = dict(candidate)
+        if configured_url and str(item.get("server_url") or "").rstrip("/") == configured_url:
+            matched = True
+            item.update(
+                {
+                    "id": "immich:primary",
+                    "state": "connected" if immich.get("enabled") else "disabled",
+                    "connected": True,
+                    "enabled": bool(immich.get("enabled")),
+                    "status": immich.get("status"),
+                    "error": immich.get("last_error"),
+                }
+            )
+        sources.append(item)
+    if immich.get("configured") and not matched:
+        sources.append(
+            {
+                "id": "immich:primary",
+                "kind": "immich",
+                "provider": "Immich",
+                "label": "Immich",
+                "device": "Remote service",
+                "location": configured_url,
+                "server_url": configured_url,
+                "state": "connected" if immich.get("enabled") else "disabled",
+                "connected": True,
+                "connectable": True,
+                "enabled": bool(immich.get("enabled")),
+                "status": immich.get("status"),
+                "error": immich.get("last_error"),
+            }
+        )
+
+    connected = sum(1 for source in sources if source.get("state") == "connected")
+    available = sum(1 for source in sources if source.get("state") == "available")
+    return {
+        "sources": sources,
+        "connected": connected,
+        "available": available,
+        "local": {
+            "environment": local.get("environment"),
+            "message": local.get("message"),
+        },
+        "tailnet": {
+            "available": bool(tailnet.get("available")),
+            "devices_checked": int(tailnet.get("devices_checked") or 0),
+            "message": tailnet.get("message"),
+        },
+    }
+
+
+def _store_gallery_bytes(
+    content: bytes,
+    original_filename: str,
+    user: str | None,
+    *,
+    album_id: str | None = None,
+    model: str = "imported",
+) -> dict[str, Any]:
+    """Persist one already-bounded import through the existing Gallery model."""
+    file_hash = hashlib.sha256(content).hexdigest()
+    db = SessionLocal()
+    img_path: Path | None = None
+    try:
+        if album_id:
+            album = _owner_filter(
+                db.query(GalleryAlbum).filter(GalleryAlbum.id == album_id), user, GalleryAlbum
+            ).first()
+            if album is None:
+                raise HTTPException(404, "Album not found")
+        existing = _owner_filter(
+            db.query(GalleryImage).filter(
+                GalleryImage.file_hash == file_hash,
+                GalleryImage.is_active == True,  # noqa: E712
+            ),
+            user,
+        ).first()
+        if existing:
+            return {
+                "ok": False,
+                "duplicate": True,
+                "filename": existing.filename,
+                "id": existing.id,
+                "message": "Duplicate photo skipped",
+            }
+
+        ext = Path(original_filename).suffix.lower().lstrip(".") or "png"
+        video_exts = {"mp4", "mov", "webm", "mkv", "m4v"}
+        image_exts = {"png", "jpg", "jpeg", "webp", "gif"}
+        if ext not in video_exts | image_exts:
+            raise HTTPException(400, f"Unsupported file type: .{ext}")
+        GALLERY_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+        filename = f"{uuid.uuid4().hex[:12]}.{ext}"
+        img_path = GALLERY_IMAGE_DIR / filename
+        img_path.write_bytes(content)
+        exif = {} if ext in video_exts else _extract_exif(content)
+        original_name = Path(original_filename).stem or "Immich import"
+        img_id = str(uuid.uuid4())
+        db.add(GalleryImage(
+            id=img_id,
+            filename=filename,
+            prompt=original_name,
+            model=model,
+            owner=user,
+            file_hash=file_hash,
+            file_size=len(content),
+            width=exif.get("width"),
+            height=exif.get("height"),
+            taken_at=exif.get("taken_at"),
+            camera_make=exif.get("camera_make"),
+            camera_model=exif.get("camera_model"),
+            gps_lat=exif.get("gps_lat"),
+            gps_lng=exif.get("gps_lng"),
+            album_id=album_id,
+        ))
+        db.commit()
+        result = {"ok": True, "filename": filename, "id": img_id, "bytes": len(content)}
+        if exif.get("exif_error"):
+            result["exif_warning"] = exif["exif_error"]
+        return result
+    except Exception:
+        db.rollback()
+        if img_path is not None:
+            try:
+                img_path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+    finally:
+        db.close()
 
 
 def _normalize_image_endpoint_base(url: str) -> str:
@@ -175,9 +414,6 @@ def setup_gallery_routes() -> APIRouter:
     @router.post("/api/gallery/upload")
     async def gallery_upload(request: Request):
         """Upload an image file to the gallery with EXIF extraction and dedup."""
-        import uuid
-        from pathlib import Path
-
         form = await request.form()
         file = form.get("file")
         if not file or not hasattr(file, 'filename'):
@@ -186,72 +422,18 @@ def setup_gallery_routes() -> APIRouter:
         user = get_current_user(request)
         album_id = form.get("album_id") or None
         content = await read_upload_limited(file, GALLERY_UPLOAD_MAX_BYTES, "Gallery upload")
-
-        # Duplicate detection via SHA-256
-        file_hash = hashlib.sha256(content).hexdigest()
-        db = SessionLocal()
-        try:
-            if album_id and user is not None:
+        if album_id:
+            db = SessionLocal()
+            try:
                 _get_or_404_album(db, album_id, user)
-
-            # SECURITY: scope the dup-detect to THIS user — otherwise a
-            # caller can probe whether someone else uploaded the same
-            # file (the response leaks the existing row's id+filename).
-            _dup_q = db.query(GalleryImage).filter(
-                GalleryImage.file_hash == file_hash,
-                GalleryImage.is_active == True,
-            )
-            if user:
-                _dup_q = _dup_q.filter(GalleryImage.owner == user)
-            existing = _dup_q.first()
-            if existing:
-                return {"ok": False, "duplicate": True, "filename": existing.filename,
-                        "id": existing.id, "message": "Duplicate photo skipped"}
-
-            img_dir = Path(GENERATED_IMAGES_DIR)
-            img_dir.mkdir(parents=True, exist_ok=True)
-
-            ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "png"
-            VIDEO_EXTS = {"mp4", "mov", "webm", "mkv", "m4v"}
-            IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "gif"}
-            if ext not in VIDEO_EXTS and ext not in IMAGE_EXTS:
-                raise HTTPException(400, f"Unsupported file type: .{ext}")
-            is_video = ext in VIDEO_EXTS
-            filename = f"{uuid.uuid4().hex[:12]}.{ext}"
-            img_path = img_dir / filename
-            img_path.write_bytes(content)
-
-            # Extract EXIF for images only — PIL can't parse video containers
-            # and the failure path logs a noisy WARNING. We'll add ffprobe-based
-            # video metadata extraction in a follow-up.
-            exif = {} if is_video else _extract_exif(content)
-            original_name = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
-
-            img_id = str(uuid.uuid4())
-            db.add(GalleryImage(
-                id=img_id,
-                filename=filename,
-                prompt=original_name,
-                model="imported",
-                owner=user,
-                file_hash=file_hash,
-                file_size=len(content),
-                width=exif.get("width"),
-                height=exif.get("height"),
-                taken_at=exif.get("taken_at"),
-                camera_make=exif.get("camera_make"),
-                camera_model=exif.get("camera_model"),
-                gps_lat=exif.get("gps_lat"),
-                gps_lng=exif.get("gps_lng"),
-                album_id=album_id,
-            ))
-            db.commit()
-            resp = {"ok": True, "filename": filename, "id": img_id}
-            if exif.get("exif_error"):
-                resp["exif_warning"] = exif["exif_error"]
-            return resp
-        finally:
-            db.close()
+            finally:
+                db.close()
+        return _store_gallery_bytes(
+            content,
+            file.filename,
+            user,
+            album_id=album_id,
+        )
 
     # ---- POST /api/gallery/{id}/replace ----
     @router.post("/api/gallery/{image_id}/replace")
@@ -260,11 +442,11 @@ def setup_gallery_routes() -> APIRouter:
         user = get_current_user(request)
         db = SessionLocal()
         try:
-            img = db.query(GalleryImage).filter(GalleryImage.id == image_id).first()
+            img = _owner_filter(
+                db.query(GalleryImage).filter(GalleryImage.id == image_id), user
+            ).first()
             if not img:
                 raise HTTPException(404, "Image not found")
-            if not user or img.owner != user:
-                raise HTTPException(403, "Not your image")
 
             form = await request.form()
             file = form.get("image")
@@ -273,7 +455,7 @@ def setup_gallery_routes() -> APIRouter:
 
             content = await read_upload_limited(file, GALLERY_UPLOAD_MAX_BYTES, "Gallery replacement")
             GALLERY_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-            img_path = _gallery_image_path(img.filename)
+            img_path = _gallery_row_path(db, img, user, writable=True)
             img_path.write_bytes(content)
 
             # Refresh dimensions in case the editor resized the canvas.
@@ -311,11 +493,11 @@ def setup_gallery_routes() -> APIRouter:
             raise HTTPException(400, "Name too long")
         db = SessionLocal()
         try:
-            img = db.query(GalleryImage).filter(GalleryImage.id == image_id).first()
+            img = _owner_filter(
+                db.query(GalleryImage).filter(GalleryImage.id == image_id), user
+            ).first()
             if not img:
                 raise HTTPException(404, "Image not found")
-            if not user or img.owner != user:
-                raise HTTPException(403, "Not your image")
             img.prompt = new_name
             db.commit()
             return {"ok": True, "name": new_name}
@@ -342,13 +524,13 @@ def setup_gallery_routes() -> APIRouter:
         user = get_current_user(request)
         db = SessionLocal()
         try:
-            img = db.query(GalleryImage).filter(GalleryImage.id == image_id).first()
+            img = _owner_filter(
+                db.query(GalleryImage).filter(GalleryImage.id == image_id), user
+            ).first()
             if not img:
                 raise HTTPException(404, "Image not found")
-            if not user or img.owner != user:
-                raise HTTPException(403, "Not your image")
 
-            img_path = _gallery_image_path(img.filename)
+            img_path = _gallery_row_path(db, img, user, writable=True)
             if not img_path.exists():
                 raise HTTPException(404, "Image file not found")
 
@@ -507,6 +689,26 @@ def setup_gallery_routes() -> APIRouter:
         limit: int = Query(24, ge=1, le=100),
     ) -> Dict[str, Any]:
         user = get_current_user(request)
+        if model == "Immich" or (album and album.startswith("immich:")):
+            owner = _immich_owner(request)
+            try:
+                remote = await immich_gallery.list_assets(
+                    owner,
+                    page=(offset // limit) + 1,
+                    size=limit,
+                    search=search,
+                    album=album,
+                    sort=sort,
+                )
+            except immich_gallery.ImmichError as exc:
+                _raise_immich(exc)
+            return {
+                **remote,
+                "total_tagged": 0,
+                "tags": [],
+                "models": ["Immich"],
+            }
+
         db = SessionLocal()
         try:
             # Distinct tags for filter UI
@@ -529,6 +731,18 @@ def setup_gallery_routes() -> APIRouter:
             model_q = _owner_filter(model_q, user)
             model_rows = model_q.distinct().all()
             all_models = sorted([m for (m,) in model_rows if m])
+            try:
+                optional_owner = _immich_owner(request)
+            except HTTPException:
+                optional_owner = None
+            else:
+                try:
+                    remote_status = immich_gallery.connection_status(optional_owner)
+                    if remote_status["configured"] and remote_status["enabled"]:
+                        all_models.append("Immich")
+                        all_models = sorted(set(all_models))
+                except Exception:
+                    logger.warning("Immich status lookup failed", exc_info=True)
 
             # Base query with left join to sessions for session_name
             q = (
@@ -624,6 +838,8 @@ def setup_gallery_routes() -> APIRouter:
                 "tags": sorted(all_tags),
                 "models": all_models,
             }
+        except HTTPException:
+            raise
         except Exception:
             logger.exception("Failed to fetch gallery library")
             raise HTTPException(500, "Failed to fetch gallery library")
@@ -635,6 +851,7 @@ def setup_gallery_routes() -> APIRouter:
     @router.get("/api/gallery/albums")
     async def list_albums(request: Request):
         user = get_current_user(request)
+        source_state = None
         db = SessionLocal()
         try:
             q = db.query(GalleryAlbum)
@@ -652,7 +869,7 @@ def setup_gallery_routes() -> APIRouter:
                     cover_q = db.query(GalleryImage).filter(GalleryImage.id == a.cover_id)
                     cover = _owner_filter(cover_q, user).first()
                     if cover:
-                        cover_url = f"/api/generated-image/{cover.filename}"
+                        cover_url = _image_url(cover)
                 elif count > 0:
                     _cover_q = db.query(GalleryImage).filter(
                         GalleryImage.album_id == a.id, GalleryImage.is_active == True
@@ -660,15 +877,33 @@ def setup_gallery_routes() -> APIRouter:
                     _cover_q = _owner_filter(_cover_q, user)
                     first = _cover_q.order_by(GalleryImage.created_at.desc()).first()
                     if first:
-                        cover_url = f"/api/generated-image/{first.filename}"
+                        cover_url = _image_url(first)
                 result.append({
                     "id": a.id, "name": a.name, "description": a.description or "",
                     "cover_url": cover_url, "count": count,
                     "created_at": a.created_at.isoformat() if a.created_at else None,
                 })
-            return {"albums": result}
         finally:
             db.close()
+        try:
+            owner = _immich_owner(request)
+        except HTTPException:
+            owner = None
+        else:
+            try:
+                remote_status = immich_gallery.connection_status(owner)
+                if remote_status["configured"] and remote_status["enabled"]:
+                    remote = await immich_gallery.list_albums(owner)
+                    result.extend(remote["albums"])
+                    source_state = remote["source_state"]
+            except immich_gallery.ImmichError as exc:
+                source_state = {**exc.public(), "stale": False}
+            except Exception:
+                logger.warning("Immich album lookup failed", exc_info=True)
+        response: dict[str, Any] = {"albums": result}
+        if source_state is not None:
+            response["source_state"] = source_state
+        return response
 
     @router.post("/api/gallery/albums")
     async def create_album(request: Request):
@@ -717,6 +952,338 @@ def setup_gallery_routes() -> APIRouter:
         finally:
             db.close()
 
+    # ---- Distinct Gallery source discovery ----
+
+    @router.get("/api/gallery/discovery")
+    async def gallery_discovery(request: Request):
+        user = _require_gallery_source_operator(request)
+        owner = source_owner(user)
+        db = SessionLocal()
+        try:
+            local = source_status(db, owner)
+        finally:
+            db.close()
+        tailnet = await immich_gallery.discover_tailnet_immich()
+        return _compose_gallery_discovery(
+            local,
+            immich_gallery.connection_status(_immich_owner(request)),
+            tailnet,
+        )
+
+    # ---- Owner-scoped Immich Gallery connection ----
+
+    @router.get("/api/gallery/immich/connection")
+    def immich_connection(request: Request):
+        return immich_gallery.connection_status(_immich_owner(request))
+
+    @router.put("/api/gallery/immich/connection")
+    async def save_immich_connection(request: Request, change: ImmichConnectionChange):
+        owner = _immich_owner(request)
+        kwargs: dict[str, Any] = {}
+        fields = change.model_fields_set
+        if "server_url" in fields:
+            kwargs["server_url"] = change.server_url
+        if change.api_key and change.api_key.strip():
+            kwargs["api_key"] = change.api_key
+        if "enabled" in fields:
+            kwargs["enabled"] = change.enabled
+        try:
+            return immich_gallery.save_connection(owner, **kwargs)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @router.delete("/api/gallery/immich/connection")
+    def delete_immich_connection(request: Request):
+        try:
+            removed = immich_gallery.remove_connection(_immich_owner(request))
+            return {"ok": True, "removed_cached_files": removed}
+        except immich_gallery.ImmichError as exc:
+            _raise_immich(exc)
+
+    @router.post("/api/gallery/immich/test")
+    async def test_immich_connection(request: Request):
+        try:
+            return await immich_gallery.test_connection(_immich_owner(request))
+        except immich_gallery.ImmichError as exc:
+            _raise_immich(exc)
+
+    @router.post("/api/gallery/immich/sync")
+    async def sync_immich_gallery(request: Request):
+        owner = _immich_owner(request)
+        try:
+            assets = await immich_gallery.list_assets(owner, page=1, size=100)
+            albums = await immich_gallery.list_albums(owner)
+            return {
+                "ok": True,
+                "assets_cached": len(assets["items"]),
+                "albums_cached": len(albums["albums"]),
+                "source_state": assets["source_state"],
+            }
+        except immich_gallery.ImmichError as exc:
+            _raise_immich(exc)
+
+    @router.delete("/api/gallery/immich/cache")
+    def clear_immich_cache(request: Request):
+        try:
+            removed = immich_gallery.clear_cache(_immich_owner(request))
+            return {"ok": True, "removed_cached_files": removed}
+        except immich_gallery.ImmichError as exc:
+            _raise_immich(exc)
+
+    @router.get("/api/gallery/immich/assets/{asset_ref}/thumbnail")
+    async def immich_thumbnail(
+        request: Request,
+        asset_ref: str,
+        size: str = Query("thumbnail"),
+    ):
+        try:
+            content, media_type, state = await immich_gallery.get_thumbnail(
+                _immich_owner(request), asset_ref, size=size
+            )
+            return Response(
+                content,
+                media_type=media_type,
+                headers={
+                    "Cache-Control": "private, max-age=3600",
+                    "X-Content-Type-Options": "nosniff",
+                    "X-Immich-Source-State": state,
+                },
+            )
+        except immich_gallery.ImmichError as exc:
+            _raise_immich(exc)
+
+    @router.get("/api/gallery/immich/assets/{asset_ref}/download")
+    async def download_immich_asset(request: Request, asset_ref: str):
+        try:
+            client, upstream = await immich_gallery.open_original(
+                _immich_owner(request),
+                asset_ref,
+                range_header=request.headers.get("range"),
+            )
+        except immich_gallery.ImmichError as exc:
+            _raise_immich(exc)
+
+        async def body():
+            try:
+                async for chunk in upstream.aiter_raw():
+                    yield chunk
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+
+        headers = {
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": "attachment",
+            "X-Content-Type-Options": "nosniff",
+        }
+        for source, target in (
+            ("content-length", "Content-Length"),
+            ("content-range", "Content-Range"),
+            ("accept-ranges", "Accept-Ranges"),
+        ):
+            value = upstream.headers.get(source)
+            if value:
+                headers[target] = value
+        return StreamingResponse(
+            body(),
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type", "application/octet-stream"),
+            headers=headers,
+        )
+
+    @router.post("/api/gallery/immich/assets/{asset_ref}/import")
+    async def import_immich_asset(request: Request, asset_ref: str):
+        owner = _immich_owner(request)
+        try:
+            _connection, metadata = await immich_gallery.get_asset(owner, asset_ref)
+            content, _media_type = await immich_gallery.download_original_bounded(
+                owner, asset_ref, max_bytes=GALLERY_UPLOAD_MAX_BYTES
+            )
+            result = _store_gallery_bytes(
+                content,
+                Path(str(metadata.get("originalFileName") or "immich-import.jpg")).name,
+                owner,
+                model="immich-import",
+            )
+            result.update({"source_type": "immich", "source_asset_id": metadata.get("id")})
+            return result
+        except immich_gallery.ImmichError as exc:
+            _raise_immich(exc)
+
+    @router.post("/api/gallery/immich/export/{image_id}")
+    async def export_gallery_asset(request: Request, image_id: str):
+        owner = _immich_owner(request)
+        db = SessionLocal()
+        try:
+            image = _owner_filter(
+                db.query(GalleryImage).filter(
+                    GalleryImage.id == image_id,
+                    GalleryImage.is_active == True,  # noqa: E712
+                ),
+                owner,
+            ).first()
+            if image is None:
+                raise HTTPException(404, "Image not found")
+            path = _gallery_row_path(db, image, owner)
+            try:
+                return await immich_gallery.upload_asset(
+                    owner,
+                    path,
+                    image.filename,
+                    created_at=image.taken_at or image.created_at,
+                    modified_at=image.updated_at,
+                )
+            except immich_gallery.ImmichError as exc:
+                _raise_immich(exc)
+        finally:
+            db.close()
+
+    # ---- Read-only local folder sources ----
+
+    @router.get("/api/gallery/sources")
+    def gallery_sources(request: Request):
+        owner = source_owner(_require_gallery_source_operator(request))
+        db = SessionLocal()
+        try:
+            return source_status(db, owner)
+        finally:
+            db.close()
+
+    @router.post("/api/gallery/sources/sync")
+    def sync_sources(request: Request):
+        owner = source_owner(_require_gallery_source_operator(request))
+        db = SessionLocal()
+        try:
+            return sync_gallery_sources(db, owner)
+        except Exception:
+            db.rollback()
+            logger.exception("Gallery source sync failed")
+            raise HTTPException(500, "Gallery source sync failed")
+        finally:
+            db.close()
+
+    @router.post("/api/gallery/sources")
+    def connect_source(request: Request, change: GallerySourceChange):
+        owner = source_owner(_require_gallery_source_operator(request))
+        if not change.path:
+            raise HTTPException(400, "Folder path is required")
+        try:
+            path, kind = validate_source_root(change.path)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        db = SessionLocal()
+        try:
+            source = db.query(GallerySource).filter(
+                GallerySource.owner == owner,
+                GallerySource.path == str(path),
+            ).first()
+            if source is None:
+                source = GallerySource(
+                    id=str(uuid.uuid4()),
+                    owner=owner,
+                    path=str(path),
+                    label=path.name or "Pictures",
+                    kind=kind,
+                    enabled=True,
+                    auto_connected=False,
+                )
+                db.add(source)
+            else:
+                source.enabled = True
+            db.flush()
+            scan_gallery_source(db, source)
+            db.commit()
+            return source_status(db, owner)
+        except HTTPException:
+            raise
+        except Exception:
+            db.rollback()
+            logger.exception("Gallery source connect failed")
+            raise HTTPException(500, "Gallery source connect failed")
+        finally:
+            db.close()
+
+    @router.patch("/api/gallery/sources/{source_id}")
+    def update_source(request: Request, source_id: str, change: GallerySourceChange):
+        owner = source_owner(_require_gallery_source_operator(request))
+        db = SessionLocal()
+        try:
+            source = db.query(GallerySource).filter(
+                GallerySource.id == source_id,
+                GallerySource.owner == owner,
+            ).first()
+            if source is None:
+                raise HTTPException(404, "Gallery source not found")
+            if change.path is not None:
+                try:
+                    path, kind = validate_source_root(change.path)
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc))
+                conflict = db.query(GallerySource).filter(
+                    GallerySource.owner == owner,
+                    GallerySource.path == str(path),
+                    GallerySource.id != source.id,
+                ).first()
+                if conflict is not None:
+                    raise HTTPException(409, "That folder is already connected")
+                source.path = str(path)
+                source.label = path.name or "Pictures"
+                source.kind = kind
+                source.auto_connected = False
+                for item in source.files:
+                    item.active = False
+            if change.enabled is not None:
+                source.enabled = change.enabled
+                if not change.enabled:
+                    for item in source.files:
+                        item.active = False
+            db.flush()
+            if source.enabled:
+                scan_gallery_source(db, source)
+            else:
+                _reconcile_owner_images(db, owner)
+            db.commit()
+            return source_status(db, owner)
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception:
+            db.rollback()
+            logger.exception("Gallery source update failed")
+            raise HTTPException(500, "Gallery source update failed")
+        finally:
+            db.close()
+
+    @router.get("/api/gallery/source/{image_id}/{display_name}")
+    def serve_source_image(request: Request, image_id: str, display_name: str):
+        user = require_user(request)
+        owner = source_owner(user)
+        db = SessionLocal()
+        try:
+            img = db.query(GalleryImage).filter(
+                GalleryImage.id == image_id,
+                GalleryImage.is_active == True,  # noqa: E712
+            ).first()
+            if img is None or (user and img.owner != user) or not img.source_file_id:
+                raise HTTPException(404, "Image not found")
+            if display_name != img.filename:
+                raise HTTPException(404, "Image not found")
+            try:
+                path = resolve_source_file(db, img, owner)
+            except FileNotFoundError as exc:
+                raise HTTPException(404, str(exc))
+            media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            return FileResponse(
+                path,
+                media_type=media_type,
+                headers={
+                    "Cache-Control": "private, no-cache",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+        finally:
+            db.close()
+
     @router.post("/api/gallery/ai-tag-batch")
     async def ai_tag_batch(
         request: Request,
@@ -745,17 +1312,15 @@ def setup_gallery_routes() -> APIRouter:
         user = get_current_user(request)
         db = SessionLocal()
         try:
-            row = (
+            q = (
                 db.query(GalleryImage, DbSession.name)
                 .outerjoin(DbSession, GalleryImage.session_id == DbSession.id)
                 .filter(GalleryImage.id == image_id)
-                .first()
             )
+            row = _owner_filter(q, user).first()
             if not row:
                 raise HTTPException(404, "Image not found")
             img, session_name = row
-            if not user or img.owner != user:
-                raise HTTPException(404, "Image not found")
             return _image_to_dict(img, session_name)
         finally:
             db.close()
@@ -766,10 +1331,10 @@ def setup_gallery_routes() -> APIRouter:
         user = get_current_user(request)
         db = SessionLocal()
         try:
-            img = db.query(GalleryImage).filter(GalleryImage.id == image_id).first()
+            img = _owner_filter(
+                db.query(GalleryImage).filter(GalleryImage.id == image_id), user
+            ).first()
             if not img:
-                raise HTTPException(404, "Image not found")
-            if not user or img.owner != user:
                 raise HTTPException(404, "Image not found")
             if req.tags is not None:
                 # Drop any tag from the user-tags field that already lives in
@@ -816,8 +1381,6 @@ def setup_gallery_routes() -> APIRouter:
     @router.post("/api/gallery/download-zip")
     async def gallery_download_zip(request: Request):
         user = get_current_user(request)
-        if not user:
-            raise HTTPException(401, "Not authenticated")
         try:
             data = await request.json()
         except Exception:
@@ -827,10 +1390,8 @@ def setup_gallery_routes() -> APIRouter:
             raise HTTPException(400, "No images specified")
         db = SessionLocal()
         try:
-            imgs = db.query(GalleryImage).filter(
-                GalleryImage.id.in_(ids),
-                GalleryImage.owner == user,
-            ).all()
+            q = db.query(GalleryImage).filter(GalleryImage.id.in_(ids))
+            imgs = _owner_filter(q, user).all()
             if not imgs:
                 raise HTTPException(404, "No images found")
             import io
@@ -840,7 +1401,7 @@ def setup_gallery_routes() -> APIRouter:
             used = set()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for img in imgs:
-                    src = _gallery_image_path(img.filename)
+                    src = _gallery_row_path(db, img, user)
                     if not src.exists():
                         continue
                     ext = src.suffix or ".png"
@@ -961,11 +1522,14 @@ def setup_gallery_routes() -> APIRouter:
         user = get_current_user(request)
         db = SessionLocal()
         try:
-            img = db.query(GalleryImage).filter(GalleryImage.id == image_id).first()
+            img = _owner_filter(
+                db.query(GalleryImage).filter(GalleryImage.id == image_id), user
+            ).first()
             if not img:
                 raise HTTPException(404, "Image not found")
-            if not user or img.owner != user:
-                raise HTTPException(404, "Image not found")
+
+            if img.source_file_id:
+                raise HTTPException(409, "Disconnect the folder to remove connected photos")
 
             img_filename = img.filename
             # Soft-delete the record first; the DB is the source of truth.
@@ -1750,18 +2314,16 @@ def setup_gallery_routes() -> APIRouter:
     # ---- Album management (path-param routes) ----
 
     def _get_or_404_album(db, album_id: str, user):
-        album = db.query(GalleryAlbum).filter(GalleryAlbum.id == album_id).first()
+        q = db.query(GalleryAlbum).filter(GalleryAlbum.id == album_id)
+        album = _owner_filter(q, user, GalleryAlbum).first()
         if not album:
-            raise HTTPException(404, "Album not found")
-        if not user or album.owner != user:
             raise HTTPException(404, "Album not found")
         return album
 
     def _get_or_404_image(db, image_id: str, user):
-        img = db.query(GalleryImage).filter(GalleryImage.id == image_id).first()
+        q = db.query(GalleryImage).filter(GalleryImage.id == image_id)
+        img = _owner_filter(q, user).first()
         if not img:
-            raise HTTPException(404, "Image not found")
-        if not user or img.owner != user:
             raise HTTPException(404, "Image not found")
         return img
 
@@ -1793,8 +2355,7 @@ def setup_gallery_routes() -> APIRouter:
         try:
             album = _get_or_404_album(db, album_id, user)
             q = db.query(GalleryImage).filter(GalleryImage.album_id == album_id)
-            if user is not None:
-                q = q.filter(GalleryImage.owner == user)
+            q = _owner_filter(q, user)
             q.update({"album_id": None}, synchronize_session=False)
             db.delete(album)
             db.commit()
@@ -1812,8 +2373,7 @@ def setup_gallery_routes() -> APIRouter:
             _get_or_404_album(db, album_id, user)
             # Only move images the caller owns
             q = db.query(GalleryImage).filter(GalleryImage.id.in_(ids))
-            if user:
-                q = q.filter(GalleryImage.owner == user)
+            q = _owner_filter(q, user)
             q.update({"album_id": album_id}, synchronize_session=False)
             db.commit()
             return {"ok": True, "count": len(ids)}
@@ -1831,8 +2391,7 @@ def setup_gallery_routes() -> APIRouter:
             q = db.query(GalleryImage).filter(
                 GalleryImage.id.in_(ids), GalleryImage.album_id == album_id
             )
-            if user:
-                q = q.filter(GalleryImage.owner == user)
+            q = _owner_filter(q, user)
             q.update({"album_id": None}, synchronize_session=False)
             db.commit()
             return {"ok": True}
@@ -1866,7 +2425,7 @@ def setup_gallery_routes() -> APIRouter:
         try:
             img = _get_or_404_image(db, image_id, user)
 
-            img_path = _gallery_image_path(img.filename)
+            img_path = _gallery_row_path(db, img, user)
             if not img_path.exists():
                 raise HTTPException(404, "Image file not found")
 
