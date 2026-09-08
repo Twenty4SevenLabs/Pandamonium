@@ -526,7 +526,8 @@ export function getAutoScroll() {
  * Auto-resize textarea based on content
  */
 export function autoResize(textarea) {
-  const lineHeight = parseInt(getComputedStyle(textarea).lineHeight);
+  const textareaStyle = getComputedStyle(textarea);
+  const lineHeight = parseInt(textareaStyle.lineHeight);
   const isMobile = window.innerWidth <= 768;
   const maxHeight = isMobile ? 150 : lineHeight * 8;
 
@@ -534,8 +535,12 @@ export function autoResize(textarea) {
   let clone = textarea._resizeClone;
   if (!clone) {
     clone = textarea.cloneNode(false);
+    clone.removeAttribute('id');
+    clone.setAttribute('aria-hidden', 'true');
     clone.style.cssText = getComputedStyle(textarea).cssText;
     clone.style.position = 'absolute';
+    clone.style.left = '0';
+    clone.style.top = '0';
     clone.style.visibility = 'hidden';
     clone.style.height = '0';
     clone.style.transition = 'none';
@@ -545,6 +550,11 @@ export function autoResize(textarea) {
     textarea.parentNode.appendChild(clone);
     textarea._resizeClone = clone;
   }
+  // Computed styles copied during clone creation become fixed inline values.
+  // Refresh the dimensions that can change with responsive composer controls.
+  clone.style.paddingLeft = textareaStyle.paddingLeft;
+  clone.style.paddingRight = textareaStyle.paddingRight;
+  clone.style.boxSizing = textareaStyle.boxSizing;
   clone.style.width = textarea.offsetWidth + 'px';
   clone.value = textarea.value;
   clone.style.height = '0';
@@ -620,7 +630,7 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
       okBtn.removeEventListener('click', onOk);
       cancelBtn.removeEventListener('click', onCancel);
       overlay.removeEventListener('click', onBackdrop);
-      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('keydown', onKey, true);
       try { _prevFocus && _prevFocus.focus && _prevFocus.focus(); } catch {}
       resolve(result);
     }
@@ -651,7 +661,7 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
     okBtn.addEventListener('click', onOk);
     cancelBtn.addEventListener('click', onCancel);
     overlay.addEventListener('click', onBackdrop);
-    document.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
     okBtn.focus();
   });
 }

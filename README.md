@@ -26,7 +26,7 @@
 git clone https://github.com/MADPANDA3D/Pandamonium.git
 cd Pandamonium
 cp .env.example .env
-docker compose up -d --build
+PANDAMONIUM_SOURCE_REVISION="$(git rev-parse HEAD)" docker compose up -d --build
 ```
 
 Open `http://localhost:7000` after the containers become healthy. The first
@@ -61,11 +61,29 @@ following maintained platform capabilities.
 - The server persists each conversation target. The left sidebar follows that
   target: conversational identities show only their dated chats, while a Codex
   worker shows its allowlisted projects with tasks loaded beneath each project.
+- Tool-using assistant turns keep visible reasoning, status, and tool activity
+  in one chronological disclosure above the final answer. The disclosure is
+  collapsed after completion, expands in the page flow without a nested scroll
+  region, and remains keyboard-accessible after reopening a saved conversation.
+
+![Assistant turn disclosure on desktop](docs/images/chat-turn-disclosure-desktop.png)
+
+![Assistant turn disclosure on mobile](docs/images/chat-turn-disclosure-mobile.png)
 
 ### Governed agents, tools, and extensions
 
 - Built-in tools, MCP servers, skills, files, shell, web, and browser-facing
   foreground actions behind owner, permission, approval, and evidence gates.
+- Native MCP connections route through their live handshake, catalog, and exact
+  typed tool schemas instead of guessed REST paths or duplicate API identities.
+- Approval cards offer deny, approve once, and explicit narrow approve-always;
+  persistent receipts remain inspectable and revocable, while target or argument
+  changes require a new decision.
+
+![Native MCP approval controls on desktop](docs/images/portal-native-approval-desktop.png)
+
+![Native MCP approval controls on mobile](docs/images/portal-native-approval-mobile.png)
+
 - Jarvis OS protocol coverage for identity, bounded context, memory provenance,
   action envelopes, authority receipts, learning controls, and operational
   traces. See the [runtime status](docs/jos-protocol-runtime-status.md).
@@ -136,14 +154,26 @@ The canonical command is `pandamonium`:
 ```
 
 Managed native Linux installs can enable signed, checksummed updates from the
-fixed footer. Each install stages an immutable release, verifies a full data
-backup, rehearses idempotent migrations, atomically switches `current`, and
-automatically restores the prior release and data if health checks fail. See
+fixed footer. **Check for updates** opens a release-control panel that keeps the
+installed version, exact revision, installation type, and GitHub release check
+as separate facts. During an update it keeps the backup and phase visible,
+reconnects across the expected service restart, and confirms the newly running
+version without requiring a manual page refresh. Each install stages an
+immutable release, verifies a full data backup, rehearses idempotent migrations,
+atomically switches `current`, and automatically restores the prior release and
+data if health checks fail. See
 [Atomic native Linux updates](docs/setup.md#atomic-native-linux-updates).
 
 Docker, ordinary source checkouts, macOS, and Windows still use their platform's
 normal upgrade procedure; the footer reports that host-managed updates are
-required instead of attempting an in-container or in-checkout mutation.
+required instead of attempting an in-container or in-checkout mutation. Official
+GHCR images embed their exact source revision. Source-built Docker installs can
+preserve the same provenance by passing `PANDAMONIUM_SOURCE_REVISION` during the
+Compose build, as shown in the setup guide.
+
+![Updater release control panel on desktop](docs/images/updater-control-panel-desktop.png)
+
+![Updater release control panel on mobile](docs/images/updater-control-panel-mobile.png)
 
 The former `odysseus` command names remain as compatibility aliases for
 existing installations. New configuration uses `PANDAMONIUM_*` environment

@@ -29,8 +29,14 @@ pull request guidelines.
 git clone https://github.com/MADPANDA3D/Pandamonium.git
 cd Pandamonium
 cp .env.example .env       # optional, but recommended for explicit defaults
-docker compose up -d --build
+PANDAMONIUM_SOURCE_REVISION="$(git rev-parse HEAD)" docker compose up -d --build
 ```
+`PANDAMONIUM_SOURCE_REVISION` embeds this checkout's exact revision for the
+updater panel. Official `ghcr.io/madpanda3d/pandamonium` images already carry
+the same revision in both OCI metadata and the application environment. The
+revision is provenance only; Docker and source-checkout upgrades remain
+host-managed.
+
 To include optional extras in the image (PDF viewer, Office extraction; includes AGPL PyMuPDF), build with `docker compose build --build-arg INSTALL_OPTIONAL=true` before `up`.
 
 Open `http://localhost:7000` when the containers are healthy. Docker Compose
@@ -59,6 +65,116 @@ Docker image. Cookbook also needs `tmux` for background model
 downloads and serves. The app itself is lightweight; local model serving is the
 heavy part and depends on the model, runtime, GPU, and VRAM, so small hosts can
 connect to API or remote model servers instead. Use `--host 0.0.0.0` only when you intentionally want LAN/reverse-proxy access.
+
+The setup guide includes **Connect your gallery**. Open it to scan for distinct
+Gallery sources on this device and, when Tailscale is available, online tailnet
+devices. Pandamonium currently recognizes two source types: a device folder it
+can read and an Immich service it can reach. Each result keeps its own type,
+device, location, connection state, and controls; an Immich server is never
+collapsed into a PC Pictures folder.
+
+On a native install, Gallery discovers the current OS user's conventional
+Pictures folder: XDG `XDG_PICTURES_DIR` on Linux, `~/Pictures` on macOS, and the
+Windows Known Folder API. Accessible folders are connected read-only and can be
+refreshed, changed, or disabled under **Gallery → Settings → Gallery sources**.
+For example, an install running on `pc-codex` reports its Pictures directory as
+a **Device folder** on `pc-codex`, while an Immich instance found elsewhere is a
+separate **Immich** source on that server. Seeing a remote PC on the tailnet does
+not grant filesystem access; its folder must be visible to the running process
+through a native install or an explicit read-only mount before it can be offered.
+On an authenticated multi-user install, only an administrator can map host
+folders; this prevents ordinary accounts from browsing process-readable paths.
+Pandamonium indexes metadata and content hashes; it does not upload, rewrite, or
+delete source photos, follow symlinks, or scan outside the selected folder.
+
+Docker cannot see host Pictures folders unless you mount them. Add an explicit
+read-only bind mount and name only the in-container mount path:
+
+```yaml
+services:
+  pandamonium:
+    volumes:
+      - /host/path/to/Pictures:/media/pictures:ro
+    environment:
+      - PANDAMONIUM_GALLERY_MEDIA_ROOTS=/media/pictures
+```
+
+The path must be a real container mount point. An ordinary container directory
+is rejected, and an unmounted host filesystem is never implied. Separate
+multiple Linux container paths with `:`.
+
+Gallery source discovery on desktop and mobile:
+
+![Gallery source discovery on desktop](images/gallery-local-pictures-desktop.png)
+
+![Gallery source discovery on mobile](images/gallery-local-pictures-mobile.png)
+
+### Connect an Immich source
+
+Choose an **Immich found** result under **Gallery → Settings → Gallery sources**.
+Pandamonium checks the standard HTTPS endpoint, port `8443`, and Immich's default
+port `2283` across a bounded set of online tailnet devices. Discovery sends no
+credentials and does not connect anything automatically. If the service is not
+discoverable, use **Connect Immich manually**.
+
+In Immich, open the profile menu, choose **Account Settings → API Keys**, and
+create a key named `Pandamonium`. For every Gallery feature currently shipped,
+enable only these permissions:
+
+- `album.read` — list Immich albums
+- `asset.read` — browse, search, and read photo metadata
+- `asset.view` — display thumbnails and previews
+- `asset.download` — open, download, or import originals
+- `asset.upload` — export local Gallery images to Immich
+
+Leave every other permission disabled. Pandamonium does not update or delete
+Immich content. Copy the key once, paste it into Pandamonium, then save and test
+the connection. See the
+[official Immich user-settings guide](https://docs.immich.app/features/user-settings/).
+Pandamonium encrypts the key at rest and proxies Immich metadata, thumbnails,
+previews, and downloads server-side, so the browser never receives the
+credential.
+
+Choose **Immich** in the Gallery source filter or open an Immich album to browse
+and search the remote library. Remote assets and albums stay visibly read-only.
+**Import a local copy** stores a bounded copy in Pandamonium; **Export to
+Immich** uses Immich's supported upload API. Removing the connection or clearing
+its owner-scoped cache removes only Pandamonium metadata and thumbnails and
+never deletes an Immich original. If Immich is offline, a matching cached page
+can remain visible with an explicit stale/offline state.
+
+The discovered Immich source and its connection controls on desktop and mobile:
+
+![Immich Gallery settings on desktop](images/gallery-immich-settings-desktop.png)
+
+![Immich Gallery settings on mobile](images/gallery-immich-settings-mobile.png)
+
+### Rich chat rendering
+
+Pandamonium renders fenced `mermaid` blocks as responsive diagrams in chat.
+Invalid diagram source stays visible with an error message so an agent response
+never disappears. Markdown tables remain horizontally scrollable on narrow
+screens, and GitHub, Instagram, and Facebook links receive recognizable service
+icons without changing their destinations.
+
+The composer reserves the visible model selector's measured width on desktop,
+split-pane, narrow, and touch layouts. Mermaid rendering also performs one
+bounded retry with quoted node labels when generated punctuation, Unicode, or
+HTML line breaks make otherwise valid flowchart source fail to parse.
+Requests to map the current network mount only a parameterless, owner-scoped
+inspection tool. On Linux, macOS, and Windows it collects the service's visible
+interfaces, routes, neighbors, and optional Tailscale status with fixed
+read-only probes. Linux containers also use Python and fixed kernel network
+tables when command-line probes are absent; wider topology that the running
+service cannot observe must be reported as unverified.
+
+![Mermaid diagram, table, and branded links on desktop](images/chat-mermaid-rich-links-desktop.png)
+
+![Mermaid diagram, table, and branded links on mobile](images/chat-mermaid-rich-links-mobile.png)
+
+![Verified composer and Mermaid follow-ups on desktop](images/chat-composer-mermaid-followups-desktop.png)
+
+![Verified composer and Mermaid follow-ups on mobile](images/chat-composer-mermaid-followups-mobile.png)
 
 ### Atomic native Linux updates
 
@@ -132,10 +248,15 @@ manual app start can make an updater-initiated restart wait on its own recovery
 transaction.
 
 Use `./scripts/pandamonium update check` and `update status` for readback. The
-footer's **Check for updates** action never installs by itself; **Update now**
-requires a separate confirmation and shows phase, percentage, backup path,
-result, and rollback availability. Set `PANDAMONIUM_UPDATE_CHANNEL=prerelease`
-only on hosts that intentionally accept prereleases.
+footer's **Check for updates** action opens the release-control panel and never
+installs by itself. It reports installed provenance, installation type, and
+GitHub release connectivity independently, so a transient release-check failure
+does not erase the known local build. **Install update** requires a separate
+confirmation and shows phase, percentage, backup path, result, and rollback
+availability. The panel treats the application restart as expected, reconnects
+automatically, then reads back the newly running version without a manual page
+refresh. Set `PANDAMONIUM_UPDATE_CHANNEL=prerelease` only on hosts that
+intentionally accept prereleases.
 
 The updater keeps the immediately previous immutable release and exact verified
 backup. A manual rollback restores both when the signed compatibility contract
@@ -519,6 +640,8 @@ Key settings:
 | `PANDAMONIUM_CHAT_UPLOAD_MAX_BYTES` | `10485760` | Chat/agent attachment cap in bytes. Raise for larger local PDFs or text documents. |
 | `PANDAMONIUM_GALLERY_UPLOAD_MAX_BYTES` | `104857600` | Gallery image upload cap in bytes (100 MB). |
 | `PANDAMONIUM_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES` | `26214400` | Gallery transform input cap in bytes (25 MB). |
+| `PANDAMONIUM_GALLERY_MEDIA_ROOTS` | -- | Explicit in-container read-only Gallery mount paths. Native installs discover the OS Pictures folder instead. |
+| `PANDAMONIUM_GALLERY_SCAN_LIMIT` | `10000` | Maximum supported files inspected per Gallery source refresh. |
 | `PANDAMONIUM_MEMORY_IMPORT_MAX_BYTES` | `10485760` | Memory import file cap in bytes (10 MB). |
 | `PANDAMONIUM_PERSONAL_UPLOAD_MAX_BYTES` | `26214400` | Personal document upload cap in bytes (25 MB). |
 | `PANDAMONIUM_EMAIL_COMPOSE_UPLOAD_MAX_BYTES` | `26214400` | Email compose attachment cap in bytes (25 MB). |

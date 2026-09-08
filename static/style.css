@@ -501,7 +501,7 @@ body.bg-pattern-sparkles {
 
     .sidebar-update-version {
       color: var(--fg);
-      font-size: 10px;
+      font-size: 12px;
       font-weight: 650;
       letter-spacing: 0.02em;
     }
@@ -511,7 +511,7 @@ body.bg-pattern-sparkles {
       align-items: center;
       gap: 5px;
       color: var(--fg);
-      font-size: 9px;
+      font-size: 11px;
       opacity: 0.6;
       line-height: 1.3;
     }
@@ -526,34 +526,35 @@ body.bg-pattern-sparkles {
     }
 
     .sidebar-update-state.is-current { color: var(--color-success); opacity: 0.85; }
-    .sidebar-update-state.is-available { color: var(--accent, var(--red)); opacity: 1; }
+    .sidebar-update-state.is-available { color: var(--green, #50fa7b); opacity: 1; }
     .sidebar-update-state.is-unknown { opacity: 0.45; }
-    .sidebar-update-state.is-checking { color: var(--accent, var(--red)); opacity: 0.8; }
+    .sidebar-update-state.is-checking { color: var(--green, #50fa7b); opacity: 0.8; }
 
     .sidebar-update-commit,
     .sidebar-update-detail,
     .sidebar-update-backup {
       color: var(--fg);
-      font-size: 8px;
+      font-size: 10px;
       line-height: 1.35;
       opacity: 0.48;
       overflow-wrap: anywhere;
     }
 
     .sidebar-update-actions {
-      display: flex;
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
       gap: 5px;
     }
 
     .sidebar-update-action {
-      flex-shrink: 0;
-      padding: 5px 8px;
+      width: 100%;
+      min-height: 34px;
+      padding: 8px 10px;
       border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
       border-radius: 6px;
       background: color-mix(in srgb, var(--fg) 5%, transparent);
       color: var(--fg);
-      font-size: 9px;
+      font-size: 12px;
       font-weight: 700;
       line-height: 1;
       text-decoration: none;
@@ -561,9 +562,9 @@ body.bg-pattern-sparkles {
     }
 
     .sidebar-update-action.is-primary {
-      border-color: transparent;
-      background: var(--accent, var(--red));
-      color: var(--bg);
+      border-color: color-mix(in srgb, var(--green, #50fa7b) 65%, transparent);
+      background: var(--green, #50fa7b);
+      color: #07130b;
     }
 
     .sidebar-update-action:disabled { cursor: wait; opacity: 0.5; }
@@ -2739,6 +2740,7 @@ body.bg-pattern-sparkles {
     .chat-input-top {
       width: 100%;
       position: relative;
+      --model-picker-clearance: 0px;
     }
     .chat-input-top > .model-picker-wrap {
       position: absolute;
@@ -2760,7 +2762,7 @@ body.bg-pattern-sparkles {
       font-family: inherit;
       font-size: 14px;
       line-height: 1.5;
-      padding: 0;
+      padding: 0 var(--model-picker-clearance) 0 0;
       border: 1px solid transparent;
       color: transparent;
       z-index: 1;
@@ -2779,7 +2781,7 @@ body.bg-pattern-sparkles {
       color: var(--fg);
       min-height: 24px;
       max-height: 200px;
-      padding: 0;
+      padding: 0 var(--model-picker-clearance) 0 0;
       font-family: inherit;
       transition: height 0.12s ease-out;
     }
@@ -8694,6 +8696,47 @@ button.hamburger {
   cursor: progress;
 }
 
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.msg a.rich-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 6px 2px 4px;
+  border: 1px solid color-mix(in srgb, currentColor 28%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  line-height: 1.35;
+  vertical-align: middle;
+  text-decoration: none;
+}
+.msg a.rich-link:hover,
+.msg a.rich-link:focus-visible {
+  border-color: currentColor;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+.msg .rich-link-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  border-radius: 4px;
+}
+.msg .rich-link-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 /* Tables */
 .msg table {
   border-collapse: collapse;
@@ -9438,14 +9481,47 @@ button.hamburger {
 /* Mermaid diagram containers */
 .mermaid-container {
   margin: 12px 0;
-  padding: 16px;
-  background: color-mix(in srgb, var(--bg) 95%, var(--fg));
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  padding: 18px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--red) 5%, transparent), transparent 45%),
+    color-mix(in srgb, var(--bg) 95%, var(--fg));
+  border: 1px solid color-mix(in srgb, var(--red) 38%, var(--border));
+  border-radius: 10px;
   overflow-x: auto;
   text-align: center;
+  box-sizing: border-box;
+  max-width: 100%;
 }
-.mermaid-container svg { max-width: 100%; height: auto; }
+.mermaid-container[data-mermaid-state="rendering"] .mermaid-source { opacity: 0.62; }
+.mermaid-container[data-mermaid-state="rendered"] { min-height: 96px; }
+.mermaid-visual { min-width: max-content; }
+.mermaid-visual svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif !important;
+}
+.mermaid-source {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg) 90%, #000);
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.mermaid-source code {
+  color: var(--fg);
+  background: transparent;
+}
+.mermaid-error {
+  margin: 0 0 10px;
+  color: var(--color-error, #ff6b7d);
+  font-size: 0.86em;
+  text-align: left;
+}
 
 /* KaTeX math overrides */
 .katex-display { margin: 0.8em 0; overflow-x: auto; overflow-y: hidden; }
@@ -9478,6 +9554,7 @@ body.fullwidth-chat .chat-history {
 
 .thinking-header {
   display: flex;
+  width: 100%;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -9485,7 +9562,11 @@ body.fullwidth-chat .chat-history {
   cursor: pointer;
   user-select: none;
   background: color-mix(in srgb, var(--red) 8%, transparent);
+  border: 0;
   border-bottom: 1px solid color-mix(in srgb, var(--red) 20%, transparent);
+  color: inherit;
+  font: inherit;
+  text-align: left;
   transition: background 0.2s ease;
 }
 
@@ -9499,6 +9580,11 @@ body.fullwidth-chat .chat-history {
 
 .thinking-header:hover {
   background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+
+.thinking-header:focus-visible {
+  outline: 2px solid var(--red);
+  outline-offset: -2px;
 }
 
 .thinking-header-left {
@@ -9547,6 +9633,13 @@ body.fullwidth-chat .chat-history {
   max-height: 300px;
   overflow-y: auto;
   padding: 12px;
+}
+
+/* A full assistant-turn disclosure belongs to the page flow.  Individual
+   legacy thinking widgets retain their compact scroll region. */
+.assistant-turn-disclosure .thinking-content.expanded {
+  max-height: none;
+  overflow: visible;
 }
 
 .thinking-content-inner {
@@ -11259,6 +11352,177 @@ details a:hover {
   .mad-mcp-status-pill,
   .mad-mcp-sidebar-status,
   .mad-mcp-phase-list li > span { animation: none !important; }
+}
+
+/* Signed updater dialog — intentionally reuses the MAD MCP control-panel
+   frame and scan visual so operational tools share one visual language. */
+.updater-modal-content {
+  width: min(780px, 94vw);
+  max-height: min(780px, 92vh);
+}
+.updater-body {
+  max-height: calc(min(780px, 92vh) - 76px);
+  overflow-x: hidden;
+}
+.updater-fact-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0 0;
+}
+.updater-fact-grid > div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--fg) 13%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+}
+.updater-fact-grid dt {
+  color: var(--fg);
+  opacity: 0.48;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.updater-fact-grid dd {
+  overflow: hidden;
+  margin: 4px 0 0;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.updater-progress-visual { min-height: 158px; }
+.updater-progress-percent {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  color: #fff8e7;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+}
+.updater-progress-meter {
+  height: 5px;
+  margin-top: 14px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+.updater-progress-meter > span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--green, #50fa7b), #fff8e7);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--green, #50fa7b) 48%, transparent);
+  transition: width 0.35s ease;
+}
+.updater-progress-card[data-state="error"] .updater-progress-meter > span {
+  background: var(--red);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--red) 48%, transparent);
+}
+.updater-progress-card[data-state="reconnecting"] .mad-mcp-progress-logo {
+  animation: mad-mcp-breathe 1.4s ease-in-out infinite;
+}
+.updater-progress-card[data-state="reconnecting"] .mad-mcp-scan-line {
+  opacity: 1;
+  animation: mad-mcp-scan 1.8s linear infinite;
+}
+.updater-progress-card[data-state="ready"] .updater-progress-visual,
+.updater-progress-card[data-state="reconnecting"] .updater-progress-visual {
+  border-color: color-mix(in srgb, var(--green, #50fa7b) 68%, transparent);
+}
+#updater-status-pill[data-state="available"] {
+  border-color: var(--green, #50fa7b);
+  color: var(--green, #50fa7b);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--green, #50fa7b) 22%, transparent);
+}
+.updater-release-link {
+  flex-shrink: 0;
+  align-self: center;
+  color: #fff8e7;
+  font-size: 12px;
+  text-decoration: none;
+}
+.updater-release-link:hover,
+.updater-release-link:focus-visible { color: var(--red); text-decoration: underline; }
+.updater-manual-guidance {
+  display: grid;
+  gap: 5px;
+  margin-top: 14px;
+  padding: 11px 12px;
+  border-left: 2px solid color-mix(in srgb, var(--fg) 38%, transparent);
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.updater-manual-guidance[hidden] { display: none; }
+.updater-manual-guidance strong { color: var(--fg); font-size: 13px; }
+.updater-manual-guidance code {
+  overflow-x: auto;
+  padding: 7px 8px;
+  border: 1px solid color-mix(in srgb, var(--fg) 14%, var(--border));
+  border-radius: 6px;
+  background: #07080c;
+  color: #fff8e7;
+  white-space: nowrap;
+}
+.updater-backup {
+  overflow-wrap: anywhere;
+  margin: 12px 0 0;
+  color: var(--fg);
+  opacity: 0.68;
+  font-size: 11px;
+}
+.updater-dialog-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 14px;
+}
+.updater-dialog-actions button {
+  width: 100%;
+  min-height: 40px;
+  margin-top: 0;
+  font-size: 12px;
+}
+#updater-apply {
+  border-color: color-mix(in srgb, var(--green, #50fa7b) 65%, transparent);
+  background: var(--green, #50fa7b);
+  color: #07130b;
+}
+#updater-apply:hover { filter: brightness(1.08); }
+
+.updater-modal-content .mad-mcp-card-heading h5,
+.updater-modal-content .mad-mcp-progress-copy h5,
+.updater-modal-content .mad-mcp-catalog-heading h5 { font-size: 13px; }
+.updater-modal-content .mad-mcp-card-heading p,
+.updater-modal-content .mad-mcp-progress-copy p,
+.updater-modal-content .mad-mcp-catalog-heading p,
+.updater-modal-content .mad-mcp-phase-list { font-size: 12px; }
+
+@media (max-width: 680px) {
+  .updater-modal-content {
+    width: 96vw;
+    max-height: 94vh;
+  }
+  .updater-body { max-height: calc(94vh - 70px); }
+  .updater-fact-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .updater-progress-visual { min-height: 112px; }
+  .updater-dialog-actions { display: grid; grid-template-columns: 1fr; }
+  .updater-dialog-actions button { width: 100%; }
+}
+
+@media (max-width: 390px) {
+  .updater-fact-grid { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .updater-progress-meter > span,
+  .updater-progress-card .mad-mcp-progress-logo,
+  .updater-progress-card .mad-mcp-scan-line { animation: none !important; transition: none !important; }
 }
 .memory-modal-content .modal-header h4 {
   font-size: 1rem;
@@ -26712,6 +26976,32 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   max-height: 72vh;
   overflow-y: auto;
 }
+.gallery-source-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.gallery-source-details {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  font-size: 11px;
+}
+.gallery-source-details span {
+  overflow-wrap: anywhere;
+  opacity: 0.68;
+}
+.gallery-source-details .gallery-source-error { color: var(--red); opacity: 1; }
+.gallery-source-actions, .gallery-source-toolbar { display: flex; gap: 6px; }
+.gallery-source-toolbar { margin-top: 10px; }
+.gallery-source-steps {
+  margin: 8px 0 10px 18px;
+  padding: 0;
+}
+.gallery-source-steps li { margin: 4px 0; }
 .gallery-albums-container.gallery-dragover {
   border-color: var(--red);
   background: color-mix(in srgb, var(--red) 5%, transparent);

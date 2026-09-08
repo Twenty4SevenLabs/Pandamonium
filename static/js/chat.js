@@ -44,6 +44,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
   let _sendInFlight = false;   // covers the window from click → streaming start
   let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
+  let _pendingAuthorityControl = null; // Exact approval-card continuation; never user prose
 
   function _setForegroundChatBusy(active) {
     try {
@@ -284,8 +285,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
   // Browser notifications now in chatStream.js
   var _notifyResearchComplete = chatStream.notifyResearchComplete;
 
-  // Model/image pricing, _buildImageBubble now in chatRenderer.js
-  var _buildImageBubble = chatRenderer.buildImageBubble;
+  // Model/image pricing is owned by chatRenderer.js.
   var getModelCost = chatRenderer.getModelCost;
   var getImageCost = chatRenderer.getImageCost;
 
@@ -678,6 +678,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
             window.hljs.highlightElement(block);
           });
         }
+        if (markdownModule.renderMermaid) markdownModule.renderMermaid(currentHolder);
         
         // Add the stopped indicator with continue button
         const stoppedIndicator = document.createElement('div');
@@ -734,6 +735,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
 
     // --- Send-path entry: block re-clicks between submit and stream start ---
     if (_sendInFlight) return;
+    const _authorityControl = _pendingAuthorityControl;
     const _sendPerf = _createChatSendPerf();
     _sendInFlight = true;
     _setForegroundChatBusy(true);
@@ -776,7 +778,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
     const msg = el('message').value;
     // Allow empty text when a regen carries over the original message's
     // attachment ids — a photo-only message still has something to send.
-    if (!msg.trim() && !fileHandlerModule.getPendingCount() && !(_pendingRegenAttachments && _pendingRegenAttachments.length)) { _releaseSendFlag(); return; }
+    if (!msg.trim() && !_authorityControl && !fileHandlerModule.getPendingCount() && !(_pendingRegenAttachments && _pendingRegenAttachments.length)) { _releaseSendFlag(); return; }
 
     // --- Slash commands: execute directly without AI (no session needed) ---
     if (isCommand(msg.trim())) {
@@ -961,7 +963,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
 
       const userDisplay = _displayOverride || msg;
       _displayOverride = null;
-      const skipBubble = _hideUserBubble;
+      const skipBubble = _hideUserBubble || !!_authorityControl;
       _hideUserBubble = false;
       // Auto-recovery counter: carries across a turn's auto-continues, but resets
       // when the user genuinely sends a new message (so each task gets a fresh cap).
@@ -1159,9 +1161,9 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
 
       // Apply inject prefix/suffix
       const _inject = presetsModule.getInject ? presetsModule.getInject() : { prefix: '', suffix: '' };
-      let _finalMsgWithInject = finalMsg;
-      if (_inject.prefix) _finalMsgWithInject = _inject.prefix + ' ' + _finalMsgWithInject;
-      if (_inject.suffix) _finalMsgWithInject = _finalMsgWithInject + ' ' + _inject.suffix;
+      let _finalMsgWithInject = _authorityControl ? '' : finalMsg;
+      if (!_authorityControl && _inject.prefix) _finalMsgWithInject = _inject.prefix + ' ' + _finalMsgWithInject;
+      if (!_authorityControl && _inject.suffix) _finalMsgWithInject = _finalMsgWithInject + ' ' + _inject.suffix;
 
       let _textExtensionBridge = null;
       const _oracleToolIntent = /\boracle\b/i.test(msg) && /\b(engage|activate|open|map|view|layer|cockpit|cctv|track|camera|tool|call|report|current|show|inspect)\b/i.test(msg);
@@ -1175,6 +1177,12 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
       const fd = new FormData();
       fd.append('message', _finalMsgWithInject);
       fd.append('session', streamSessionId);
+      if (_authorityControl) {
+        fd.append('authority_decision_id', _authorityControl.decisionId);
+        fd.append('authority_choice', _authorityControl.choice);
+        fd.append('authority_scope', _authorityControl.scope);
+        _pendingAuthorityControl = null;
+      }
       if (streamAgentTarget) fd.append('agent_target', streamAgentTarget);
       if (streamAgentTarget === 'pc-codex') {
         const codexContext = window.codexWorkspaceBrowser?.getSelectedContext?.();
@@ -1399,12 +1407,13 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
       // Streaming TTS: synthesize sentence-by-sentence during streaming
       const streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
       if (streamingTTS) window.aiTTSManager.streamingStart();
-      // Multi-bubble agent tracking
-      let roundHolder = holder;       // Current AI text bubble (changes per round)
+      // One assistant turn owns every visible round and tool lifecycle entry.
+      let roundHolder = holder;
       let roundText = '';             // Text accumulated for current round
       let currentToolBubble = null;   // Current tool execution bubble
       let lastToolThread = null;      // Visible tool timeline for tool-only turns
       let roundFinalized = false;     // Whether current round's text is finalized
+      let assistantActivityContent = null;
       let _sourcesHtml = '';          // Sources box HTML to prepend to body
       let _sourcesExpanded = false;   // Track if user expanded sources during stream
       let _sourcesData = null;        // Raw sources data for rebuilding
@@ -1412,12 +1421,55 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
       let _findingsData = null;      // Raw findings data for collapsible box
       // _keepResearchOn removed — clarification state now persisted server-side via DB mode
       function _metricsTargetForTurn() {
-        const visibleRound = (roundHolder && roundHolder.style.display !== 'none') ? roundHolder : null;
-        const visibleText = visibleRound ? (visibleRound.querySelector('.body')?.textContent || '').trim() : '';
-        if (lastToolThread && lastToolThread.isConnected && (!visibleRound || !visibleText || visibleText === 'Done.')) {
-          return lastToolThread;
+        return holder;
+      }
+      function _ensureAssistantActivity() {
+        if (assistantActivityContent?.isConnected) return assistantActivityContent;
+        const turnBody = holder.querySelector(':scope > .body') || holder.querySelector('.body');
+        if (!turnBody) return null;
+
+        const existingSection = turnBody.querySelector(':scope > .stream-content > .thinking-section');
+        let section = existingSection;
+        if (!section) {
+          const shell = document.createElement('div');
+          shell.innerHTML = markdownModule.createCollapsible('', 'thinking process');
+          section = shell.firstElementChild;
+          const inner = section.querySelector('.thinking-content-inner');
+          for (const node of [...turnBody.childNodes]) inner.appendChild(node);
+          turnBody.appendChild(section);
+        } else {
+          const oldParent = section.parentElement;
+          const inner = section.querySelector('.thinking-content-inner');
+          for (const node of [...oldParent.childNodes]) {
+            if (node !== section) inner.appendChild(node);
+          }
+          turnBody.appendChild(section);
+          if (oldParent !== turnBody && !oldParent.childNodes.length) oldParent.remove();
         }
-        return visibleRound || holder;
+
+        section.classList.add('assistant-turn-disclosure', 'streaming');
+        const header = section.querySelector('.thinking-header');
+        const content = section.querySelector('.thinking-content');
+        const toggle = section.querySelector('.thinking-toggle');
+        const label = section.querySelector('.thinking-header-left span');
+        content?.classList.add('expanded');
+        toggle?.classList.add('expanded');
+        header?.setAttribute('aria-expanded', 'true');
+        if (label) label.textContent = 'Hide thinking process';
+        holder.style.display = '';
+        assistantActivityContent = section.querySelector('.thinking-content-inner');
+        return assistantActivityContent;
+      }
+      function _createAssistantActivityRound() {
+        const activity = _ensureAssistantActivity();
+        if (!activity) return holder;
+        const wrap = document.createElement('div');
+        wrap.className = 'assistant-turn-round streaming';
+        const body = document.createElement('div');
+        body.className = 'body';
+        wrap.appendChild(body);
+        activity.appendChild(wrap);
+        return wrap;
       }
       // Insert sources box as a stable DOM node that won't be replaced during streaming.
       // Returns the content container to use for innerHTML updates.
@@ -1434,35 +1486,15 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
         return contentDiv;
       }
       function _ensureVisibleRoundForDelta() {
-        if (!roundHolder || roundHolder.style.display !== 'none') return;
-        const box = document.getElementById('chat-history');
-        if (!box) {
-          roundHolder.style.display = '';
-          return;
-        }
-        const newWrap = document.createElement('div');
-        newWrap.className = 'msg msg-ai msg-continuation streaming';
-        const newRole = document.createElement('div');
-        newRole.className = 'role';
-        const metaS = sessionModule.getSessions().find(s => s.id === streamSessionId);
-        const requested = holder?._requestedModel || metaS?.model || modelName;
-        const actual = holder?._actualModel || requested;
-        newRole.textContent = _modelRouteLabel(requested, actual) || '';
-        _applyModelColor(newRole, actual);
-        newWrap.appendChild(newRole);
-        const newBody = document.createElement('div');
-        newBody.className = 'body';
-        newWrap.appendChild(newBody);
-        box.appendChild(newWrap);
-        if (lastToolThread && lastToolThread.isConnected) lastToolThread.classList.add('has-bottom');
-        roundHolder = newWrap;
+        if (roundHolder && roundHolder.style.display !== 'none') return;
+        roundHolder = _createAssistantActivityRound();
         roundText = '';
         roundFinalized = false;
       }
       const esc = uiModule.esc;
       // Remove thinking spinner helper
       _removeThinkingSpinner = () => {
-        const el = document.querySelector('.agent-thinking-dots');
+        const el = holder.querySelector('.agent-thinking-dots');
         if (el) {
           if (el._spinner) el._spinner.destroy();
           el.remove();
@@ -1512,9 +1544,9 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
       }
 
       function _showThinkingSpinner(label) {
-        if (document.querySelector('.agent-thinking-dots')) return;
+        if (holder.querySelector('.agent-thinking-dots')) return;
         const _thinkMsg = document.createElement('div');
-        _thinkMsg.className = 'msg msg-ai agent-thinking-dots';
+        _thinkMsg.className = 'agent-thinking-dots';
         const _thinkBody = document.createElement('div');
         _thinkBody.className = 'body';
         const _ts = spinnerModule.create(label || 'Thinking', 'right', 'wave');
@@ -1522,7 +1554,10 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
         _ts.start(120);
         _thinkMsg._spinner = _ts;
         _thinkMsg.appendChild(_thinkBody);
-        document.getElementById('chat-history').appendChild(_thinkMsg);
+        const target = assistantActivityContent?.isConnected
+          ? assistantActivityContent
+          : (holder.querySelector(':scope > .body') || holder);
+        target.appendChild(_thinkMsg);
         uiModule.scrollHistory();
       }
 
@@ -1787,7 +1822,11 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                 // Assign stable IDs
                 var _thinkIdDone = 'think-' + Date.now();
                 var _liveHdrDone = _liveThinkSection && _liveThinkSection.querySelector('.thinking-header');
-                if (_liveHdrDone) _liveHdrDone.dataset.thinkingId = _thinkIdDone;
+                if (_liveHdrDone) {
+                  _liveHdrDone.dataset.thinkingId = _thinkIdDone;
+                  _liveHdrDone.setAttribute('aria-controls', _thinkIdDone);
+                  _liveHdrDone.setAttribute('aria-expanded', 'false');
+                }
                 if (_liveThinkContent) _liveThinkContent.id = _thinkIdDone;
                 if (_liveThinkToggle) _liveThinkToggle.id = _thinkIdDone + '-toggle';
                 // Create live-reply container so final render preserves thinking bar
@@ -1959,12 +1998,12 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                   _liveThinkDomId = 'live-think-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
                   thinkContent.innerHTML = `
                     <div class="thinking-section">
-                      <div class="thinking-header" data-thinking-id="${_liveThinkDomId}">
+                      <button type="button" class="thinking-header" data-thinking-id="${_liveThinkDomId}" aria-expanded="false" aria-controls="${_liveThinkDomId}">
                         <div class="thinking-header-left"><span class="live-think-header-text">Thinking\u2026</span></div>
                         <span class="live-think-spinner-slot" style="flex-shrink:0;margin-left:auto;"></span>
                         <span class="live-think-timer" style="font-size:11px;opacity:0.4;font-variant-numeric:tabular-nums;margin-left:6px;margin-right:5px;"></span>
                         <span class="thinking-toggle live-think-toggle" id="${_liveThinkDomId}-toggle"></span>
-                      </div>
+                      </button>
                       <div class="thinking-content" id="${_liveThinkDomId}">
                         <div class="thinking-content-inner live-think-inner"></div>
                       </div>
@@ -2074,7 +2113,11 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                   // Assign stable IDs (for click-toggle handler in markdown.js)
                   var _thinkId = 'think-' + Date.now();
                   var _liveHdr = _liveThinkSection && _liveThinkSection.querySelector('.thinking-header');
-                  if (_liveHdr) _liveHdr.dataset.thinkingId = _thinkId;
+                  if (_liveHdr) {
+                    _liveHdr.dataset.thinkingId = _thinkId;
+                    _liveHdr.setAttribute('aria-controls', _thinkId);
+                    _liveHdr.setAttribute('aria-expanded', 'false');
+                  }
                   if (_liveThinkContent) _liveThinkContent.id = _thinkId;
                   if (_liveThinkToggle) _liveThinkToggle.id = _thinkId + '-toggle';
 
@@ -2319,10 +2362,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
               } else if (json.type === 'rounds_exhausted') {
                 // The agent hit the per-turn step limit while still working.
                 // Offer a Continue button instead of stalling silently.
-                // NOTE: append to the chat-history container (bottom), NOT the
-                // message body — the body innerHTML is re-rendered at stream
-                // finalize, which would wipe a note placed inside it.
-                const _chatBox = document.getElementById('chat-history');
+                const _chatBox = _ensureAssistantActivity();
                 if (!_isBg && _chatBox) {
                   // Drop any prior box so repeated cap-hits each get a fresh
                   // Continue at the bottom (multiple continues in a row).
@@ -2483,7 +2523,11 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                   // Assign stable IDs
                   var _thinkId2 = 'think-' + Date.now();
                   var _liveHdr2 = _liveThinkSection && _liveThinkSection.querySelector('.thinking-header');
-                  if (_liveHdr2) _liveHdr2.dataset.thinkingId = _thinkId2;
+                  if (_liveHdr2) {
+                    _liveHdr2.dataset.thinkingId = _thinkId2;
+                    _liveHdr2.setAttribute('aria-controls', _thinkId2);
+                    _liveHdr2.setAttribute('aria-expanded', 'false');
+                  }
                   if (_liveThinkContent) _liveThinkContent.id = _thinkId2;
                   if (_liveThinkToggle) _liveThinkToggle.id = _thinkId2 + '-toggle';
                 }
@@ -2499,17 +2543,22 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                     _contentEl3.style.minHeight = '';  // clear streaming inflate
                     _contentEl3.innerHTML = markdownModule.processWithThinking(markdownModule.squashOutsideCode(dt));
                     if (window.hljs) roundHolder.querySelectorAll('pre code').forEach((b) => window.hljs.highlightElement(b));
+                    if (markdownModule.renderMermaid) markdownModule.renderMermaid(roundHolder);
                   } else {
                     roundHolder.style.display = 'none';
                   }
                 }
+
+                // The finalized round and every following tool entry belong to
+                // this assistant turn's single, live activity disclosure.
+                const chatBox = _ensureAssistantActivity();
+                if (!chatBox) continue;
 
                 // Track tool name for contextual spinner labels
                 _lastToolName = json.tool || '';
 
                 // --- Thread timeline: group tools in a thread container ---
                 const cmd = json.command || '';
-                const chatBox = document.getElementById('chat-history');
                 // Find existing thread to append to — check last few children
                 // (agent_step may insert an empty msg-ai between tool rounds)
                 let threadWrap = null;
@@ -2522,7 +2571,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                   // Skip hidden (empty) bubbles and thinking spinners
                   if (child.style.display === 'none' || child.classList.contains('agent-thinking-dots')) continue;
                   // Stop if we hit a visible message bubble (has real content between tools)
-                  if (child.classList.contains('msg')) break;
+                  if (child.classList.contains('msg') || child.classList.contains('assistant-turn-round')) break;
                 }
                 if (threadWrap) {
                   // Continuing an existing thread — remove has-bottom (agent_step may have set it
@@ -2533,7 +2582,10 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                   threadWrap.className = 'agent-thread';
                   // Extend line up to connect to chat bubble above (if there is one)
                   const _prevSib = chatBox.lastElementChild;
-                  const _hasBubbleAbove = _prevSib && (_prevSib.classList.contains('msg') && _prevSib.style.display !== 'none');
+                  const _hasBubbleAbove = _prevSib && (
+                    (_prevSib.classList.contains('msg') || _prevSib.classList.contains('assistant-turn-round'))
+                    && _prevSib.style.display !== 'none'
+                  );
                   const _hasThreadAbove = _prevSib && _prevSib.classList.contains('agent-thread');
                   if (_hasBubbleAbove || _hasThreadAbove || (roundText.trim() && roundHolder && roundHolder.style.display !== 'none')) {
                     threadWrap.classList.add('has-top');
@@ -2675,10 +2727,22 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                   uiModule.scrollHistory();
                 }
                 // --- Render generated images inline ---
-                if (json.image_url) {
-                  const chatBox = document.getElementById('chat-history');
-                  chatBox.appendChild(_buildImageBubble(json.image_url, json.image_prompt, json.image_model, json.image_size, json.image_quality, json.image_id));
-                  uiModule.scrollHistory();
+                if (json.image_url && currentToolBubble) {
+                  const contentEl = currentToolBubble.querySelector('.agent-thread-content');
+                  const imageSrc = chatRenderer.safeDisplayImageSrc(json.image_url);
+                  if (contentEl && imageSrc) {
+                    const details = document.createElement('details');
+                    details.className = 'agent-tool-output';
+                    const summary = document.createElement('summary');
+                    summary.textContent = 'Generated image';
+                    const image = document.createElement('img');
+                    image.src = imageSrc;
+                    image.alt = json.image_prompt || 'Generated image';
+                    image.style.cssText = 'max-width:100%;border-radius:6px;margin-top:6px;border:1px solid var(--border)';
+                    details.appendChild(summary);
+                    details.appendChild(image);
+                    contentEl.appendChild(details);
+                  }
                   // Notify gallery to refresh if open
                   window.dispatchEvent(new CustomEvent('gallery-refresh'));
                 }
@@ -2797,6 +2861,10 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                 window.jarvisVoice?.showChatForApproval?.();
                 chatRenderer.renderAuthorityApprovalCard(json.data || {});
 
+              } else if (json.type === 'authority_decision_resolved') {
+                if (_isBg) continue;
+                chatRenderer.renderAuthorityDecisionResolved(json.data || {});
+
               } else if (json.type === 'ask_user') {
                 if (_isBg) continue;
                 // The agent posed a multiple-choice question; the turn has ended.
@@ -2819,32 +2887,18 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                 _removeThinkingSpinner();
                 _renderStream();
                 // Mark thread as connected to bubble below
-                const _activeThread = document.querySelector('.agent-thread.streaming');
+                const _activeThread = holder.querySelector('.agent-thread.streaming');
                 if (_activeThread) {
                   _activeThread.classList.add('has-bottom');
                 }
-                // --- New round: create fresh AI bubble with spinner ---
+                // --- New round: add a segment inside the same disclosure ---
                 currentToolBubble = null;
                 roundFinalized = false;
                 isThinking = false;
                 _docFenceOpened = false;
                 _docFenceContentStart = -1;
-                const box = document.getElementById('chat-history');
-                const newWrap = document.createElement('div');
-                newWrap.className = 'msg msg-ai msg-continuation streaming';
-                // Add model name label
-                const newRole = document.createElement('div');
-                newRole.className = 'role';
-                const metaS = sessionModule.getSessions().find(s => s.id === streamSessionId);
-                const _roundRequested = holder?._requestedModel || metaS?.model;
-                const _roundActual = holder?._actualModel || _roundRequested;
-                newRole.textContent = _modelRouteLabel(_roundRequested, _roundActual) || '';
-                _applyModelColor(newRole, _roundActual);
-                newWrap.appendChild(newRole);
-                const newBody = document.createElement('div');
-                newBody.className = 'body';
-                newWrap.appendChild(newBody);
-                box.appendChild(newWrap);
+                const newWrap = _createAssistantActivityRound();
+                const newBody = newWrap.querySelector('.body');
                 roundHolder = newWrap;
                 roundText = '';
                 // Destroy any previous spinner before creating new one
@@ -2864,8 +2918,8 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                 const budgetDiv = document.createElement('div');
                 budgetDiv.style.cssText = 'font-size:11px;opacity:0.6;font-style:italic;padding:4px 8px;margin:4px 0;';
                 budgetDiv.textContent = `Tool budget reached (${json.used}/${json.limit} calls). Agent stopped.`;
-                const chatBox = document.getElementById('chat-history');
-                chatBox.appendChild(budgetDiv);
+                const chatBox = _ensureAssistantActivity();
+                if (chatBox) chatBox.appendChild(budgetDiv);
 
               } else if (json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted') {
                 if (_isBg) continue;
@@ -2879,7 +2933,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                 const targetBody = roundHolder && roundHolder.querySelector('.body');
                 if (targetBody) targetBody.appendChild(guardDiv);
                 else {
-                  const chatBox = document.getElementById('chat-history');
+                  const chatBox = _ensureAssistantActivity();
                   if (chatBox) chatBox.appendChild(guardDiv);
                 }
 
@@ -2890,14 +2944,14 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                 // Finalize any in-flight bubble so the takeover banner
                 // separates student attempt from teacher attempt.
                 if (spinner && spinner.element) { try { spinner.destroy(); } catch(_){} spinner = null; }
-                const chatBox = document.getElementById('chat-history');
+                const chatBox = _ensureAssistantActivity();
                 const banner = document.createElement('div');
                 banner.className = 'teacher-takeover-banner';
                 banner.style.cssText = 'margin:10px 0;padding:8px 12px;border-left:3px solid #c08a3e;background:rgba(192,138,62,0.08);font-size:12px;color:var(--fg);border-radius:4px;';
                 const teacherName = json.teacher_model || 'teacher';
                 const why = json.student_failure ? ` &mdash; <span style="opacity:0.7">${esc(json.student_failure)}</span>` : '';
                 banner.innerHTML = `<strong>Teacher takeover:</strong> escalating to <code>${esc(teacherName)}</code>${why}`;
-                chatBox.appendChild(banner);
+                if (chatBox) chatBox.appendChild(banner);
                 // Reset round bubble state so the teacher's first text starts a new bubble
                 roundHolder = null;
                 roundText = '';
@@ -2907,23 +2961,23 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
 
               } else if (json.type === 'skill_saved') {
                 if (_isBg) continue;
-                const chatBox = document.getElementById('chat-history');
+                const chatBox = _ensureAssistantActivity();
                 const note = document.createElement('div');
                 note.className = 'skill-saved-note';
                 note.style.cssText = 'margin:6px 0;padding:6px 10px;border-left:3px solid #4a8a4a;background:rgba(74,138,74,0.07);font-size:12px;color:var(--fg);border-radius:4px;';
                 note.innerHTML = `<strong>Skill learned:</strong> <code>${esc(json.name || '')}</code>${json.category ? ` <span style="opacity:0.6">[${esc(json.category)}]</span>` : ''}`;
-                chatBox.appendChild(note);
+                if (chatBox) chatBox.appendChild(note);
                 uiModule.scrollHistory();
 
               } else if (json.type === 'escalation_failed' || json.type === 'skill_save_failed') {
                 if (_isBg) continue;
-                const chatBox = document.getElementById('chat-history');
+                const chatBox = _ensureAssistantActivity();
                 const note = document.createElement('div');
                 note.className = 'escalation-failed-note';
                 note.style.cssText = 'margin:6px 0;padding:6px 10px;border-left:3px solid #8a4a4a;background:rgba(138,74,74,0.07);font-size:12px;color:var(--fg);border-radius:4px;';
                 const label = json.type === 'escalation_failed' ? 'Teacher could not solve it' : 'Skill not saved';
                 note.innerHTML = `<strong>${label}:</strong> <span style="opacity:0.75">${esc(json.reason || '')}</span>`;
-                chatBox.appendChild(note);
+                if (chatBox) chatBox.appendChild(note);
                 uiModule.scrollHistory();
 
               } else if (json.error) {
@@ -2974,6 +3028,20 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
           });
         }
         holder.dataset.raw = accumulated;
+        const _groupedAssistantTurn = !!metrics?.tool_events?.length;
+        if (_groupedAssistantTurn) {
+          chatRenderer.renderAssistantTurnBody(holder.querySelector(':scope > .body'), accumulated, {
+            ...metrics,
+            web_sources: _sourcesType === 'web' ? _sourcesData : undefined,
+            research_sources: _sourcesType === 'research' ? _sourcesData : undefined,
+            research_findings: _findingsData,
+            rag_sources: holder._ragSources,
+          });
+          holder.style.display = '';
+          holder.querySelector('.assistant-turn-disclosure')?.classList.remove('streaming');
+          roundHolder = holder;
+          assistantActivityContent = null;
+        }
 
         // Anti-stall: a turn that ran tools but ended with essentially no
         // final prose usually means the model stopped mid-task (the case
@@ -3008,6 +3076,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
           }
         } catch (_) {}
 
+        if (!_groupedAssistantTurn) {
         // Clear streaming minHeight lock
         const _streamContent = roundHolder.querySelector('.stream-content');
         if (_streamContent) _streamContent.style.minHeight = '';
@@ -3122,6 +3191,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
             details.appendChild(item);
           });
           holder.querySelector('.body').appendChild(details);
+        }
         }
 
         // Hide first bubble if it has no visible text content (e.g. agent went straight to tools)
@@ -5455,6 +5525,40 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
     _appendViewReportLink,
     hasActiveStream,
   };
+
+  async function _submitAuthorityDecision(detail) {
+    const control = {
+      decisionId: String(detail?.decisionId || ''),
+      choice: String(detail?.choice || ''),
+      scope: String(detail?.scope || ''),
+    };
+    if (!control.decisionId || !['approve', 'deny'].includes(control.choice) || !['once', 'persistent'].includes(control.scope)) return;
+    for (let attempt = 0; (isStreaming || _sendInFlight) && attempt < 200; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    if (isStreaming || _sendInFlight) {
+      chatRenderer.resetAuthorityApprovalCard(control.decisionId);
+      uiModule.showError('The approval is ready, but the current response has not finished yet.');
+      return;
+    }
+    _pendingAuthorityControl = control;
+    _hideUserBubble = true;
+    await handleChatSubmit({ preventDefault() {} });
+    const unresolved = document.querySelector(
+      `.authority-approval-card[data-decision-id="${CSS.escape(control.decisionId)}"] .authority-approval-actions button:disabled`,
+    );
+    if (unresolved) chatRenderer.resetAuthorityApprovalCard(control.decisionId);
+  }
+
+  if (!window.__odysseus_authority_decision_bound) {
+    window.addEventListener('odysseus:authority-decision', event => {
+      _submitAuthorityDecision(event.detail || {}).catch(error => {
+        chatRenderer.resetAuthorityApprovalCard(event.detail?.decisionId);
+        uiModule.showError(`Approval failed: ${error?.message || error}`);
+      });
+    });
+    window.__odysseus_authority_decision_bound = true;
+  }
 
   // Single delegated handler for tool-call fold/expand. One listener on
   // document.body covers every .agent-thread-node — running, completed,

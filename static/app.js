@@ -292,6 +292,16 @@ async function _syncWelcomeModelHint() {
 
 const FIRST_RUN_DISMISS_KEY = 'pandamonium-first-run-dismissed';
 
+async function _gallerySetupStatus() {
+  try {
+    const response = await fetch(`${API_BASE}/api/gallery/discovery`, { credentials: 'same-origin' });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch (_) {
+    return null;
+  }
+}
+
 async function _renderFirstRunGuide(identityStatus, options = {}) {
   const guide = document.getElementById(options.targetId || 'welcome-setup');
   if (!guide || !window._isAdmin) return;
@@ -305,6 +315,10 @@ async function _renderFirstRunGuide(identityStatus, options = {}) {
     guide.replaceChildren();
     return;
   }
+  const galleryDiscovery = await _gallerySetupStatus();
+  const connectedGalleries = Number(galleryDiscovery?.connected || 0);
+  const availableGallery = (galleryDiscovery?.sources || [])
+    .find(source => source.state === 'available');
 
   guide.className = 'first-run-guide';
   guide.style.display = 'grid';
@@ -346,6 +360,16 @@ async function _renderFirstRunGuide(identityStatus, options = {}) {
       tab: 'services',
     },
     {
+      label: 'Connect your gallery',
+      state: connectedGalleries
+        ? `Ready: ${connectedGalleries} source${connectedGalleries === 1 ? '' : 's'} connected`
+        : availableGallery
+          ? `Found: ${availableGallery.label} on ${availableGallery.device}`
+          : 'Optional: scan this device and tailnet',
+      done: connectedGalleries > 0,
+      action: () => galleryModule.openGallerySettings(),
+    },
+    {
       label: 'Integrations',
       state: 'Optional: connect services and plugins',
       done: false,
@@ -368,7 +392,8 @@ async function _renderFirstRunGuide(identityStatus, options = {}) {
     button.append(indexEl, label, state);
     button.addEventListener('click', () => {
       options.onNavigate?.();
-      settingsModule.open(definition.tab);
+      if (definition.action) definition.action();
+      else settingsModule.open(definition.tab);
       if (definition.target) {
         setTimeout(() => document.getElementById(definition.target)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80);
       }
@@ -2483,12 +2508,38 @@ function initializeEventListeners() {
     const inputBottom = document.querySelector('.chat-input-bottom');
     const _isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
+    function visibleCornerControl() {
+      return [document.querySelector('.cmp-eval-wrap'), pickerWrap].find(control => {
+        if (!control) return false;
+        const style = getComputedStyle(control);
+        const rect = control.getBoundingClientRect();
+        return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && rect.width > 0
+          && rect.height > 0;
+      });
+    }
+
     function checkPickerOverflow() {
-      // Skip responsive collapse on mobile — keyboard open/close causes flicker
-      if (_isMobile) return;
       const w = inputTop.clientWidth;
-      // Hide model picker
-      pickerWrap.classList.toggle('picker-auto-hidden', w < PICKER_HIDE_WIDTH);
+      // Skip responsive collapse on mobile — keyboard open/close causes flicker.
+      // Clearance still tracks the real picker width on every layout so typed
+      // and ghost text cannot flow under the absolutely positioned control.
+      if (!_isMobile) {
+        pickerWrap.classList.toggle('picker-auto-hidden', w < PICKER_HIDE_WIDTH);
+      }
+      const cornerControl = visibleCornerControl();
+      const pickerWidth = cornerControl
+        ? Math.ceil(cornerControl.getBoundingClientRect().width) + 8
+        : 0;
+      const nextClearance = `${pickerWidth}px`;
+      if (inputTop.style.getPropertyValue('--model-picker-clearance') !== nextClearance) {
+        inputTop.style.setProperty('--model-picker-clearance', nextClearance);
+        // The textarea's hidden measurement clone stores computed padding as
+        // inline style. Refresh it and the live height after this width changes.
+        if (textarea) uiModule.autoResize(textarea);
+      }
+      if (_isMobile) return;
       // Keep a prompt inside the composer even when the picker crowds the row.
       // A blank placeholder makes the mobile/compact empty state feel broken.
       if (textarea) {
@@ -2502,6 +2553,20 @@ function initializeEventListeners() {
 
     const ro = new ResizeObserver(() => requestAnimationFrame(checkPickerOverflow));
     ro.observe(inputTop);
+    ro.observe(pickerWrap);
+    // Compare mode replaces the model picker with an eval picker at runtime.
+    // Track that injected control and its removal without coupling the shared
+    // composer layout to compare's implementation lifecycle.
+    new MutationObserver(mutations => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node instanceof Element && node.matches('.cmp-eval-wrap')) {
+            ro.observe(node);
+          }
+        }
+      }
+      requestAnimationFrame(checkPickerOverflow);
+    }).observe(inputTop, { childList: true });
     checkPickerOverflow();
   })();
 
@@ -4382,9 +4447,14 @@ function startPandamoniumApp() {
   if (censorModule) censorModule.init();
   updaterModule.init();
 
-  // Auto-focus message input on load
+  // Auto-focus the composer only while startup still owns focus. A large
+  // optional renderer may finish loading after the user has already focused a
+  // sidebar control; never steal that interaction back to the composer.
   const msgEl = document.getElementById('message');
-  if (msgEl) msgEl.focus();
+  const activeEl = document.activeElement;
+  if (msgEl && (!activeEl || activeEl === document.body || activeEl === document.documentElement)) {
+    msgEl.focus();
+  }
   
   // Initialize mouse-based drag for sidebar sections
   const sidebar = document.getElementById('sidebar');

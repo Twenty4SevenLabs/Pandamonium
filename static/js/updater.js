@@ -1,5 +1,27 @@
 let pollTimer = null;
+let pollInFlight = false;
 let lastRelease = null;
+let lastOperation = {};
+let modalOpener = null;
+let initialized = false;
+let startupReconcileAttempts = 0;
+let startupReconcileNeeded = false;
+
+const POLL_INTERVAL_MS = 900;
+const STARTUP_RECONCILE_ATTEMPTS = 8;
+const WORKER_UPDATE_TIMEOUT_MS = 10000;
+// Covers the worker's eight bounded 5s status attempts, retry delays,
+// navigation grace, and normal install/activation overhead.
+const WORKER_ACTIVATION_TIMEOUT_MS = 60000;
+const MODAL_ID = 'updater-modal';
+const RELOAD_REVISION_KEY = 'pandamonium:update-reload-revision';
+const REOPEN_MODAL_KEY = 'pandamonium:update-reopen-modal';
+const WORKER_RECONCILE_QUERY = 'pandamonium-update-reconcile';
+const WORKER_UPDATE_PENDING = 'pending-worker-update';
+const ACTIVE_STATUSES = new Set(['queued', 'running']);
+const SUCCESS_STATUSES = new Set(['succeeded', 'recovered', 'rolled_back']);
+const RETRYABLE_STATUS_CODES = new Set([408, 425, 429]);
+const PHASES = ['scan', 'verify', 'preserve', 'activate', 'complete'];
 
 const el = id => document.getElementById(id);
 
@@ -10,144 +32,750 @@ function setState(text, kind = 'unknown') {
   state.className = `sidebar-update-state is-${kind}`;
 }
 
+function setPill(state, label) {
+  const pill = el('updater-status-pill');
+  if (!pill) return;
+  pill.dataset.state = state;
+  pill.textContent = label;
+}
+
 function shortCommit(value) {
   return value ? String(value).slice(0, 8) : 'unknown';
 }
 
-function renderOperation(operation = {}) {
-  const detail = el('sidebar-update-detail');
-  const backup = el('sidebar-update-backup');
-  const rollback = el('sidebar-update-rollback');
-  if (!detail || !backup || !rollback) return;
-  const active = ['queued', 'running'].includes(operation.status);
-  const action = el('sidebar-update-action');
-  const checkButton = el('sidebar-update-check');
-  if (action) action.disabled = active;
-  if (checkButton) checkButton.disabled = active;
-  if (active) {
-    detail.hidden = false;
-    detail.textContent = `${operation.message || operation.phase || 'Working'} · ${operation.progress || 0}%`;
-    setState('Update in progress', 'checking');
-  } else if (operation.message) {
-    detail.hidden = false;
-    detail.textContent = operation.message;
-  } else {
-    detail.hidden = true;
-    detail.textContent = '';
-  }
-  if (operation.status === 'failed') {
-    setState(operation.rollback_error ? 'Update and rollback failed' : 'Update failed', 'unknown');
-  } else if (['succeeded', 'recovered', 'rolled_back'].includes(operation.status)) {
-    setState(operation.status === 'succeeded' ? 'Update complete' : 'Rollback complete', 'current');
-  }
-  backup.hidden = !operation.backup_location;
-  backup.textContent = operation.backup_location ? `Backup: ${operation.backup_location}` : '';
-  rollback.hidden = !operation.rollback_available || active;
-  if (active && !pollTimer) pollTimer = window.setInterval(pollStatus, 1000);
-  if (!active && pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-  }
+function installationLabel(kind) {
+  return ({
+    'managed-native': 'Managed native',
+    container: 'Docker container',
+    'source-checkout': 'Source checkout',
+  })[kind] || 'Custom installation';
 }
 
-function renderRelease(data) {
-  lastRelease = data;
+function deploymentLabel(data) {
+  if (data.release) return data.release;
+  if (data.installation?.kind === 'container') return 'container image';
+  if (data.installation?.kind === 'source-checkout') return 'source checkout';
+  return 'source';
+}
+
+function setProgress({ state, title, detail, progress = 0, phase = 'scan' }) {
+  const card = el('updater-progress-card');
+  const titleEl = el('updater-progress-title');
+  const detailEl = el('updater-progress-detail');
+  const percent = el('updater-progress-percent');
+  const fill = el('updater-progress-fill');
+  const meter = document.querySelector('.updater-progress-meter');
+  const bounded = Math.max(0, Math.min(100, Number(progress) || 0));
+  if (card) card.dataset.state = state;
+  if (titleEl) titleEl.textContent = title;
+  if (detailEl) detailEl.textContent = detail;
+  if (percent) percent.textContent = `${bounded}%`;
+  if (fill) fill.style.width = `${bounded}%`;
+  if (meter) meter.setAttribute('aria-valuenow', String(bounded));
+  renderPhases(phase, state);
+}
+
+function renderPhases(activePhase, state) {
+  const activeIndex = Math.max(0, PHASES.indexOf(activePhase));
+  document.querySelectorAll('#updater-phase-list li').forEach((item) => {
+    const index = PHASES.indexOf(item.dataset.phase);
+    let itemState = 'pending';
+    if (state === 'complete') itemState = 'complete';
+    else if (index < activeIndex) itemState = 'complete';
+    else if (index === activeIndex) {
+      itemState = state === 'error' ? 'failed' : 'working';
+    }
+    item.dataset.state = itemState;
+  });
+}
+
+function operationPhase(phase) {
+  if (['download', 'stage'].includes(phase)) return 'verify';
+  if (['backup', 'rehearsal'].includes(phase)) return 'preserve';
+  if (['migration', 'activate', 'health', 'rollback'].includes(phase)) return 'activate';
+  if (phase === 'complete') return 'complete';
+  return 'verify';
+}
+
+function manualGuidance(installation = {}) {
+  const guidance = el('updater-manual-guidance');
+  const title = el('updater-manual-title');
+  const copy = el('updater-manual-copy');
+  const command = el('updater-manual-command');
+  if (!guidance || !title || !copy || !command) return;
+  guidance.hidden = installation.supported === true;
+  if (guidance.hidden) return;
+  if (installation.kind === 'container') {
+    title.textContent = 'Update from the Docker host';
+    copy.textContent = 'Pandamonium will not mutate its own running container. Pull the release on the host, then rebuild and recreate it.';
+    command.textContent = 'git pull --ff-only && PANDAMONIUM_SOURCE_REVISION="$(git rev-parse HEAD)" docker compose up -d --build';
+  } else if (installation.kind === 'source-checkout') {
+    title.textContent = 'Update this source checkout';
+    copy.textContent = 'Review the release notes, pull the repository on the host, refresh dependencies, and restart Pandamonium.';
+    command.textContent = 'git pull --ff-only';
+  } else {
+    title.textContent = 'Host-managed update';
+    copy.textContent = installation.reason || 'Use this platform\'s normal update procedure from the host.';
+    command.textContent = '';
+  }
+  command.hidden = !command.textContent;
+}
+
+function renderFacts(data = {}) {
+  const version = data.version ? `v${data.version}` : 'Unknown';
+  const commit = data.commit ? shortCommit(data.commit) : 'Not embedded';
+  const installation = data.installation || {};
+  if (el('updater-installed-version')) el('updater-installed-version').textContent = version;
+  if (el('updater-installed-commit')) el('updater-installed-commit').textContent = commit;
+  if (el('updater-installation-kind')) {
+    el('updater-installation-kind').textContent = installationLabel(installation.kind);
+  }
+  if (el('updater-update-mode')) {
+    el('updater-update-mode').textContent = installation.supported ? 'One-click signed' : 'Host-managed';
+  }
+  manualGuidance(installation);
+
+  const sidebarVersion = el('sidebar-update-version');
+  const sidebarCommit = el('sidebar-update-commit');
+  if (sidebarVersion) sidebarVersion.textContent = `Version ${version}`;
+  if (sidebarCommit) {
+    sidebarCommit.textContent = `Deployed ${deploymentLabel(data)} · ${shortCommit(data.commit)}`;
+  }
   if (data.version) window._appVersion = data.version;
-  const version = el('sidebar-update-version');
-  const commit = el('sidebar-update-commit');
-  const action = el('sidebar-update-action');
-  if (!version || !commit || !action) return;
-  version.textContent = `Version ${data.version ? `v${data.version}` : 'unknown'}`;
-  commit.textContent = `Deployed ${data.release || 'source'} · ${shortCommit(data.commit)}`;
-  action.hidden = !(data.update_available && data.can_update);
-  action.textContent = data.latest_version ? `Update to v${data.latest_version}` : 'Update now';
+}
+
+function renderReleaseLink(url) {
+  const link = el('updater-release-link');
+  if (!link) return;
+  link.hidden = !url;
+  link.href = url || 'https://github.com/MADPANDA3D/Pandamonium/releases';
+}
+
+function renderReleaseSummary(data = {}) {
+  const summary = el('updater-release-summary');
+  const check = data.release_check || {};
+  if (!summary) return;
+  if (check.status === 'unavailable' || data.update_status === 'unavailable') {
+    summary.textContent = 'Release check could not reach GitHub. Your installed build is unchanged; retry when connectivity returns.';
+    setPill('warning', 'Check unavailable');
+    setProgress({
+      state: 'error',
+      title: 'Release check unavailable',
+      detail: check.message || data.compatibility_reason || 'GitHub release metadata is unavailable.',
+      progress: 0,
+      phase: 'scan',
+    });
+    return;
+  }
   if (data.update_available) {
-    const compatibility = data.compatible
-      ? (data.can_update ? 'Compatible' : data.installation?.reason)
-      : data.compatibility_reason;
-    setState(`v${data.latest_version} available · ${shortCommit(data.latest_commit)}`, data.compatible ? 'available' : 'unknown');
+    if (data.compatible === false) {
+      const reason = data.compatibility_reason || 'This release is not compatible with the installed build.';
+      summary.textContent = `v${data.latest_version} is available, but cannot be installed here. ${reason}`;
+      setPill('warning', 'Manual upgrade required');
+      setProgress({
+        state: 'error',
+        title: 'Signed release is not compatible',
+        detail: reason,
+        progress: 20,
+        phase: 'verify',
+      });
+      return;
+    }
+    const mode = data.can_update
+      ? 'The signed release is compatible and ready to install.'
+      : 'This installation is updated from its host.';
+    summary.textContent = `v${data.latest_version} is available. ${mode}`;
+    setPill('available', `v${data.latest_version} available`);
+    setProgress({
+      state: 'ready',
+      title: data.can_update ? 'Signed update ready' : 'Host update available',
+      detail: data.can_update
+        ? 'Review the target, then start the protected atomic update.'
+        : (data.installation?.reason || 'Follow the host-managed update steps below.'),
+      progress: 20,
+      phase: 'verify',
+    });
+    return;
+  }
+  if (data.update_status === 'current') {
+    summary.textContent = `v${data.latest_version || data.version} is current on the ${data.channel || 'stable'} channel.`;
+    setPill('connected', 'Up to date');
+    setProgress({
+      state: 'complete',
+      title: 'Pandamonium is up to date',
+      detail: 'The installed build matches the latest signed release.',
+      progress: 100,
+      phase: 'complete',
+    });
+    return;
+  }
+  summary.textContent = data.compatibility_reason || 'Release state is not available yet.';
+  setPill('warning', 'Needs attention');
+}
+
+function renderRelease(data, { preserveOperation = false } = {}) {
+  lastRelease = data;
+  renderFacts(data);
+  renderReleaseLink(data.update_url);
+  const check = el('sidebar-update-check');
+  const action = el('sidebar-update-action');
+  const modalCheck = el('updater-check');
+  const apply = el('updater-apply');
+  const hasReleaseAction = Boolean(data.update_available);
+  const canApply = Boolean(data.update_available && data.can_update);
+  if (check) check.hidden = hasReleaseAction;
+  if (action) {
+    action.hidden = !hasReleaseAction;
+    action.textContent = data.latest_version
+      ? `${data.can_update ? 'Update to' : 'View'} v${data.latest_version}`
+      : 'Review update';
+  }
+  if (modalCheck) modalCheck.hidden = canApply;
+  if (apply) {
+    apply.hidden = !canApply;
+    apply.textContent = data.latest_version ? `Update to v${data.latest_version}` : 'Update now';
+  }
+  if (data.update_available) {
+    setState(
+      `v${data.latest_version} available · ${shortCommit(data.latest_commit)}`,
+      data.compatible ? 'available' : 'unknown',
+    );
     const detail = el('sidebar-update-detail');
+    const compatibility = data.compatible
+      ? (data.can_update ? 'Signed update ready' : data.installation?.reason)
+      : data.compatibility_reason;
     if (detail && compatibility) {
       detail.hidden = false;
       detail.textContent = compatibility;
     }
   } else if (data.update_status === 'current') {
     setState('Up to date', 'current');
+  } else if (data.update_status === 'unavailable') {
+    setState('Release check unavailable', 'unknown');
   } else {
     setState(data.compatibility_reason || 'Update check unavailable', 'unknown');
   }
-  renderOperation(data.operation);
+  if (!preserveOperation) renderReleaseSummary(data);
 }
 
-async function api(url, options = {}) {
-  const response = await fetch(url, { credentials: 'same-origin', ...options });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.detail || 'Update request failed');
-  return data;
-}
-
-async function pollStatus() {
-  try {
-    const operation = await api('/api/update/status');
-    renderOperation(operation);
-    if (['succeeded', 'recovered', 'rolled_back'].includes(operation.status)) {
-      renderRelease(await api('/api/version'));
-      renderOperation(operation);
+function renderOperation(operation = {}) {
+  lastOperation = operation;
+  const detail = el('sidebar-update-detail');
+  const backup = el('sidebar-update-backup');
+  const modalBackup = el('updater-backup');
+  const rollback = el('sidebar-update-rollback');
+  const modalRollback = el('updater-rollback');
+  const action = el('sidebar-update-action');
+  const checkButton = el('sidebar-update-check');
+  const modalCheck = el('updater-check');
+  const apply = el('updater-apply');
+  const active = ACTIVE_STATUSES.has(operation.status);
+  [action, modalCheck, apply].filter(Boolean).forEach(button => {
+    button.disabled = active;
+  });
+  if (checkButton) {
+    checkButton.disabled = false;
+    checkButton.textContent = active ? 'View update progress' : 'Check for updates';
+  }
+  if (active) {
+    if (checkButton) checkButton.hidden = false;
+    if (action) action.hidden = true;
+    if (modalCheck) modalCheck.hidden = true;
+  }
+  if (active) {
+    const progress = Number(operation.progress) || 0;
+    if (detail) {
+      detail.hidden = false;
+      detail.textContent = `${operation.message || operation.phase || 'Working'} · ${progress}%`;
     }
-  } catch (_) {
-    // A short network gap is expected while the service restarts.
+    setState('Update in progress', 'checking');
+    setPill('connecting', 'Updating');
+    setProgress({
+      state: 'working',
+      title: operation.message || 'Applying signed update',
+      detail: 'Pandamonium may briefly disconnect while the service restarts. This panel will reconnect automatically.',
+      progress,
+      phase: operationPhase(operation.phase),
+    });
+  } else if (operation.status === 'failed') {
+    setState(operation.rollback_error ? 'Update and rollback failed' : 'Update failed', 'unknown');
+    setPill('error', 'Update failed');
+    setProgress({
+      state: 'error',
+      title: operation.rollback_error ? 'Update and rollback failed' : 'Update failed safely',
+      detail: operation.message || 'The updater stopped without activating the release.',
+      progress: Number(operation.progress) || 100,
+      phase: operationPhase(operation.phase),
+    });
+  } else if (SUCCESS_STATUSES.has(operation.status)) {
+    const rolledBack = operation.status !== 'succeeded';
+    setState(rolledBack ? 'Rollback complete' : 'Update complete', 'current');
+    setPill('connected', rolledBack ? 'Rolled back' : 'Updated');
+    setProgress({
+      state: 'complete',
+      title: rolledBack ? 'Rollback verified' : 'Update installed',
+      detail: operation.message || (rolledBack ? 'The previous release is healthy.' : 'The new release passed its health check.'),
+      progress: 100,
+      phase: 'complete',
+    });
+  }
+  const backupLocation = operation.backup_location || '';
+  if (backup) {
+    backup.hidden = !backupLocation;
+    backup.textContent = backupLocation ? `Backup: ${backupLocation}` : '';
+  }
+  if (modalBackup) {
+    modalBackup.hidden = !backupLocation;
+    modalBackup.textContent = backupLocation ? `Protected backup: ${backupLocation}` : '';
+  }
+  const showRollback = Boolean(operation.rollback_available && !active);
+  if (rollback) rollback.hidden = !showRollback;
+  if (modalRollback) modalRollback.hidden = !showRollback;
+}
+
+async function api(url, options = {}, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const { headers = {}, ...requestOptions } = options;
+  try {
+    const response = await fetch(url, {
+      credentials: 'same-origin',
+      ...requestOptions,
+      headers: { Accept: 'application/json', ...headers },
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(data.detail || 'Update request failed');
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('Update status timed out');
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-async function check() {
-  const button = el('sidebar-update-check');
-  if (button) button.disabled = true;
-  setState('Checking for updates…', 'checking');
+function stopPolling() {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = null;
+}
+
+function schedulePoll(delay = POLL_INTERVAL_MS, workerReconciled = false) {
+  stopPolling();
+  pollTimer = window.setTimeout(() => pollStatus(workerReconciled), delay);
+}
+
+function waitForWorkerReplacement(registration, previousWorker) {
+  return new Promise(resolve => {
+    let replacement = null;
+    let settled = false;
+    let timer = null;
+    const finish = (replaced) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      registration.removeEventListener?.('updatefound', inspect);
+      navigator.serviceWorker?.removeEventListener?.('controllerchange', inspect);
+      replacement?.removeEventListener?.('statechange', inspect);
+      resolve(replaced);
+    };
+    const inspect = () => {
+      if (
+        registration.active
+        && registration.active !== previousWorker
+        && registration.active.state === 'activated'
+      ) {
+        return finish(true);
+      }
+      const candidate = registration.installing || registration.waiting;
+      if (candidate && candidate !== replacement) {
+        replacement?.removeEventListener?.('statechange', inspect);
+        replacement = candidate;
+        replacement.addEventListener?.('statechange', inspect);
+      }
+      if (replacement?.state === 'activated') finish(true);
+      else if (replacement?.state === 'redundant') finish(false);
+    };
+    registration.addEventListener?.('updatefound', inspect);
+    navigator.serviceWorker?.addEventListener?.('controllerchange', inspect);
+    timer = window.setTimeout(() => finish(false), WORKER_ACTIVATION_TIMEOUT_MS);
+    inspect();
+  });
+}
+
+async function waitForRegistrationUpdate(registration) {
+  let timer = null;
   try {
-    renderRelease(await api('/api/update/check', { method: 'POST' }));
-  } catch (error) {
-    setState(error.message, 'unknown');
+    return await Promise.race([
+      Promise.resolve(registration.update()).then(() => true, () => false),
+      new Promise(resolve => {
+        timer = window.setTimeout(() => resolve(false), WORKER_UPDATE_TIMEOUT_MS);
+      }),
+    ]);
   } finally {
-    if (button) button.disabled = false;
+    window.clearTimeout(timer);
+  }
+}
+
+function navigateWithPendingWorkerUpdate() {
+  const url = new URL(window.location.href);
+  url.searchParams.set(WORKER_RECONCILE_QUERY, WORKER_UPDATE_PENDING);
+  window.location.replace(url.href);
+}
+
+async function refreshApplicationWorker() {
+  try {
+    const scopeUrl = new URL('/static/', window.location.href).href;
+    const registration = await navigator.serviceWorker?.getRegistration?.(scopeUrl);
+    if (registration) {
+      const previousWorker = registration.active;
+      if (!await waitForRegistrationUpdate(registration)) {
+        // registration.update() cannot be aborted. Mark this fallback load so
+        // a replacement that activates later can acknowledge, rather than
+        // navigate, the already-refreshed client.
+        navigateWithPendingWorkerUpdate();
+        return;
+      }
+      const candidate = registration.installing || registration.waiting;
+      if (candidate || registration.active !== previousWorker) {
+        if (await waitForWorkerReplacement(registration, previousWorker)) return;
+      }
+    }
+  } catch (_) {}
+  window.location.reload();
+}
+
+function needsWorkerRefresh(
+  previousCommit,
+  releaseCommit,
+  operationCommit,
+  startupRecovery,
+  workerReconciled,
+) {
+  return Boolean(
+    releaseCommit
+    && !workerReconciled
+    && (
+      (previousCommit && previousCommit !== releaseCommit)
+      || (
+        startupRecovery
+        && operationCommit === releaseCommit
+        && previousCommit !== releaseCommit
+      )
+    )
+  );
+}
+
+async function pollStatus(workerReconciled = false) {
+  if (pollInFlight) return schedulePoll(POLL_INTERVAL_MS, workerReconciled);
+  pollInFlight = true;
+  const operationAtStart = lastOperation;
+  try {
+    const operation = await api('/api/update/status', {}, 5000);
+    if (operationAtStart !== lastOperation && ACTIVE_STATUSES.has(lastOperation.status)) {
+      return schedulePoll(POLL_INTERVAL_MS, workerReconciled);
+    }
+    renderOperation(operation);
+    startupReconcileAttempts = 0;
+    if (ACTIVE_STATUSES.has(operation.status)) {
+      schedulePoll(POLL_INTERVAL_MS, workerReconciled);
+    } else if (SUCCESS_STATUSES.has(operation.status)) {
+      try {
+        const previousCommit = lastRelease?.commit;
+        const release = await api('/api/version', {}, 5000);
+        renderRelease(release, { preserveOperation: true });
+        renderOperation(operation);
+        stopPolling();
+        if (needsWorkerRefresh(
+          previousCommit,
+          release.commit,
+          operation.target_commit,
+          startupReconcileNeeded,
+          workerReconciled,
+        )) {
+          let reload = false;
+          try {
+            reload = sessionStorage.getItem(RELOAD_REVISION_KEY) !== release.commit;
+            if (reload) {
+              sessionStorage.setItem(RELOAD_REVISION_KEY, release.commit);
+              sessionStorage.setItem(
+                REOPEN_MODAL_KEY,
+                String(!el(MODAL_ID)?.classList.contains('hidden')),
+              );
+            }
+          } catch (_) {
+            reload = true;
+          }
+          if (reload) {
+            void refreshApplicationWorker();
+          }
+        }
+      } catch (_) {
+        setPill('connecting', 'Reconnecting');
+        setState('Reconnecting after update…', 'checking');
+        setProgress({
+          state: 'reconnecting',
+          title: 'Reconnecting to Pandamonium',
+          detail: 'The updater finished; waiting for the new application process to answer.',
+          progress: 96,
+          phase: 'complete',
+        });
+        schedulePoll(650);
+      }
+    } else {
+      stopPolling();
+    }
+  } catch (error) {
+    if (error?.status === 401 || error?.status === 403) {
+      const forbidden = error.status === 403;
+      stopPolling();
+      setPill('warning', forbidden ? 'Admin required' : 'Sign in required');
+      setState(forbidden ? 'Administrator access required' : 'Updater authentication expired', 'unknown');
+      setProgress({
+        state: 'error',
+        title: forbidden ? 'Administrator access required' : 'Sign in to continue',
+        detail: forbidden
+          ? 'This account is signed in but does not have permission to manage Pandamonium updates.'
+          : 'Sign in with an administrator account, then reopen the updater to resume status checks.',
+        progress: Number(lastOperation.progress) || 0,
+        phase: operationPhase(lastOperation.phase),
+      });
+      return;
+    }
+    if (
+      error?.status >= 400
+      && error?.status < 500
+      && !RETRYABLE_STATUS_CODES.has(error.status)
+    ) {
+      startupReconcileAttempts = 0;
+      return;
+    }
+    if (ACTIVE_STATUSES.has(lastOperation.status)) {
+      setPill('connecting', 'Reconnecting');
+      setState('Reconnecting after restart…', 'checking');
+      setProgress({
+        state: 'reconnecting',
+        title: 'Pandamonium is restarting',
+        detail: 'This brief disconnect is expected. The updater will resume status checks automatically.',
+        progress: Number(lastOperation.progress) || 80,
+        phase: operationPhase(lastOperation.phase),
+      });
+      schedulePoll(650, workerReconciled);
+    } else if (startupReconcileAttempts > 1) {
+      startupReconcileAttempts -= 1;
+      startupReconcileNeeded = true;
+      setPill('connecting', 'Reconnecting');
+      setState('Checking durable update status…', 'checking');
+      schedulePoll(650, workerReconciled);
+    }
+  } finally {
+    pollInFlight = false;
+  }
+}
+
+function closeModal() {
+  const modal = el(MODAL_ID);
+  if (!modal || modal.classList.contains('hidden')) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+  const opener = modalOpener;
+  modalOpener = null;
+  const fallback = el('sidebar-update-action')?.hidden
+    ? el('sidebar-update-check')
+    : el('sidebar-update-action');
+  window.setTimeout(() => (opener?.hidden ? fallback : opener)?.focus?.(), 0);
+}
+
+function openModal({ checkNow = false, opener = null } = {}) {
+  const modal = el(MODAL_ID);
+  if (!modal) return;
+  modalOpener = opener || document.activeElement || el('sidebar-update-check');
+  modal.classList.remove('hidden');
+  modal.removeAttribute('aria-hidden');
+  window.setTimeout(() => {
+    if (el('styled-confirm-overlay')?.classList.contains('hidden') !== false) {
+      el('close-updater-modal')?.focus();
+    }
+  }, 60);
+  const showOperation = ACTIVE_STATUSES.has(lastOperation.status)
+    || SUCCESS_STATUSES.has(lastOperation.status)
+    || lastOperation.status === 'failed';
+  if (lastRelease) renderRelease(lastRelease, { preserveOperation: showOperation });
+  if (showOperation) renderOperation(lastOperation);
+  if (ACTIVE_STATUSES.has(lastOperation.status)) {
+    schedulePoll(0);
+  }
+  if (checkNow) check();
+}
+
+async function check() {
+  const footerButton = el('sidebar-update-check');
+  const modalButton = el('updater-check');
+  [footerButton, modalButton].filter(Boolean).forEach(button => { button.disabled = true; });
+  setState('Checking for updates…', 'checking');
+  setPill('connecting', 'Scanning');
+  setProgress({
+    state: 'working',
+    title: 'Scanning stable releases',
+    detail: 'Contacting GitHub, then validating the signed Pandamonium release contract.',
+    progress: 8,
+    phase: 'scan',
+  });
+  try {
+    renderRelease(await api('/api/update/check', { method: 'POST' }, 15000));
+  } catch (error) {
+    setState('Release check unavailable', 'unknown');
+    setPill('warning', 'Check unavailable');
+    const summary = el('updater-release-summary');
+    if (summary) summary.textContent = 'Release check could not reach Pandamonium. Your installed build is unchanged; retry when connectivity returns.';
+    setProgress({
+      state: 'error',
+      title: 'Release check unavailable',
+      detail: error instanceof Error ? error.message : 'Update request failed.',
+      progress: 0,
+      phase: 'scan',
+    });
+  } finally {
+    [footerButton, modalButton].filter(Boolean).forEach(button => {
+      button.disabled = ACTIVE_STATUSES.has(lastOperation.status);
+    });
   }
 }
 
 async function update() {
-  if (!lastRelease?.latest_version || !window.confirm(
-    `Update ${lastRelease.release || `v${lastRelease.version}`} (${shortCommit(lastRelease.commit)}) to v${lastRelease.latest_version} (${shortCommit(lastRelease.latest_commit)})?`,
+  const confirm = window.styledConfirm;
+  if (!lastRelease?.latest_version || !lastRelease?.latest_commit || typeof confirm !== 'function' || !await confirm(
+    `Install signed v${lastRelease.latest_version} (${shortCommit(lastRelease.latest_commit)})? Pandamonium will create and verify a rollback backup first.`,
+    { confirmText: `Update to v${lastRelease.latest_version}` },
   )) return;
   try {
-    renderOperation(await api('/api/update/apply', {
+    const operation = await api('/api/update/apply', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         version: lastRelease.latest_version,
         commit: lastRelease.latest_commit,
       }),
-    }));
+    }, 15000);
+    renderOperation(operation);
+    schedulePoll(250);
   } catch (error) {
-    setState(error.message, 'unknown');
+    if (error instanceof Error && error.message.includes('available release changed')) {
+      await check();
+      return;
+    }
+    setPill('error', 'Request failed');
+    setProgress({
+      state: 'error',
+      title: 'Update did not start',
+      detail: error instanceof Error ? error.message : 'Update request failed.',
+      progress: 0,
+      phase: 'verify',
+    });
   }
 }
 
 async function rollback() {
-  if (!window.confirm('Roll back to the retained previous immutable release?')) return;
+  const confirm = window.styledConfirm;
+  if (typeof confirm !== 'function' || !await confirm(
+    'Roll back to the retained previous immutable release?',
+    { confirmText: 'Roll back', danger: true },
+  )) return;
   try {
-    renderOperation(await api('/api/update/rollback', { method: 'POST' }));
+    const operation = await api('/api/update/rollback', { method: 'POST' }, 15000);
+    renderOperation(operation);
+    schedulePoll(250);
   } catch (error) {
-    setState(error.message, 'unknown');
+    setPill('error', 'Rollback failed');
+    setProgress({
+      state: 'error',
+      title: 'Rollback did not start',
+      detail: error instanceof Error ? error.message : 'Rollback request failed.',
+      progress: 0,
+      phase: 'activate',
+    });
   }
 }
 
 async function init() {
-  el('sidebar-update-check')?.addEventListener('click', check);
-  el('sidebar-update-action')?.addEventListener('click', update);
-  el('sidebar-update-rollback')?.addEventListener('click', rollback);
+  if (initialized) return;
+  initialized = true;
+  let reloadRevision = null;
+  let reopenModal = false;
+  let workerReconcile = false;
   try {
-    renderRelease(await api('/api/version'));
-    await pollStatus();
+    const url = new URL(window.location.href);
+    const workerReconcileMarker = url.searchParams.get(WORKER_RECONCILE_QUERY);
+    workerReconcile = workerReconcileMarker !== null;
+    if (workerReconcile && workerReconcileMarker !== WORKER_UPDATE_PENDING) {
+      url.searchParams.delete(WORKER_RECONCILE_QUERY);
+      window.history.replaceState(window.history.state, '', url);
+    }
+    reloadRevision = sessionStorage.getItem(RELOAD_REVISION_KEY);
+    reopenModal = workerReconcile || sessionStorage.getItem(REOPEN_MODAL_KEY) === 'true';
+  } catch (_) {}
+  navigator.serviceWorker?.addEventListener?.('message', event => {
+    if (event.data?.type !== 'pandamonium-update-reconciled') return;
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get(WORKER_RECONCILE_QUERY) !== WORKER_UPDATE_PENDING) return;
+      url.searchParams.delete(WORKER_RECONCILE_QUERY);
+      window.history.replaceState(window.history.state, '', url);
+    } catch (_) {}
+  });
+  el('sidebar-update-check')?.addEventListener('click', event => {
+    openModal({
+      checkNow: !ACTIVE_STATUSES.has(lastOperation.status),
+      opener: event.currentTarget,
+    });
+  });
+  el('sidebar-update-action')?.addEventListener('click', event => {
+    openModal({ checkNow: false, opener: event.currentTarget });
+  });
+  el('close-updater-modal')?.addEventListener('click', closeModal);
+  el('updater-check')?.addEventListener('click', check);
+  el('updater-apply')?.addEventListener('click', update);
+  el('sidebar-update-rollback')?.addEventListener('click', event => {
+    openModal({ checkNow: false, opener: event.currentTarget });
+  });
+  el('updater-rollback')?.addEventListener('click', rollback);
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !el(MODAL_ID)?.classList.contains('hidden')) {
+      event.preventDefault();
+      closeModal();
+    }
+  });
+  window.addEventListener('online', () => {
+    if (ACTIVE_STATUSES.has(lastOperation.status)) schedulePoll(0);
+  });
+  window.addEventListener('pageshow', () => {
+    if (ACTIVE_STATUSES.has(lastOperation.status)) schedulePoll(0);
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && ACTIVE_STATUSES.has(lastOperation.status)) schedulePoll(0);
+  });
+  startupReconcileAttempts = STARTUP_RECONCILE_ATTEMPTS;
+  try {
+    renderRelease(await api('/api/version', {}, 15000));
   } catch (_) {
-    setState('Update check unavailable', 'unknown');
+    setState('Release check unavailable', 'unknown');
+  }
+  await pollStatus(workerReconcile);
+  const revisionReconciled = reloadRevision
+    && reloadRevision === lastRelease?.commit
+    && (SUCCESS_STATUSES.has(lastOperation.status) || lastOperation.status === 'failed');
+  if (revisionReconciled) {
+    try {
+      sessionStorage.removeItem(RELOAD_REVISION_KEY);
+      sessionStorage.removeItem(REOPEN_MODAL_KEY);
+    } catch (_) {}
+  }
+  if ((revisionReconciled || workerReconcile) && reopenModal) {
+    openModal({ checkNow: false, opener: el('sidebar-update-check') });
   }
 }
 
