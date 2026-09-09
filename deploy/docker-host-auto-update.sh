@@ -119,7 +119,9 @@ PY
 )"
 fi
 if [[ -z "$want_tag" ]]; then
+  set +o pipefail
   want_tag="$(git_as tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/{print; exit}')"
+  set -o pipefail
 fi
 
 git_ver="$(app_version_in_tree)"
