@@ -119,7 +119,7 @@ PY
 )"
 fi
 if [[ -z "$want_tag" ]]; then
-  want_tag="$(git_as tag -l 'v[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+  want_tag="$(git_as tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/{print; exit}')"
 fi
 
 git_ver="$(app_version_in_tree)"
