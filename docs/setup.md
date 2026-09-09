@@ -209,6 +209,11 @@ The authenticated admin UI writes only a request under the external data
 directory. Install the root-owned units so systemd performs the privileged
 work. Review and adjust every path before enabling them:
 
+The updater preserves the owner and mode of its durable state file when the
+root oneshot replaces it. This keeps the redacted admin status API readable
+after restart without making the root-only environment, backups, or release
+store available to the application service.
+
 ```bash
 sudo install -m 0644 pandamonium-updater.service /etc/systemd/system/
 sudo install -m 0644 pandamonium-updater.path /etc/systemd/system/
@@ -233,6 +238,13 @@ PANDAMONIUM_UPDATE_CONFIG_FILES=/etc/pandamonium/update.env
 PANDAMONIUM_UPDATE_CHANNEL=stable
 APP_PORT=7000
 ```
+
+An immutable release refuses to fall back to a writable `data/` directory
+inside its signed application tree. Direct diagnostics or installed-test
+commands must therefore inherit the same `PANDAMONIUM_DATA_DIR` value (and a
+separate temporary data directory when the check must not touch production
+state). A missing value fails before application data or model-cache locks can
+be created in the active release.
 
 Copy those non-secret values into the app service environment too, then add an
 app-service ordering drop-in so boot recovery completes first:
@@ -637,6 +649,7 @@ Key settings:
 | `PANDAMONIUM_QDRANT_WIKI_COLLECTION` | `odysseus_wiki` | Generated-wiki projection; legacy `JARVIS_` name remains accepted |
 | `PANDAMONIUM_QDRANT_READS_ENABLED` | `false` | Promote Qdrant reads only after live parity checks; legacy `JARVIS_` name remains accepted |
 | `PANDAMONIUM_GRAPHIFY_ROOTS` | -- | Optional JSON map of explicit repository/output roots; no startup or workspace scan occurs |
+| `PANDAMONIUM_EXTERNAL_AGENT_CONNECTIONS_JSON` | -- | Optional JSON list of exact `pandamonium.external-agent-sidecar.v1` connections. Each entry requires a versioned endpoint, `file:` credential reference, explicit `public`/`private`/`loopback` network policy, Workspace aliases, and named read capabilities. Task actions are separately opt-in as `{name,effect}` entries and are rechecked against the current live sidecar declaration plus canonical authority before dispatch; unset means no registration, secret read, or probe. |
 | `PANDAMONIUM_CHAT_UPLOAD_MAX_BYTES` | `10485760` | Chat/agent attachment cap in bytes. Raise for larger local PDFs or text documents. |
 | `PANDAMONIUM_GALLERY_UPLOAD_MAX_BYTES` | `104857600` | Gallery image upload cap in bytes (100 MB). |
 | `PANDAMONIUM_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES` | `26214400` | Gallery transform input cap in bytes (25 MB). |
@@ -650,17 +663,33 @@ Key settings:
 
 All upload-limit vars are validated (must be a positive integer) and optional; an invalid value fails fast at startup.
 
-### Built-in MCP servers (optional setup)
+### Built-in Browser MCP
 
-Pandamonium auto-registers a few built-in MCP servers at startup. The npx-based ones (currently the browser server, `@playwright/mcp`) only start when their npm package is already in the local npx cache. If a package isn't cached, that server is skipped with a startup log message explaining what to do, so a fresh install does not block on a multi-minute npm download or hang if Playwright system deps are missing.
+The supported Docker image pins `@playwright/mcp@0.0.80` and bakes its
+headless Chromium binary and Linux dependencies. A clean container therefore
+does not download npm packages or a browser on its first action. The built-in
+runs with an isolated browser profile so stale Chromium locks cannot cross a
+container recreate; its bounded output and XDG cache state live only under
+`data/browser-mcp`, mounted at `/app/.cache/browser-mcp`. The entrypoint creates
+that directory and repairs it for the configured `PUID`/`PGID` without widening
+ownership changes to another host path.
 
-To enable the browser MCP (page navigation, screenshots, vision), run once:
+Native installs still need Node.js 18+ and a local browser install. Cache the
+same supported package, then install its matching Chromium runtime:
 
 ```bash
-npx -y @playwright/mcp@latest --version
+npx -y @playwright/mcp@0.0.80 --version
+npx -y playwright@1.63.0-alpha-2026-08-31 install chromium
 ```
 
-That installs `@playwright/mcp` plus Playwright (~300MB total). Restart Pandamonium and the server will register at startup.
+Restart Pandamonium after a native install. Browser read schemas such as
+`browser_snapshot` remain owner-scoped reads. Directly requested action schemas
+such as `browser_navigate` may be shown to the model, but the MCP server's effect
+annotations are still classified by the shared execution authority layer;
+effectful actions require the matching approval, and unknown actions fail
+closed. Roll back Docker by rebuilding or pulling the prior Pandamonium version;
+the dedicated cache can remain mounted, or be removed separately to reset only
+the Browser MCP profile.
 
 ## Architecture
 ```

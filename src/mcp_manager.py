@@ -148,9 +148,10 @@ def _format_mcp_connection_error(name: str, command: str = "", args: Optional[Li
     if "@playwright/mcp" in lower_command:
         return (
             f"{raw_error}\n\n"
-            "Browser MCP could not start. On fresh installs, cache the Playwright MCP package once before connecting:\n\n"
-            "npx -y @playwright/mcp@latest --version\n\n"
-            "Then restart Pandamonium and reconnect the Browser MCP server."
+            "Browser MCP could not start. Current Docker images already include the pinned package and Chromium; rebuild the image before retrying. "
+            "Native installs can cache the supported package with:\n\n"
+            "npx -y @playwright/mcp@0.0.80 --version\n\n"
+            "Then install its Chromium runtime as documented and restart Pandamonium."
         )
 
     if "@aikidosec/mcp" in lower_command:
@@ -222,6 +223,61 @@ def _routing_tokens(value: Any) -> Set[str]:
         token for token in re.findall(r"[a-z0-9][a-z0-9_-]{1,}", str(value or "").lower())
         if token not in _ROUTING_STOPWORDS
     }
+
+
+def _tool_name_is_negated(
+    query: str, name: str, *, allow_intervening: bool = False
+) -> bool:
+    """Return whether a named tool appears in a nearby negative clause."""
+    query_text = str(query or "").lower().replace("\r\n", "\n").replace("\r", "\n")
+    query_text = re.sub(r"[\x00-\x09\x0b-\x1f\x7f]+", " ", query_text)
+    name_parts = re.findall(r"[a-z0-9][a-z0-9_-]*", str(name or "").lower())
+    if not query_text or not name_parts:
+        return False
+    separator = (
+        r"(?:[ \t_-]+(?:[a-z0-9][a-z0-9_-]*[ \t_-]+){0,6})"
+        if allow_intervening
+        else r"[.\s]+"
+    )
+    name_pattern = (
+        r"(?<![a-z0-9_-])"
+        + separator.join(re.escape(part) for part in name_parts)
+        + r"(?![a-z0-9_-])"
+    )
+    negated: bool | None = None
+    for match in re.finditer(name_pattern, query_text):
+        clause_prefix = re.split(
+            r"(?:[!?;\n]|\.(?=\s|$))", query_text[:match.start()]
+        )[-1]
+        negations = list(re.finditer(
+            r"\b(?:do\s+not|don['’ ]?t|never|avoid|exclude|without|cannot|"
+            r"rather\s+than|not(?!\s+only\b)|"
+            r"(?:must|should|can|could|would|may|might)\s+not|"
+            r"can['’ ]?t|won['’ ]?t|"
+            r"(?:mustn|shouldn|couldn|wouldn)['’ ]?t)\b",
+            clause_prefix,
+        ))
+        if not negations:
+            negated = False
+            continue
+        reset_action = (
+            r"(?:use|using|call|calling|invoke|invoking|select|selecting|"
+            r"include|including|expose|exposing|admit|admitting|run|running|"
+            r"execute|executing|choose|choosing)"
+        )
+        resets = list(re.finditer(
+            rf"(?:"
+            rf"(?:,\s*|\b(?:and|but|however|instead|rather|then|yet)\s+)"
+            rf"(?:(?:actually|please|instead|rather)\s+)?{reset_action}\b|"
+            rf"\b(?:do\s+not|don['’ ]?t|never)\s+(?:"
+            rf"(?:forget|fail)\s+to\s+{reset_action}|omit|exclude|avoid"
+            rf")\b|\b(?:except|other\s+than)\b)",
+            clause_prefix,
+        ))
+        latest_negation = negations[-1]
+        latest_reset_end = resets[-1].end() if resets else -1
+        negated = latest_negation.start() >= latest_reset_end
+    return bool(negated)
 
 
 # Caps for rendering untrusted MCP tool schemas into the agent prompt (issue #2660).
@@ -303,13 +359,12 @@ _MCP_READONLY_VERBS = (
 )
 
 
-def mcp_tool_is_readonly(tool: Dict) -> bool:
-    """Classify an MCP tool as safe (non-mutating) for plan mode.
+def mcp_tool_action_effect(tool: Dict) -> Optional[str]:
+    """Map trustworthy MCP annotations to the canonical execution effect.
 
     Prefer the server's own annotations (readOnlyHint / destructiveHint). When
-    absent, fall back to a tool-name verb heuristic, and FAIL CLOSED (treat as
-    write) for anything that doesn't clearly read — plan mode must not run a
-    write tool just because its intent is ambiguous.
+    absent, fall back to the existing read-name heuristic. Anything that still
+    cannot be classified gets no policy and fails closed at execution.
     """
     ann = tool.get("annotations")
     # annotations may be a dict or a pydantic model
@@ -322,13 +377,22 @@ def mcp_tool_is_readonly(tool: Dict) -> bool:
         else:
             read_hint = getattr(ann, "readOnlyHint", None)
             destructive = getattr(ann, "destructiveHint", None)
+    if destructive is True:
+        return "destructive_or_difficult_to_recover"
     if read_hint is True:
-        return True
-    if read_hint is False or destructive is True:
-        return False
+        return "read"
+    if read_hint is False and destructive is False:
+        return "reversible_write"
+    if read_hint is False:
+        return None
     # No usable hint — heuristic on the tool name's leading verb.
     name = (tool.get("name") or "").lower()
-    return name.startswith(_MCP_READONLY_VERBS)
+    return "read" if name.startswith(_MCP_READONLY_VERBS) else None
+
+
+def mcp_tool_is_readonly(tool: Dict) -> bool:
+    """Fail closed unless MCP metadata or the read-name heuristic proves a read."""
+    return mcp_tool_action_effect(tool) == "read"
 
 
 class McpManager:
@@ -975,47 +1039,117 @@ class McpManager:
         query_tokens = _routing_tokens(query)
         if not query_tokens:
             return set()
-        selected: List[str] = []
-        for server_id, tools in self._tools.items():
+        normalized_query = " ".join(
+            re.findall(r"[a-z0-9][a-z0-9_-]*", str(query or "").lower())
+        )
+        query_name_tokens = {
+            token for token in re.findall(r"[a-z0-9]+", str(query or "").lower())
+            if token not in _ROUTING_STOPWORDS
+        }
+        candidates = []
+        for connection_index, (server_id, tools) in enumerate(self._tools.items()):
             if self.is_extension_server(server_id) or not tools:
                 continue
             conn = self._connections.get(server_id, {})
             if conn.get("status") != "connected":
                 continue
-            identity_parts = [
+            identity_values = [
                 conn.get("name"),
                 (conn.get("server_info") or {}).get("name"),
+            ]
+            identity_parts = [
+                *identity_values,
                 *(conn.get("catalog_terms") or []),
             ]
             identity_tokens = _routing_tokens(" ".join(str(item or "") for item in identity_parts))
             if not (query_tokens & identity_tokens):
                 continue
+            explicit_identity_score = 0
+            for value in identity_values:
+                phrase = " ".join(
+                    re.findall(r"[a-z0-9][a-z0-9_-]*", str(value or "").lower())
+                )
+                if phrase and re.search(rf"(?:^| )({re.escape(phrase)})(?: |$)", normalized_query):
+                    explicit_identity_score = max(
+                        explicit_identity_score,
+                        len(phrase.split()) * 100 + len(phrase),
+                    )
+            candidates.append((
+                explicit_identity_score,
+                len(query_tokens & identity_tokens),
+                connection_index,
+                server_id,
+                tools,
+                conn,
+            ))
 
+        candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        if candidates and candidates[0][0] > 0:
+            # An explicitly named connection is an operator-selected boundary;
+            # do not fill the global limit from a provider that matched only a
+            # shared catalog term (for example, a direct provider beside its
+            # named broker).
+            candidates = candidates[:1]
+
+        selected: List[str] = []
+        max_selected = max(1, min(int(limit), 20))
+        for _explicit, _overlap, _index, server_id, tools, conn in candidates:
             by_name = {str(tool.get("name") or ""): tool for tool in tools}
             referenced: List[str] = []
-            guidance = " ".join([
-                str(conn.get("instructions") or ""),
-                *(str(tool.get("description") or "") for tool in tools),
-            ])
+            # Only initialize instructions define the server-wide workflow.
+            # Per-tool descriptions may cross-reference unrelated local tools.
+            guidance = str(conn.get("instructions") or "")
             for name in re.findall(r"\b[a-zA-Z][\w-]*(?:\.[\w-]+)+\b", guidance):
                 if name in by_name and name not in referenced:
                     referenced.append(name)
 
+            for name in referenced:
+                if not mcp_tool_is_readonly(by_name[name]):
+                    continue
+                selected.append(f"mcp__{server_id}__{name}")
+                if len(selected) >= max_selected:
+                    return set(selected)
+
             scored = []
             for index, tool in enumerate(tools):
                 name = str(tool.get("name") or "")
-                if not name or not mcp_tool_is_readonly(tool):
+                if not name or (name in referenced and mcp_tool_is_readonly(tool)):
                     continue
                 haystack = f"{name} {tool.get('description') or ''}"
                 overlap = len(query_tokens & _routing_tokens(haystack))
-                reference_rank = referenced.index(name) if name in referenced else len(referenced) + index
-                score = (10 if name in referenced else 0) + overlap * 4
-                scored.append((-score, reference_rank, index, name))
-            for _score, _ref_rank, _index, name in sorted(scored):
+                normalized_name = " ".join(
+                    re.findall(r"[a-z0-9][a-z0-9_-]*", name.lower())
+                )
+                directly_named = bool(normalized_name and re.search(
+                    rf"(?:^| ){re.escape(normalized_name)}(?: |$)",
+                    normalized_query,
+                ))
+                action_name = name.split(".", 1)[-1]
+                action_words = re.findall(r"[a-z0-9]+", action_name.lower())
+                name_tokens = {
+                    token for token in action_words
+                    if token not in _ROUTING_STOPWORDS
+                }
+                fully_name_matched = (
+                    len(name_tokens) >= 2 and name_tokens <= query_name_tokens
+                )
+                if not mcp_tool_is_readonly(tool) and not (
+                    directly_named or fully_name_matched
+                ):
+                    continue
+                if referenced and not directly_named and not fully_name_matched:
+                    continue
+                negation_name = name if directly_named else " ".join(action_words)
+                if (directly_named or fully_name_matched) and _tool_name_is_negated(
+                    query, negation_name, allow_intervening=not directly_named
+                ):
+                    continue
+                scored.append((not directly_named, -overlap, index, name))
+            for _implicit, _overlap, _index, name in sorted(scored):
                 qualified = f"mcp__{server_id}__{name}"
                 if qualified not in selected:
                     selected.append(qualified)
-                if len(selected) >= max(1, min(int(limit), 20)):
+                if len(selected) >= max_selected:
                     return set(selected)
         return set(selected)
 
@@ -1087,11 +1221,12 @@ class McpManager:
 
         return schemas
 
-    def get_readonly_action_policies(self) -> Dict[str, Dict[str, str]]:
-        """Return authority metadata only for MCP calls proven read-only.
+    def get_action_policies(self) -> Dict[str, Dict[str, str]]:
+        """Return authority metadata only for MCP calls with a proven effect.
 
-        Unknown or mutating MCP tools deliberately receive no declaration and
-        continue to fail closed at the authority gate.
+        Unknown MCP tools deliberately receive no declaration and continue to
+        fail closed at the authority gate. Effectful tools remain approval-
+        gated by the shared authority protocol at execution time.
         """
         policies: Dict[str, Dict[str, str]] = {}
         for server_id, tools in self._tools.items():
@@ -1100,8 +1235,11 @@ class McpManager:
             if self.is_builtin(server_id) and server_id != "builtin_browser":
                 continue
             for tool in tools:
-                if mcp_tool_is_readonly(tool):
-                    policies[f"mcp__{server_id}__{tool['name']}"] = {"action_effect": "read"}
+                effect = mcp_tool_action_effect(tool)
+                if effect:
+                    policies[f"mcp__{server_id}__{tool['name']}"] = {
+                        "action_effect": effect
+                    }
         return policies
 
     def get_all_tools(self, disabled_map: Optional[Dict[str, set]] = None) -> List[Dict]:
@@ -1164,10 +1302,23 @@ class McpManager:
     _cached_prompt_desc = None
     _cached_prompt_desc_key = None
 
-    def get_tool_descriptions_for_prompt(self, disabled_map: Optional[Dict[str, set]] = None) -> str:
-        """Generate text describing MCP tools for the agent system prompt. Cached."""
+    def get_tool_descriptions_for_prompt(
+        self,
+        disabled_map: Optional[Dict[str, set]] = None,
+        allowed_names: Optional[Set[str]] = None,
+    ) -> str:
+        """Generate text describing the MCP tools mounted for this request.
+
+        ``allowed_names`` contains qualified function names selected by the
+        agent router.  Keeping the prose catalog aligned with that set prevents
+        server-wide guidance from advertising tools that are not executable in
+        the current model payload.  Callers that omit it (notably the tool
+        indexer) still receive the complete connected catalog.
+        """
+        allowed = frozenset(allowed_names) if allowed_names is not None else None
         cache_key = (
             frozenset((k, frozenset(v)) for k, v in (disabled_map or {}).items()),
+            allowed,
             len(self._tools),
             self._generation,
         )
@@ -1185,6 +1336,8 @@ class McpManager:
             if self.is_builtin(t["server_id"]) and t["server_id"] != "builtin_browser":
                 continue
             if t.get("is_disabled"):
+                continue
+            if allowed is not None and t["qualified_name"] not in allowed:
                 continue
             sn = t["server_name"]
             if sn not in by_server:
