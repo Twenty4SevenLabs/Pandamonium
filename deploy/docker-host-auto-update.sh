@@ -28,9 +28,9 @@ git_as() {
 }
 
 app_version_in_tree() {
-  python3 - "$ROOT" <<'PY'
+  git_as show HEAD:src/constants.py | python3 - <<'PY'
 import re, sys
-text = open(sys.argv[1] + "/src/constants.py", encoding="utf-8").read()
+text = sys.stdin.read()
 match = re.search(r'^APP_VERSION\s*=\s*"([^"]+)"', text, re.M)
 print(match.group(1) if match else "")
 PY
@@ -53,12 +53,8 @@ sys.exit(0 if parts(sys.argv[1]) > parts(sys.argv[2]) else 1)
 PY
 }
 
-assert_clean() {
-  if [[ -n "$(git_as status --porcelain)" ]]; then
-    echo "error: working tree is dirty; skipping auto-update so WIP is not baked into the image" >&2
-    git_as status --short >&2
-    exit 3
-  fi
+tree_is_dirty() {
+  [[ -n "$(git_as status --porcelain)" ]]
 }
 
 assert_no_bridge_on_main() {
@@ -89,10 +85,13 @@ rebuild_if_needed() {
     echo "container already matches git; no rebuild"
     return 0
   fi
-  echo "rebuilding pandamonium image to $git_ver ($rev)"
-  sudo docker build -f "$ROOT/docker/Dockerfile.app-overlay" \
+  echo "rebuilding pandamonium image to $git_ver ($rev) from committed HEAD"
+  build_dir="$(mktemp -d /tmp/panda-update.XXXXXX)"
+  git_as archive HEAD | tar -C "$build_dir" -xf -
+  sudo docker build -f "$build_dir/docker/Dockerfile.app-overlay" \
     --build-arg PANDAMONIUM_SOURCE_REVISION="$rev" \
-    -t pandamonium-pandamonium:latest "$ROOT"
+    -t pandamonium-pandamonium:latest "$build_dir"
+  rm -rf "$build_dir"
   sudo env PANDAMONIUM_SOURCE_REVISION="$rev" \
     "$COMPOSE_BIN" -f "$ROOT/docker-compose.yml" -f "$ROOT/docker/host-proxmox.yml" \
     --env-file "$ROOT/.env" \
@@ -100,7 +99,6 @@ rebuild_if_needed() {
 }
 
 cd "$ROOT"
-assert_clean
 current="$(git_as branch --show-current)"
 if [[ "$current" != "$LIVE_BRANCH" ]]; then
   echo "error: live checkout must be $LIVE_BRANCH (got $current)" >&2
@@ -126,13 +124,18 @@ fi
 
 git_ver="$(app_version_in_tree)"
 if [[ -n "$want_tag" ]] && semver_gt "$want_tag" "v$git_ver"; then
-  echo "merging $want_tag into $LIVE_BRANCH and main"
-  merge_tag_into "$LIVE_BRANCH" "$want_tag"
-  git_as checkout main
-  merge_tag_into main "$want_tag"
-  assert_no_bridge_on_main
-  git_as checkout "$LIVE_BRANCH"
-  assert_no_bridge_on_main
+  if tree_is_dirty; then
+    echo "warning: working tree is dirty; skipping git merge of $want_tag (rebuild still uses committed HEAD)"
+    git_as status --short
+  else
+    echo "merging $want_tag into $LIVE_BRANCH and main"
+    merge_tag_into "$LIVE_BRANCH" "$want_tag"
+    git_as checkout main
+    merge_tag_into main "$want_tag"
+    assert_no_bridge_on_main
+    git_as checkout "$LIVE_BRANCH"
+    assert_no_bridge_on_main
+  fi
 fi
 
 rebuild_if_needed
