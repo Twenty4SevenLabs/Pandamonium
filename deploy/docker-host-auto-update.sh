@@ -28,12 +28,12 @@ git_as() {
 }
 
 app_version_in_tree() {
-  git_as show HEAD:src/constants.py | python3 - <<'PY'
+  git_as show HEAD:src/constants.py | python3 -c '
 import re, sys
 text = sys.stdin.read()
-match = re.search(r'^APP_VERSION\s*=\s*"([^"]+)"', text, re.M)
+match = re.search(r"^APP_VERSION\s*=\s*\"([^\"]+)\"", text, re.M)
 print(match.group(1) if match else "")
-PY
+'
 }
 
 container_app_version() {
