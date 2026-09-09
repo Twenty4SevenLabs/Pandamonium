@@ -3422,6 +3422,7 @@ async function handleHeardTurn(text, callGeneration) {
 function attachListenRecorder(requestedStream, callGeneration) {
   setAudioSessionType('play-and-record');
   mediaStream = requestedStream;
+  startSphereStream(mediaStream);
   captureRecorderBytes = 0;
   listenChunks = [];
   isStopping = false;
@@ -3811,17 +3812,7 @@ async function startCall() {
   unlockPlaybackAudio();
   unlockCaptureAudio();
   unlockSphereAudio();
-  if (!pendingVoiceTargetState) {
-    const selectedTarget = voiceTargetForModel(
-      window.sessionModule?.getCurrentModel?.(),
-      window.sessionModule?.getCurrentEndpointUrl?.(),
-    );
-    if (selectedTarget !== 'jarvis') {
-      if (!setVoiceTarget(selectedTarget)) return;
-    } else {
-      setVoiceTarget('jarvis', false);
-    }
-  }
+  if (!pendingVoiceTargetState) setVoiceTarget('jarvis', false);
   const callGeneration = ++voiceCallGeneration;
   voiceOrbMedia.stopMedia();
   isActive = true;

@@ -364,7 +364,7 @@ assert.match(index, /jarvisVoice\.js\?v=20260905T210749Z/);
 assert.match(index, /app\.js\?v=20260906T203500Z/);
 assert.match(appSource, /from '\.\/js\/sessions\.js'/);
 assert.match(serviceWorker, /CACHE_NAME = 'pandamonium-v392'/);
-assert.match(source, /voiceMeterProcessor\.js\?v=20260906T120000Z/);
+assert.match(source, /voiceMeterProcessor\.js\?v=20260906T003800Z/);
 assert.doesNotMatch(voiceMeter, /pcm: new Float32Array\(samples\)/);
 assert.match(voiceMeter, /samples: this\._count/);
 assert.match(index, /id="hamburger-btn"[^>]*aria-label="Toggle sidebar"[^>]*aria-controls="sidebar"/);

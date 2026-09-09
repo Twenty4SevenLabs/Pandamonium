@@ -353,7 +353,6 @@ def action_effect_for(call: Mapping[str, Any]) -> str:
             return "external_publication_or_communication"
         if mcp_tool.startswith("kanban_"):
             return "reversible_write"
-        return "reversible_write"
     if name in {"hermes_ssh", "hermes_kanban"}:
         return "reversible_write"
     if name == "hermes_agent":
