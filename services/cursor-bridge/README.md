@@ -46,7 +46,9 @@ PANDAMONIUM_CURSOR_SETTING_SOURCES=project,user,plugins
 # PANDAMONIUM_CURSOR_CONFIG_DIR=/home/labsadmin/.cursor
 # PANDAMONIUM_CURSOR_MCP_CONFIG=/home/labsadmin/.cursor/mcp.json
 # Canvas popup iframe embed (optional — without this, popup shows path + Open in Cursor)
-# PANDAMONIUM_CURSOR_CANVAS_SERVER_URL=http://127.0.0.1:PORT
+# PANDAMONIUM_CURSOR_CANVAS_SERVER_HOST=host.docker.internal
+# PANDAMONIUM_CURSOR_CANVAS_SERVER_PORT=36659
+# After Cursor reload, ~/.cursor/canvas-server-state.json is written automatically.
 # APP_PUBLIC_URL=https://your-panda-host:7080
 # Phase 2 — Remote-SSH IDE transcript mirror (see services/pc-cursor-bridge/README.md)
 PANDAMONIUM_PC_CURSOR_BRIDGE_URL=http://pc-cursor-bridge:8051
@@ -58,3 +60,5 @@ Install dependency: `pip install cursor-sdk==1.0.31` (listed in `requirements-op
 ## Canvas popups
 
 When a bridge agent writes a `.canvas.tsx` under `~/.cursor/projects/<workspace>/canvases/`, the sidecar emits a `canvas_open` SSE event. Panda opens a separate popup (`static/cursor-canvas-popup.html`) automatically and shows an **Open Canvas** button on artifact blocks. SSH canvas path shims are synced via `sync-canvas-ssh-paths.py` after each write.
+
+Live embed requires Cursor's canvas HTTP server (started by Agent Exec). Run `/home/labsadmin/.cursor/scripts/patch-canvas-server-bridge.py` once, reload the Cursor window, then Panda proxies `/api/cursor/canvas/embed/{id}` to the host canvas server on port 36659 (or whatever port Agent Exec logs).

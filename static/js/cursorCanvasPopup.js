@@ -62,10 +62,14 @@ async function loadCanvas() {
     frame?.classList.remove('hidden');
     return;
   }
+  const registration = payload.registration;
+  const registrationHint = registration && registration.registered === false
+    ? ` Canvas server: ${registration.reason || 'register failed'}.`
+    : '';
   showFatal(
     `${payload.title || canvasTitleFromPath(path)} is ready`,
-    'The canvas file is saved on the server. Use Open Canvas in the Panda agent overlay to reopen this window, or copy the path below.',
-    'Saved — live server not configured',
+    `The canvas file is saved.${registrationHint} Reload the Cursor window once if live embed stays unavailable, then click Open Canvas again.`,
+    payload.canvas_server ? 'Saved — waiting for live server' : 'Saved — live server not configured',
   );
 }
 

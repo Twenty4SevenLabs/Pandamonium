@@ -23,21 +23,34 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-_GUARD_PATH = Path(__file__).resolve().parent / "subscription_guard.py"
-_SETTINGS_PATH = Path(__file__).resolve().parent / "agent_settings.py"
-_CANVAS_PATH = Path(__file__).resolve().parent / "canvas_bridge.py"
+from src.cursor_bridge_nodes import is_safe_workspace_key, resolve_agent_cwd
+
+_BRIDGE_DIR = Path(__file__).resolve().parent
+_GUARD_PATH = _BRIDGE_DIR / "subscription_guard.py"
+_SETTINGS_PATH = _BRIDGE_DIR / "agent_settings.py"
+_CANVAS_PATH = _BRIDGE_DIR / "canvas_bridge.py"
+_IDE_GUARD_PATH = _BRIDGE_DIR / "ide_agent_guard.py"
+_FORK_COMPACTION_PATH = _BRIDGE_DIR / "fork_compaction.py"
 _GUARD_SPEC = importlib.util.spec_from_file_location("cursor_subscription_guard", _GUARD_PATH)
 _SETTINGS_SPEC = importlib.util.spec_from_file_location("cursor_bridge_agent_settings", _SETTINGS_PATH)
 _CANVAS_SPEC = importlib.util.spec_from_file_location("cursor_bridge_canvas", _CANVAS_PATH)
+_IDE_GUARD_SPEC = importlib.util.spec_from_file_location("cursor_bridge_ide_agent_guard", _IDE_GUARD_PATH)
+_FORK_COMPACTION_SPEC = importlib.util.spec_from_file_location("cursor_bridge_fork_compaction", _FORK_COMPACTION_PATH)
 assert _GUARD_SPEC and _GUARD_SPEC.loader
 assert _SETTINGS_SPEC and _SETTINGS_SPEC.loader
 assert _CANVAS_SPEC and _CANVAS_SPEC.loader
+assert _IDE_GUARD_SPEC and _IDE_GUARD_SPEC.loader
+assert _FORK_COMPACTION_SPEC and _FORK_COMPACTION_SPEC.loader
 _guard = importlib.util.module_from_spec(_GUARD_SPEC)
 _settings = importlib.util.module_from_spec(_SETTINGS_SPEC)
 _canvas = importlib.util.module_from_spec(_CANVAS_SPEC)
+_ide_guard = importlib.util.module_from_spec(_IDE_GUARD_SPEC)
+_fork_compaction = importlib.util.module_from_spec(_FORK_COMPACTION_SPEC)
 _GUARD_SPEC.loader.exec_module(_guard)
 _SETTINGS_SPEC.loader.exec_module(_settings)
 _CANVAS_SPEC.loader.exec_module(_canvas)
+_IDE_GUARD_SPEC.loader.exec_module(_ide_guard)
+_FORK_COMPACTION_SPEC.loader.exec_module(_fork_compaction)
 REQUIRED_MODEL = _guard.REQUIRED_MODEL
 SubscriptionGuardError = _guard.SubscriptionGuardError
 assert_agent_options = _guard.assert_agent_options
@@ -51,6 +64,13 @@ capabilities_summary = _settings.capabilities_summary
 resolve_canvas_path = _canvas.resolve_canvas_path
 detect_canvas_path_from_event = _canvas.detect_canvas_path_from_event
 build_canvas_open_payload = _canvas.build_canvas_open_payload
+IdeAgentResumeForbidden = _ide_guard.IdeAgentResumeForbidden
+is_ide_transcript_agent_id = _ide_guard.is_ide_transcript_agent_id
+resolve_sdk_resume_id = _ide_guard.resolve_sdk_resume_id
+build_fork_pending_context = _fork_compaction.build_fork_pending_context
+build_handoff_user_prompt = _fork_compaction.build_handoff_user_prompt
+parse_handoff_response = _fork_compaction.parse_handoff_response
+FORK_TAIL_MESSAGE_LIMIT = _fork_compaction.FORK_TAIL_MESSAGE_LIMIT
 
 try:
     from core.atomic_io import atomic_write_json
@@ -78,7 +98,7 @@ def _load_workspaces() -> dict[str, str]:
     for name, path in raw.items():
         logical = str(name or "").strip()
         resolved = Path(str(path or "")).expanduser().resolve()
-        if logical and resolved.is_absolute() and resolved.is_dir():
+        if logical and is_safe_workspace_key(logical) and resolved.is_absolute() and resolved.is_dir():
             result[logical] = str(resolved)
     return result
 
@@ -95,27 +115,7 @@ except ImportError:
 
 
 def _resolve_cwd(workspace: str, explicit_cwd: str = "") -> str:
-    cwd = str(explicit_cwd or "").strip()
-    if cwd:
-        candidate = Path(cwd).expanduser()
-        if candidate.is_dir():
-            return str(candidate.resolve())
-    key = str(workspace or "").strip()
-    if key in WORKSPACES:
-        return WORKSPACES[key]
-    prefix = "mnt-dev-env-projects-"
-    if key.startswith(prefix):
-        project = key.removeprefix(prefix)
-        if project:
-            mapped = Path(f"/mnt/dev-env/projects/{project}")
-            if mapped.is_dir():
-                return str(mapped.resolve())
-    fallback_root = os.getenv("PANDAMONIUM_CURSOR_WORKSPACE_FALLBACK_ROOT", "").strip()
-    if fallback_root and key:
-        mapped = Path(fallback_root.rstrip("/")) / key
-        if mapped.is_dir():
-            return str(mapped.resolve())
-    return ""
+    return resolve_agent_cwd(workspace, explicit_cwd=explicit_cwd, workspaces=WORKSPACES)
 
 
 def _sdk_agent_id(row: dict[str, Any]) -> str:
@@ -145,20 +145,37 @@ def _messages_to_context_prompt(messages: list[dict[str, Any]], *, max_messages:
 async def _resume_sdk_agent(client: Any, agent_id: str, options: dict[str, Any]) -> Any:
     registry = _load_registry()
     row = registry.get(agent_id) or {}
-    candidates = [agent_id]
-    sdk_id = _sdk_agent_id(row)
-    if sdk_id and sdk_id not in candidates:
-        candidates.append(sdk_id)
-    last_error: Exception | None = None
-    for candidate in candidates:
-        try:
-            return await client.resume_agent(candidate, options)
-        except AgentNotFoundError as exc:
-            last_error = exc
-            continue
-    if last_error is not None:
-        raise last_error
-    raise AgentNotFoundError(f"Agent {agent_id} not found")
+    try:
+        resume_id = resolve_sdk_resume_id(agent_id, row)
+    except IdeAgentResumeForbidden as exc:
+        raise AgentNotFoundError(str(exc)) from exc
+    return await client.resume_agent(resume_id, options)
+
+
+async def _collect_run_assistant_text(run: Any) -> str:
+    events: list[dict[str, Any]] = []
+    mod = _load_stream_events()
+    async for message in run.messages():
+        event = mod.sdk_message_to_stream_event(message)
+        if event:
+            events.append(event)
+    await run.wait()
+    blocks = _events_to_assistant_blocks(events)
+    chunks: list[str] = []
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+            chunks.append(str(block["text"]))
+    return "\n".join(chunks).strip()
+
+
+async def _run_fork_compaction(agent: Any, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    prompt = build_handoff_user_prompt(messages)
+    run = await agent.send(prompt, build_send_options())
+    try:
+        text = await _collect_run_assistant_text(run)
+    except Exception:
+        return parse_handoff_response("")
+    return parse_handoff_response(text)
 
 
 async def _prepare_ide_fork(
@@ -176,7 +193,9 @@ async def _prepare_ide_fork(
     sdk_id = getattr(agent, "agent_id", None) or getattr(agent, "id", None)
     if not sdk_id:
         raise HTTPException(status_code=502, detail="cursor_agent_missing")
-    imported = list(messages or [])[-500:]
+    transcript = list(messages or [])[-500:]
+    handoff = await _run_fork_compaction(agent, transcript)
+    pending_context = build_fork_pending_context(handoff, transcript, tail_limit=FORK_TAIL_MESSAGE_LIMIT)
     async with STATE.lock:
         STATE.agent_handles[agent_id] = agent
     row = await _update_registry(
@@ -187,7 +206,9 @@ async def _prepare_ide_fork(
         status="idle",
         source=source,
         forked=True,
-        pending_context=imported or None,
+        ide_source_id=agent_id if is_ide_transcript_agent_id(agent_id) else None,
+        handoff=handoff,
+        pending_context=pending_context or None,
         error=None,
     )
     return row
@@ -672,14 +693,13 @@ async def create_agent(payload: dict[str, Any], authorization: str | None = Head
         raise HTTPException(status_code=502, detail=str(exc)[:240]) from exc
 
 
-@app.post("/agents/{agent_id}/resume")
-async def resume_agent_endpoint(
+@app.post("/agents/{agent_id}/fork")
+async def fork_agent_endpoint(
     agent_id: str,
     payload: dict[str, Any],
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _require_auth(authorization)
-    client = await _ensure_client()
     workspace = str(payload.get("workspace") or DEFAULT_WORKSPACE).strip()
     cwd = _resolve_cwd(workspace, str(payload.get("cwd") or ""))
     if not cwd:
@@ -688,24 +708,16 @@ async def resume_agent_endpoint(
         ensure_sdk_agent_store(cwd)
     except OSError as exc:
         raise HTTPException(status_code=503, detail=f"cursor_agent_store_not_writable: {exc}") from exc
-    options = assert_agent_options(build_agent_options(api_key=STATE.api_key, cwd=cwd, model=REQUIRED_MODEL))
     title = str(payload.get("title") or "Cursor agent").strip()[:120]
     source = str(payload.get("source") or "ide")
     messages = payload.get("messages") if isinstance(payload.get("messages"), list) else None
+    if not messages:
+        raise HTTPException(status_code=400, detail="messages_required_for_fork")
+    registry = _load_registry()
+    existing = registry.get(agent_id) or {}
+    if existing.get("forked") and existing.get("sdk_agent_id"):
+        return {"agent": _public_agent(existing), "forked": True, "already_forked": True}
     try:
-        await _resume_sdk_agent(client, agent_id, options)
-        await _update_registry(
-            agent_id,
-            title=title,
-            workspace=workspace,
-            status="idle",
-            source=source,
-            error=None,
-        )
-        return {"agent": _public_agent(_load_registry()[agent_id])}
-    except AgentNotFoundError:
-        if not messages:
-            raise HTTPException(status_code=404, detail="agent_not_found") from None
         row = await _prepare_ide_fork(
             agent_id,
             workspace=workspace,
@@ -721,6 +733,46 @@ async def resume_agent_endpoint(
         raise HTTPException(status_code=502, detail=str(exc)[:240]) from exc
 
 
+@app.post("/agents/{agent_id}/resume")
+async def resume_agent_endpoint(
+    agent_id: str,
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_auth(authorization)
+    if is_ide_transcript_agent_id(agent_id):
+        raise HTTPException(status_code=409, detail="ide_fork_required")
+    client = await _ensure_client()
+    workspace = str(payload.get("workspace") or DEFAULT_WORKSPACE).strip()
+    cwd = _resolve_cwd(workspace, str(payload.get("cwd") or ""))
+    if not cwd:
+        raise HTTPException(status_code=400, detail="unknown_workspace")
+    try:
+        ensure_sdk_agent_store(cwd)
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail=f"cursor_agent_store_not_writable: {exc}") from exc
+    options = assert_agent_options(build_agent_options(api_key=STATE.api_key, cwd=cwd, model=REQUIRED_MODEL))
+    title = str(payload.get("title") or "Cursor agent").strip()[:120]
+    source = str(payload.get("source") or "bridge")
+    try:
+        await _resume_sdk_agent(client, agent_id, options)
+        await _update_registry(
+            agent_id,
+            title=title,
+            workspace=workspace,
+            status="idle",
+            source=source,
+            error=None,
+        )
+        return {"agent": _public_agent(_load_registry()[agent_id])}
+    except AgentNotFoundError:
+        raise HTTPException(status_code=404, detail="agent_not_found") from None
+    except SubscriptionGuardError as exc:
+        raise HTTPException(status_code=403, detail=exc.reason) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)[:240]) from exc
+
+
 @app.post("/agents/{agent_id}/send")
 async def send_agent(agent_id: str, payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _require_auth(authorization)
@@ -729,6 +781,8 @@ async def send_agent(agent_id: str, payload: dict[str, Any], authorization: str 
     row = registry.get(agent_id)
     if not row:
         raise HTTPException(status_code=404, detail="agent_not_found")
+    if is_ide_transcript_agent_id(agent_id) and not row.get("forked"):
+        raise HTTPException(status_code=409, detail="ide_fork_required")
     prompt = str(payload.get("prompt") or "").strip()
     if not prompt or len(prompt) > 50_000:
         raise HTTPException(status_code=400, detail="invalid_prompt")

@@ -18,6 +18,7 @@ COMPOSE_FILES = [
     ROOT / "docker-compose.gpu-amd.yml",
 ]
 HOST_DOCKER_OVERLAY = ROOT / "docker" / "host-docker.yml"
+HOST_PROXMOX_OVERLAY = ROOT / "docker" / "host-proxmox.yml"
 TEST_DOCS = [
     ROOT / "tests" / "README.md",
     ROOT / "tests" / "TESTING_STANDARD.md",
@@ -54,6 +55,60 @@ def test_compose_files_forward_every_upload_limit_env_var():
     assert expected
     for path in COMPOSE_FILES:
         assert expected <= _compose_env_names(path), path.name
+
+
+def _compose_bytes(value) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip().lower()
+    match = re.fullmatch(r"(\d+)([kmg]i?b?)?", text)
+    if not match:
+        raise AssertionError(f"unparseable compose memory value: {value!r}")
+    amount = int(match.group(1))
+    suffix = match.group(2) or ""
+    multiplier = {
+        "": 1,
+        "k": 1000,
+        "kb": 1000,
+        "ki": 1024,
+        "kib": 1024,
+        "m": 1000 ** 2,
+        "mb": 1000 ** 2,
+        "mi": 1024 ** 2,
+        "mib": 1024 ** 2,
+        "g": 1000 ** 3,
+        "gb": 1000 ** 3,
+        "gi": 1024 ** 3,
+        "gib": 1024 ** 3,
+    }[suffix]
+    return amount * multiplier
+
+
+def _host_proxmox_service_block(name: str) -> str:
+    text = HOST_PROXMOX_OVERLAY.read_text(encoding="utf-8")
+    match = re.search(rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [a-z]|\Z)", text)
+    assert match, f"{name} service missing from host-proxmox overlay"
+    return match.group(1)
+
+
+def test_host_proxmox_overlay_does_not_cgroup_oom_pandamonium():
+    """A 2GiB mem_limit with memswap_limit equal to it disables swap.
+
+    uvicorn then dies with Docker exit 137 / CONSTRAINT_MEMCG (observed RSS
+    ~0.5GiB, total-vm ~3.8GiB) and the UI stops loading.
+    """
+    body = _host_proxmox_service_block("pandamonium")
+    mem_match = re.search(r"mem_limit:\s*(\S+)", body)
+    swap_match = re.search(r"memswap_limit:\s*(\S+)", body)
+    mem = _compose_bytes(mem_match.group(1) if mem_match else None)
+    swap = _compose_bytes(swap_match.group(1) if swap_match else None)
+    min_bytes = 4 * 1024 ** 3
+    if mem is not None:
+        assert mem >= min_bytes, f"pandamonium mem_limit {mem_match.group(1)!r} OOMs uvicorn"
+    if mem is not None and swap is not None:
+        assert swap > mem or swap >= min_bytes, "equal mem/memswap disables swap and OOM-kills uvicorn"
 
 
 def test_default_compose_files_do_not_mount_host_docker_socket():

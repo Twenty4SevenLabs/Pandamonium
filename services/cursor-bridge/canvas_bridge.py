@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 CANVAS_SUFFIX = ".canvas.tsx"
 PROJECTS_ROOT = Path(
@@ -16,8 +19,19 @@ PROJECTS_ROOT = Path(
         str(Path(os.getenv("PANDAMONIUM_CURSOR_BRIDGE_HOME", Path.home())) / ".cursor" / "projects"),
     )
 ).expanduser()
+BRIDGE_HOME = Path(os.getenv("PANDAMONIUM_CURSOR_BRIDGE_HOME", str(Path.home()))).expanduser()
 SYNC_SCRIPT = Path("/home/labsadmin/.cursor/scripts/sync-canvas-ssh-paths.py")
-CANVAS_SERVER_URL = os.getenv("PANDAMONIUM_CURSOR_CANVAS_SERVER_URL", "").strip().rstrip("/")
+STATE_FILE = Path(
+    os.getenv(
+        "PANDAMONIUM_CURSOR_CANVAS_STATE_FILE",
+        str(BRIDGE_HOME / ".cursor" / "canvas-server-state.json"),
+    )
+).expanduser()
+CANVAS_SERVER_HOST = os.getenv("PANDAMONIUM_CURSOR_CANVAS_SERVER_HOST", "host.docker.internal").strip()
+CANVAS_SERVER_PORT = os.getenv("PANDAMONIUM_CURSOR_CANVAS_SERVER_PORT", "").strip()
+CANVAS_SERVER_TOKEN = os.getenv("PANDAMONIUM_CURSOR_CANVAS_SERVER_TOKEN", "").strip()
+CANVAS_LOG_ROOT = BRIDGE_HOME / ".cursor-server" / "data" / "logs"
+RELAY_PREFIX = "/api/cursor/canvas/relay/"
 _TOOL_PATH_KEYS = ("path", "file_path", "filePath", "target", "target_file", "targetFile")
 
 
@@ -45,6 +59,10 @@ def is_canvas_path(path: str) -> bool:
 def canvas_title(path: Path) -> str:
     stem = path.name.removesuffix(CANVAS_SUFFIX)
     return re.sub(r"[-_]+", " ", stem).strip().title() or "Canvas"
+
+
+def canvas_id_for_path(path: Path | str) -> str:
+    return hashlib.sha256(f"canvas:{path}".encode()).hexdigest()[:12]
 
 
 def resolve_canvas_path(raw_path: str, *, cwd: str = "") -> Path | None:
@@ -161,6 +179,138 @@ def collect_canvas_paths_from_blocks(blocks: list[Any], *, cwd: str = "") -> lis
     return sorted(found)
 
 
+def discover_canvas_port_from_logs(max_age_seconds: int = 7200) -> int | None:
+    if not CANVAS_LOG_ROOT.is_dir():
+        return None
+    cutoff = time.time() - max_age_seconds
+    best_port: int | None = None
+    best_mtime = 0.0
+    for log_path in CANVAS_LOG_ROOT.glob("**/anysphere.cursor-agent-exec/*.log"):
+        try:
+            mtime = log_path.stat().st_mtime
+        except OSError:
+            continue
+        if mtime < cutoff:
+            continue
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-400:]
+        except OSError:
+            continue
+        for line in reversed(lines):
+            match = re.search(r'Canvas server started \{"port":(\d+)', line)
+            if not match:
+                continue
+            port = int(match.group(1))
+            if mtime >= best_mtime:
+                best_mtime = mtime
+                best_port = port
+            break
+    return best_port
+
+
+def load_canvas_server_state() -> dict[str, Any] | None:
+    payload: dict[str, Any] = {}
+    if STATE_FILE.is_file():
+        try:
+            raw = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                payload.update(raw)
+        except (OSError, json.JSONDecodeError):
+            pass
+    port = CANVAS_SERVER_PORT or payload.get("port")
+    if not port:
+        discovered = discover_canvas_port_from_logs()
+        if discovered:
+            port = discovered
+    token = CANVAS_SERVER_TOKEN or payload.get("sessionToken") or payload.get("token")
+    host = CANVAS_SERVER_HOST or "127.0.0.1"
+    try:
+        port_int = int(port) if port else 0
+    except (TypeError, ValueError):
+        port_int = 0
+    if port_int > 0 and not token:
+        token = _fetch_canvas_server_token(host, port_int)
+    if not port_int or not token:
+        return None
+    return {
+        "host": host,
+        "port": port_int,
+        "sessionToken": str(token),
+        "updatedAt": payload.get("updatedAt"),
+    }
+
+
+def public_canvas_server_state(state: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    row = state if state is not None else load_canvas_server_state()
+    if not row:
+        return None
+    hidden = {"sessiontoken", "token"}
+    return {key: value for key, value in row.items() if str(key).lower() not in hidden}
+
+
+def _fetch_canvas_server_token(host: str, port: int) -> str:
+    import urllib.error
+    import urllib.request
+
+    url = f"http://{host}:{port}/canvas-admin/state"
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=2) as response:
+            raw = json.loads(response.read().decode("utf-8"))
+    except (OSError, json.JSONDecodeError, urllib.error.URLError, ValueError):
+        return ""
+    if isinstance(raw, dict):
+        return str(raw.get("sessionToken") or raw.get("token") or "")
+    return ""
+
+
+def canvas_server_base_url(state: dict[str, Any] | None = None) -> str | None:
+    row = state or load_canvas_server_state()
+    if not row:
+        return None
+    host = str(row.get("host") or "127.0.0.1")
+    port = int(row.get("port") or 0)
+    if port <= 0:
+        return None
+    return f"http://{host}:{port}"
+
+
+def upstream_canvas_url(path: str, *, state: dict[str, Any] | None = None) -> str | None:
+    base = canvas_server_base_url(state)
+    row = state or load_canvas_server_state()
+    if not base or not row:
+        return None
+    token = str(row.get("sessionToken") or "")
+    clean = str(path or "").lstrip("/")
+    query = urlencode({"token": token})
+    return f"{base}/{clean}?{query}" if clean else f"{base}/?{query}"
+
+
+def rewrite_relay_content(content: str) -> str:
+    if not content:
+        return content
+    rewritten = content
+    rewritten = re.sub(r"\?token=[^\"'\\s<>]+", "", rewritten)
+    rewritten = re.sub(r"&token=[^\"'\\s<>]+", "", rewritten)
+    rewritten = rewritten.replace('"/canvas/', f'"{RELAY_PREFIX}canvas/')
+    rewritten = rewritten.replace("'/canvas/", f"'{RELAY_PREFIX}canvas/")
+    rewritten = rewritten.replace("`/canvas/", f"`{RELAY_PREFIX}canvas/")
+    rewritten = rewritten.replace('"/runtime/', f'"{RELAY_PREFIX}runtime/')
+    rewritten = rewritten.replace("'/runtime/", f"'{RELAY_PREFIX}runtime/")
+    rewritten = rewritten.replace("`/runtime/", f"`{RELAY_PREFIX}runtime/")
+    rewritten = re.sub(
+        r"ws://(?:127\.0\.0\.1|localhost):\d+/canvas/",
+        "/api/cursor/canvas/relay/canvas/",
+        rewritten,
+    )
+    return rewritten
+
+
+def build_embed_url(path: Path) -> str:
+    canvas_id = canvas_id_for_path(path)
+    return f"/api/cursor/canvas/embed/{quote(canvas_id, safe='')}"
+
+
 def build_canvas_open_payload(path: Path, *, app_public_url: str = "") -> dict[str, Any]:
     sync_canvas_paths()
     title = canvas_title(path)
@@ -174,7 +324,9 @@ def build_canvas_open_payload(path: Path, *, app_public_url: str = "") -> dict[s
         "file_uri": file_uri,
         "popup_url": popup_url,
         "embed_url": "",
+        "canvas_id": canvas_id_for_path(path),
+        "canvas_server": public_canvas_server_state(),
     }
-    if CANVAS_SERVER_URL:
-        payload["embed_url"] = f"{CANVAS_SERVER_URL}/?path={quote(str(path))}"
+    if payload["canvas_server"]:
+        payload["embed_url"] = build_embed_url(path)
     return payload

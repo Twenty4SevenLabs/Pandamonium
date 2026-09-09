@@ -6,14 +6,16 @@ import importlib.util
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from core.middleware import require_admin
+from src.auth_helpers import get_current_user
 from src.cursor_bridge_manager import (
     DEFAULT_URL,
     bridge_request,
@@ -27,17 +29,20 @@ from src.cursor_bridge_manager import (
     ensure_bridge_process,
     fetch_ide_agent_session,
     is_configured,
+    is_ide_transcript_agent_id,
     is_plausible_cursor_api_key,
     list_ide_mirror_agents,
     save_api_key,
     stop_bridge_process,
 )
-from src.cursor_bridge_nodes import execution_host_for_node, resolve_execution_node, sidecar_url_for_node, workspace_cwd_from_slug
+from src.cursor_bridge_nodes import execution_host_for_node, is_allowed_agent_cwd, resolve_execution_node, sidecar_url_for_node, workspace_cwd_from_slug
 
 logger = logging.getLogger(__name__)
 
 _CANVAS_BRIDGE_PATH = Path(__file__).resolve().parents[1] / "services" / "cursor-bridge" / "canvas_bridge.py"
+_CANVAS_RELAY_PATH = Path(__file__).resolve().parents[1] / "services" / "cursor-bridge" / "canvas_relay.py"
 _canvas_bridge = None
+_canvas_relay = None
 
 
 def _load_canvas_bridge():
@@ -50,6 +55,19 @@ def _load_canvas_bridge():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     _canvas_bridge = mod
+    return mod
+
+
+def _load_canvas_relay():
+    global _canvas_relay
+    if _canvas_relay is not None:
+        return _canvas_relay
+    spec = importlib.util.spec_from_file_location("panda_cursor_bridge_canvas_relay", _CANVAS_RELAY_PATH)
+    if not spec or not spec.loader:
+        raise RuntimeError("canvas_relay_unavailable")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _canvas_relay = mod
     return mod
 
 
@@ -90,28 +108,37 @@ def _merge_session_messages(
     return ide
 
 
-async def _ensure_sidecar_agent(agent_id: str, agent_meta: dict[str, Any]) -> None:
+async def _require_forked_sidecar(agent_id: str, agent_meta: dict[str, Any]) -> None:
     probe = await bridge_request_for_agent("GET", f"/agents/{agent_id}/session", agent_meta)
     if probe.status_code == 200:
         payload = probe.json() if probe.headers.get("content-type", "").startswith("application/json") else {}
         if isinstance(payload, dict):
             source = str(payload.get("source") or "")
             status = str(payload.get("status") or "")
-            if source == "bridge" and not payload.get("forked"):
-                return
             if payload.get("forked") and status in {"idle", "running"}:
                 return
-            if payload.get("sdk_agent_id") and not payload.get("forked") and status in {"idle", "running"}:
+            if source == "bridge" and not is_ide_transcript_agent_id(agent_id):
+                return
+            if payload.get("sdk_agent_id") and payload.get("forked"):
                 return
 
     ide_session = await fetch_ide_agent_session(agent_id)
+    if ide_session or is_ide_transcript_agent_id(agent_id):
+        raise HTTPException(status_code=409, detail="ide_fork_required")
+
+    if probe.status_code == 404 and str(agent_meta.get("source") or "").lower() == "bridge":
+        raise HTTPException(status_code=404, detail="agent_not_found")
+
+
+async def _fork_ide_sidecar(agent_id: str, agent_meta: dict[str, Any]) -> dict[str, Any]:
+    ide_session = await fetch_ide_agent_session(agent_id)
     workspace = str(agent_meta.get("workspace") or "pandamonium")
     cwd = workspace_cwd_from_slug(workspace) or workspace_cwd_from_slug("pandamonium")
-    body = {
+    body: dict[str, Any] = {
         "workspace": workspace,
         "cwd": cwd,
         "title": agent_meta.get("title") or "Cursor agent",
-        "source": "ide" if ide_session else str(agent_meta.get("source") or "bridge"),
+        "source": "ide" if ide_session else str(agent_meta.get("source") or "ide"),
     }
     if isinstance(ide_session, dict):
         body["title"] = ide_session.get("title") or body["title"]
@@ -126,13 +153,15 @@ async def _ensure_sidecar_agent(agent_id: str, agent_meta: dict[str, Any]) -> No
         mirror_url = ide_session.get("mirror_url")
         if mirror_url and not agent_meta.get("mirror_url"):
             agent_meta["mirror_url"] = str(mirror_url)
-    elif probe.status_code == 404 and str(agent_meta.get("source") or "").lower() == "bridge":
-        raise HTTPException(status_code=404, detail="agent_not_found")
+    if not body.get("messages"):
+        raise HTTPException(status_code=400, detail="messages_required_for_fork")
 
-    response = await bridge_request_for_agent("POST", f"/agents/{agent_id}/resume", agent_meta, json_body=body)
+    response = await bridge_request_for_agent("POST", f"/agents/{agent_id}/fork", agent_meta, json_body=body)
     if response.status_code >= 400:
         detail = response.json().get("detail") if response.headers.get("content-type", "").startswith("application/json") else response.text
         raise HTTPException(status_code=response.status_code, detail=detail)
+    payload = response.json()
+    return payload if isinstance(payload, dict) else {}
 
 
 def _validate_api_key(value: object) -> str:
@@ -142,6 +171,36 @@ def _validate_api_key(value: object) -> str:
     if not is_plausible_cursor_api_key(token):
         raise HTTPException(status_code=400, detail="The Cursor API key format is invalid")
     return token
+
+
+CURSOR_READ_SCOPES = {"cursor:read", "cursor:write"}
+CURSOR_WRITE_SCOPES = {"cursor:write"}
+
+
+def _require_cursor_scope(
+    request: Request,
+    allowed: set[str],
+    *,
+    admin_for_session: bool = False,
+) -> str:
+    """Authorize Cursor bridge routes.
+
+    API tokens must carry one of ``allowed``. Cookie sessions need a login;
+    mutations also require admin, matching ``/connect``.
+    """
+    if getattr(request.state, "api_token", False):
+        scopes = set(getattr(request.state, "api_token_scopes", []) or [])
+        if not scopes.intersection(allowed):
+            required = " or ".join(sorted(allowed))
+            raise HTTPException(status_code=403, detail=f"API token missing required scope: {required}")
+        owner = getattr(request.state, "api_token_owner", None)
+        if not owner:
+            raise HTTPException(status_code=403, detail="API token has no owner")
+        return str(owner)
+    if admin_for_session:
+        require_admin(request)
+        return get_current_user(request) or ""
+    return get_current_user(request) or ""
 
 
 def setup_cursor_bridge_routes() -> APIRouter:
@@ -189,6 +248,7 @@ def setup_cursor_bridge_routes() -> APIRouter:
         workspace: str | None = None,
         source: str = "all",
     ) -> dict[str, Any]:
+        _require_cursor_scope(request, CURSOR_READ_SCOPES)
         if not is_configured():
             return {"items": [], "configured": False}
         await ensure_bridge_online()
@@ -225,6 +285,7 @@ def setup_cursor_bridge_routes() -> APIRouter:
 
     @router.post("/agents")
     async def create_agent(request: Request) -> dict[str, Any]:
+        _require_cursor_scope(request, CURSOR_WRITE_SCOPES, admin_for_session=True)
         if not is_configured():
             raise HTTPException(status_code=503, detail="cursor_bridge_not_configured")
         await ensure_bridge_online()
@@ -235,8 +296,30 @@ def setup_cursor_bridge_routes() -> APIRouter:
             raise HTTPException(status_code=response.status_code, detail=detail)
         return response.json()
 
+    @router.post("/agents/{agent_id}/fork")
+    async def fork_agent(agent_id: str, request: Request) -> dict[str, Any]:
+        _require_cursor_scope(request, CURSOR_WRITE_SCOPES, admin_for_session=True)
+        if not is_configured():
+            raise HTTPException(status_code=503, detail="cursor_bridge_not_configured")
+        await ensure_bridge_online()
+        body = await request.json()
+        source = str(request.query_params.get("source") or (body.get("source") if isinstance(body, dict) else "") or "ide").strip().lower()
+        mirror_url = str(request.query_params.get("mirror_url") or (body.get("mirror_url") if isinstance(body, dict) else "") or "")
+        agent_meta = {
+            "agent_id": agent_id,
+            "source": source or "ide",
+            "mirror_url": mirror_url,
+            "workspace": (body.get("workspace") if isinstance(body, dict) else None) or "pandamonium",
+            "title": (body.get("title") if isinstance(body, dict) else None) or "Cursor agent",
+        }
+        payload = await _fork_ide_sidecar(agent_id, agent_meta)
+        if isinstance(payload.get("agent"), dict):
+            _enrich_execution_meta(payload["agent"])
+        return payload
+
     @router.post("/agents/{agent_id}/send")
     async def send_agent(agent_id: str, request: Request) -> dict[str, Any]:
+        _require_cursor_scope(request, CURSOR_WRITE_SCOPES, admin_for_session=True)
         if not is_configured():
             raise HTTPException(status_code=503, detail="cursor_bridge_not_configured")
         await ensure_bridge_online()
@@ -250,7 +333,7 @@ def setup_cursor_bridge_routes() -> APIRouter:
             "workspace": (body.get("workspace") if isinstance(body, dict) else None) or "pandamonium",
             "title": (body.get("title") if isinstance(body, dict) else None) or "Cursor agent",
         }
-        await _ensure_sidecar_agent(agent_id, agent_meta)
+        await _require_forked_sidecar(agent_id, agent_meta)
         response = await bridge_request_for_agent(
             "POST",
             f"/agents/{agent_id}/send",
@@ -267,6 +350,7 @@ def setup_cursor_bridge_routes() -> APIRouter:
 
     @router.get("/agents/{agent_id}/runs/{run_id}/stream")
     async def stream_agent_run(agent_id: str, run_id: str, request: Request):
+        _require_cursor_scope(request, CURSOR_READ_SCOPES)
         if not is_configured():
             raise HTTPException(status_code=503, detail="cursor_bridge_not_configured")
         await ensure_bridge_online()
@@ -292,6 +376,7 @@ def setup_cursor_bridge_routes() -> APIRouter:
 
     @router.get("/agents/{agent_id}/session")
     async def agent_session(agent_id: str, request: Request) -> dict[str, Any]:
+        _require_cursor_scope(request, CURSOR_READ_SCOPES)
         if not is_configured():
             raise HTTPException(status_code=503, detail="cursor_bridge_not_configured")
         source = str(request.query_params.get("source") or "").strip().lower()
@@ -332,6 +417,7 @@ def setup_cursor_bridge_routes() -> APIRouter:
 
     @router.delete("/agents/{agent_id}")
     async def remove_agent(agent_id: str, request: Request) -> dict[str, Any]:
+        _require_cursor_scope(request, CURSOR_WRITE_SCOPES, admin_for_session=True)
         if not is_configured():
             raise HTTPException(status_code=503, detail="cursor_bridge_not_configured")
         await ensure_bridge_online()
@@ -351,6 +437,7 @@ def setup_cursor_bridge_routes() -> APIRouter:
 
     @router.post("/agents/{agent_id}/runs/{run_id}/cancel")
     async def cancel_agent_run(agent_id: str, run_id: str, request: Request) -> dict[str, Any]:
+        _require_cursor_scope(request, CURSOR_WRITE_SCOPES, admin_for_session=True)
         if not is_configured():
             raise HTTPException(status_code=503, detail="cursor_bridge_not_configured")
         await ensure_bridge_online()
@@ -363,18 +450,60 @@ def setup_cursor_bridge_routes() -> APIRouter:
 
     @router.post("/canvas/open")
     async def open_canvas(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+        _require_cursor_scope(request, CURSOR_WRITE_SCOPES, admin_for_session=True)
         if not is_configured():
             raise HTTPException(status_code=503, detail="cursor_bridge_not_configured")
         raw_path = str(body.get("path") or "").strip()
         if not raw_path:
             raise HTTPException(status_code=400, detail="path_required")
         workspace = str(body.get("workspace") or "pandamonium").strip()
-        cwd = str(body.get("cwd") or workspace_cwd_from_slug(workspace) or "").strip()
+        cwd = str(body.get("cwd") or "").strip()
+        if cwd and not is_allowed_agent_cwd(cwd):
+            cwd = ""
+        if not cwd:
+            cwd = workspace_cwd_from_slug(workspace) or ""
         canvas = _load_canvas_bridge()
+        relay = _load_canvas_relay()
         resolved = canvas.resolve_canvas_path(raw_path, cwd=cwd)
         if not resolved:
             raise HTTPException(status_code=404, detail="canvas_not_found")
+        state = canvas.load_canvas_server_state()
+        registration = None
+        if state:
+            registration = await relay.ensure_canvas_registered(str(resolved), state=state)
+            if not registration.get("registered"):
+                logger.warning("canvas_register_failed path=%s reason=%s", resolved, registration.get("reason"))
         public_url = os.getenv("APP_PUBLIC_URL", "").strip()
-        return canvas.build_canvas_open_payload(resolved, app_public_url=public_url)
+        payload = canvas.build_canvas_open_payload(resolved, app_public_url=public_url)
+        if registration:
+            payload["registration"] = registration
+        return payload
+
+    @router.get("/canvas/embed/{canvas_id}")
+    async def embed_canvas(canvas_id: str, request: Request) -> Response:
+        _require_cursor_scope(request, CURSOR_READ_SCOPES)
+        canvas = _load_canvas_bridge()
+        relay = _load_canvas_relay()
+        if not re.fullmatch(r"[a-f0-9]{12}", str(canvas_id or "")):
+            raise HTTPException(status_code=400, detail="invalid_canvas_id")
+        status, headers, content = await relay.proxy_canvas_request(f"canvas/{canvas_id}/")
+        return Response(content=content, status_code=status, headers=headers)
+
+    @router.api_route("/canvas/relay/{relay_path:path}", methods=["GET", "POST", "HEAD"])
+    async def relay_canvas(relay_path: str, request: Request) -> Response:
+        _require_cursor_scope(request, CURSOR_READ_SCOPES)
+        relay = _load_canvas_relay()
+        body = await request.body() if request.method in {"POST"} else None
+        status, headers, content = await relay.proxy_canvas_request(
+            relay_path,
+            method=request.method,
+            body=body,
+            headers={
+                "Accept": request.headers.get("Accept", "*/*"),
+                "Accept-Language": request.headers.get("Accept-Language", ""),
+                "Content-Type": request.headers.get("Content-Type", ""),
+            },
+        )
+        return Response(content=content, status_code=status, headers=headers)
 
     return router

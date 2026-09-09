@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from pathlib import Path
 from typing import Any
+
+PROJECTS_ROOT = Path("/mnt/dev-env/projects")
+_WORKSPACE_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_SLUG_PREFIX = "mnt-dev-env-projects-"
 
 NODE_HOSTS = {"m3": "pve-prod", "m1": "pve-heavy", "m2": "pve-agents"}
 NODE_ORDER = ("m3", "m1", "m2")
@@ -90,19 +96,103 @@ def _workspaces_json() -> dict[str, str]:
     return {str(key): str(value) for key, value in payload.items()}
 
 
-def workspace_cwd_from_slug(slug: str) -> str | None:
+def is_safe_workspace_key(slug: str) -> bool:
+    key = str(slug or "").strip()
+    if not key or ".." in key or "/" in key or "\\" in key:
+        return False
+    if _WORKSPACE_SEGMENT.fullmatch(key):
+        return True
+    if key.startswith(_SLUG_PREFIX):
+        return bool(_WORKSPACE_SEGMENT.fullmatch(key.removeprefix(_SLUG_PREFIX)))
+    return False
+
+
+def _is_safe_workspace_key(slug: str) -> bool:
+    return is_safe_workspace_key(slug)
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _allowed_cwd_roots(workspaces: dict[str, str] | None = None) -> list[Path]:
+    roots = [PROJECTS_ROOT.resolve()]
+    mapping = workspaces if workspaces is not None else _workspaces_json()
+    for key, value in mapping.items():
+        if not _is_safe_workspace_key(str(key)):
+            continue
+        try:
+            resolved = Path(str(value)).expanduser().resolve()
+        except OSError:
+            continue
+        roots.append(resolved)
+    return roots
+
+
+def _within_allowed(path: Path, workspaces: dict[str, str] | None = None) -> bool:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return any(_path_is_within(resolved, root) for root in _allowed_cwd_roots(workspaces))
+
+
+def is_allowed_agent_cwd(path: str | Path, workspaces: dict[str, str] | None = None) -> bool:
+    return _within_allowed(Path(path).expanduser(), workspaces)
+
+
+def workspace_cwd_from_slug(slug: str, workspaces: dict[str, str] | None = None) -> str | None:
     slug_key = str(slug or "").strip()
-    if not slug_key:
+    if not _is_safe_workspace_key(slug_key):
         return None
-    workspaces = _workspaces_json()
-    if slug_key in workspaces:
-        return workspaces[slug_key]
-    prefix = "mnt-dev-env-projects-"
-    if slug_key.startswith(prefix):
-        project = slug_key.removeprefix(prefix)
-        if project:
-            return f"/mnt/dev-env/projects/{project}"
+    mapping = workspaces if workspaces is not None else _workspaces_json()
+    if slug_key in mapping:
+        mapped = Path(str(mapping[slug_key])).expanduser()
+        if not mapped.is_absolute():
+            return None
+        return str(mapped.resolve())
+    if slug_key.startswith(_SLUG_PREFIX):
+        project = slug_key.removeprefix(_SLUG_PREFIX)
+        mapped = PROJECTS_ROOT / project
+        resolved = mapped.resolve()
+        if not _path_is_within(resolved, PROJECTS_ROOT):
+            return None
+        return str(resolved)
     fallback_root = os.getenv("PANDAMONIUM_CURSOR_WORKSPACE_FALLBACK_ROOT", "").strip()
     if fallback_root:
-        return f"{fallback_root.rstrip('/')}/{slug_key}"
+        mapped = Path(fallback_root).expanduser().resolve() / slug_key
+        if not _path_is_within(mapped, PROJECTS_ROOT):
+            return None
+        return str(mapped.resolve())
     return None
+
+
+def resolve_agent_cwd(
+    workspace: str,
+    explicit_cwd: str = "",
+    workspaces: dict[str, str] | None = None,
+) -> str:
+    cwd = str(explicit_cwd or "").strip()
+    if cwd:
+        candidate = Path(cwd).expanduser()
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            return ""
+        if candidate.is_dir() and _within_allowed(resolved, workspaces):
+            return str(resolved)
+        return ""
+    mapped = workspace_cwd_from_slug(workspace, workspaces=workspaces)
+    if not mapped:
+        return ""
+    try:
+        resolved = Path(mapped).resolve()
+    except OSError:
+        return ""
+    if not _within_allowed(resolved, workspaces):
+        return ""
+    return str(resolved)

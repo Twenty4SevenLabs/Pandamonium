@@ -1,0 +1,261 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "unsloth-m1": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Unsloth M1 (LAN)",
+      "options": {
+        "baseURL": "http://192.168.1.2:8888/v1",
+        "apiKey": "{env:UNSLOTH_M1_API_KEY}"
+      },
+      "models": {
+        "unsloth/Qwen3.5-9B-GGUF": {
+          "name": "Qwen3.5-9B-GGUF",
+          "limit": {
+            "context": 85504,
+            "output": 8192
+          }
+        },
+        "unsloth/FLUX.2-klein-4B-GGUF": {
+          "name": "FLUX.2-klein-4B-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "unsloth/Qwen3-14B-GGUF": {
+          "name": "Qwen3-14B-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    },
+    "unsloth-m1-guest": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Unsloth M1 guest (181)",
+      "options": {
+        "baseURL": "http://192.168.1.181:8888/v1",
+        "apiKey": "{env:UNSLOTH_M1_API_KEY}"
+      },
+      "models": {
+        "unsloth/Qwen3.5-9B-GGUF": {
+          "name": "Qwen3.5-9B-GGUF",
+          "limit": {
+            "context": 85504,
+            "output": 8192
+          }
+        },
+        "unsloth/FLUX.2-klein-4B-GGUF": {
+          "name": "FLUX.2-klein-4B-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "unsloth/Qwen3-14B-GGUF": {
+          "name": "Qwen3-14B-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    },
+    "unsloth-m1-tailscale": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Unsloth M1 (Tailscale)",
+      "options": {
+        "baseURL": "http://100.100.247.127:8888/v1",
+        "apiKey": "{env:UNSLOTH_M1_API_KEY}"
+      },
+      "models": {
+        "unsloth/Qwen3.5-9B-GGUF": {
+          "name": "Qwen3.5-9B-GGUF",
+          "limit": {
+            "context": 85504,
+            "output": 8192
+          }
+        },
+        "unsloth/FLUX.2-klein-4B-GGUF": {
+          "name": "FLUX.2-klein-4B-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "unsloth/Qwen3-14B-GGUF": {
+          "name": "Qwen3-14B-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    },
+    "unsloth-m1-serve": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Unsloth M1 (Serve HTTPS)",
+      "options": {
+        "baseURL": "https://m1.tail61d527.ts.net/v1",
+        "apiKey": "{env:UNSLOTH_M1_API_KEY}"
+      },
+      "models": {
+        "unsloth/Qwen3.5-9B-GGUF": {
+          "name": "Qwen3.5-9B-GGUF",
+          "limit": {
+            "context": 85504,
+            "output": 8192
+          }
+        },
+        "unsloth/FLUX.2-klein-4B-GGUF": {
+          "name": "FLUX.2-klein-4B-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "unsloth/Qwen3-14B-GGUF": {
+          "name": "Qwen3-14B-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    },
+    "unsloth-m2": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Unsloth M2 (LAN)",
+      "options": {
+        "baseURL": "http://192.168.1.191:8888/v1",
+        "apiKey": "{env:UNSLOTH_M2_API_KEY}"
+      },
+      "models": {
+        "unsloth/Qwen2.5-Coder-7B-Instruct-GGUF": {
+          "name": "Qwen2.5-Coder-7B-Instruct-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "unsloth/Qwen3.5-9B-GGUF": {
+          "name": "Qwen3.5-9B-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    },
+    "unsloth-m2-tailscale": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Unsloth M2 (Tailscale)",
+      "options": {
+        "baseURL": "http://100.123.238.35:8888/v1",
+        "apiKey": "{env:UNSLOTH_M2_API_KEY}"
+      },
+      "models": {
+        "unsloth/Qwen2.5-Coder-7B-Instruct-GGUF": {
+          "name": "Qwen2.5-Coder-7B-Instruct-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "unsloth/Qwen3.5-9B-GGUF": {
+          "name": "Qwen3.5-9B-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    },
+    "unsloth-m2-serve": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Unsloth M2 (Serve HTTPS)",
+      "options": {
+        "baseURL": "https://m2.tail61d527.ts.net/v1",
+        "apiKey": "{env:UNSLOTH_M2_API_KEY}"
+      },
+      "models": {
+        "unsloth/Qwen2.5-Coder-7B-Instruct-GGUF": {
+          "name": "Qwen2.5-Coder-7B-Instruct-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "unsloth/Qwen3.5-9B-GGUF": {
+          "name": "Qwen3.5-9B-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    },
+    "unsloth-a1": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Unsloth A1 (James MBP)",
+      "options": {
+        "baseURL": "http://100.80.146.51:8888/v1",
+        "apiKey": "{env:UNSLOTH_A1_API_KEY}"
+      },
+      "models": {
+        "Qwen3.8-27B-MLX-4bit": {
+          "name": "Qwen3.8-27B-MLX-4bit",
+          "limit": {
+            "context": 80000,
+            "output": 8192
+          }
+        },
+        "unsloth/Z-Image-GGUF": {
+          "name": "Z-Image-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "unsloth/FLUX.2-klein-9B-GGUF": {
+          "name": "FLUX.2-klein-9B-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "audio-cpp/MiniMax-Music3-GGUF": {
+          "name": "MiniMax-Music3-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "unsloth/MiniMax-H3-GGUF": {
+          "name": "MiniMax-H3-GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    }
+  },
+  "model": "unsloth-m2/unsloth/Qwen2.5-Coder-7B-Instruct-GGUF",
+  "enabled_providers": [
+    "unsloth-m1",
+    "unsloth-m1-guest",
+    "unsloth-m1-tailscale",
+    "unsloth-m1-serve",
+    "unsloth-m2",
+    "unsloth-m2-tailscale",
+    "unsloth-m2-serve",
+    "unsloth-a1"
+  ],
+  "compaction": {
+    "auto": true,
+    "reserved": 3276
+  }
+}

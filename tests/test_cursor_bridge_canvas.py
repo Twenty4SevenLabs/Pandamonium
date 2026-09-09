@@ -55,7 +55,19 @@ def test_build_canvas_open_payload(tmp_path: Path, monkeypatch):
     (tmp_path / "canvases").mkdir()
     allowed = tmp_path / "canvases" / "demo.canvas.tsx"
     allowed.write_text(canvas.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(
+        mod,
+        "load_canvas_server_state",
+        lambda: {"host": "127.0.0.1", "port": 36659, "sessionToken": "abc123"},
+    )
     payload = mod.build_canvas_open_payload(allowed, app_public_url="https://panda.example")
     assert payload["type"] == "canvas_open"
     assert payload["path"] == str(allowed)
     assert payload["popup_url"].startswith("https://panda.example/static/cursor-canvas-popup.html")
+    assert payload["embed_url"].startswith("/api/cursor/canvas/embed/")
+
+
+def test_canvas_id_for_path():
+    mod = _load_module()
+    path = "/home/labsadmin/.cursor/projects/mnt-dev-env-projects-pandamonium/canvases/demo.canvas.tsx"
+    assert mod.canvas_id_for_path(path) == "6a5770a35952"

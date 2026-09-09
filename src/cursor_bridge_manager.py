@@ -22,6 +22,20 @@ from src.secret_storage import decrypt, encrypt
 
 logger = logging.getLogger(__name__)
 
+_ROOT = Path(__file__).resolve().parents[1]
+_IDE_GUARD_PATH = _ROOT / "services" / "cursor-bridge" / "ide_agent_guard.py"
+
+
+def is_ide_transcript_agent_id(agent_id: str) -> bool:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("cursor_bridge_ide_agent_guard", _IDE_GUARD_PATH)
+    if not spec or not spec.loader:
+        return False
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return bool(mod.is_ide_transcript_agent_id(agent_id))
+
 BRIDGE_DIR = Path(DATA_DIR) / "cursor-bridge"
 SETTINGS_FILE = BRIDGE_DIR / "settings.json"
 TOKEN_FILE = BRIDGE_DIR / "token"

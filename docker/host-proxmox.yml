@@ -8,9 +8,11 @@ services:
     volumes:
       - /mnt/dev-env:/mnt/dev-env:rw
       - /home/labsadmin/.cursor:/home/labsadmin/.cursor:rw
+      - /home/labsadmin/.cursor-server/data/logs:/home/labsadmin/.cursor-server/data/logs:ro
       - /home/labsadmin/.agents:/home/labsadmin/.agents:ro
       - /home/labsadmin/.local/bin:/home/labsadmin/.local/bin:ro
-    extra_hosts:
+    extra_hosts: !override
+      - "host.docker.internal:host-gateway"
       - "m1.tail61d527.ts.net:192.168.1.2"
       - "m2.tail61d527.ts.net:192.168.1.191"
       - "247laptop.tail61d527.ts.net:192.168.1.98"
@@ -30,6 +32,7 @@ services:
       - PANDAMONIUM_CURSOR_SETTING_SOURCES=project,user,plugins
       - PANDAMONIUM_CURSOR_WORKSPACES_JSON={"pandamonium":"/mnt/dev-env/projects/pandamonium"}
       - ODYSSEUS_CURSOR_WORKSPACES_JSON={"pandamonium":"/mnt/dev-env/projects/pandamonium"}
+      - PANDAMONIUM_CURSOR_CANVAS_SERVER_HOST=host.docker.internal
       - PANDAMONIUM_UPDATE_TRIGGER=docker-compose
     ports: !override
       - "127.0.0.1:7080:7000"
