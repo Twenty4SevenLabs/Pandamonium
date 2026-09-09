@@ -695,3 +695,41 @@ def test_release_archive_strips_group_and_other_write_bits(tmp_path):
     assert extracted.stat().st_mode & 0o777 == 0o755
     assert extracted.joinpath("config.py").stat().st_mode & 0o777 == 0o644
     assert extracted.joinpath("run").stat().st_mode & 0o777 == 0o755
+
+
+def _dockerenv_exists(monkeypatch, present: bool) -> None:
+    real_exists = Path.exists
+
+    def exists(self):
+        if str(self) == "/.dockerenv":
+            return present
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", exists)
+
+
+def test_container_without_host_trigger_cannot_self_update(monkeypatch):
+    _dockerenv_exists(monkeypatch, True)
+    monkeypatch.setenv("PANDAMONIUM_UPDATE_TRIGGER", "disabled")
+    monkeypatch.delenv("PANDAMONIUM_UPDATE_ROOT", raising=False)
+    monkeypatch.setattr(release_updater.sys, "platform", "linux")
+
+    status = release_updater.installation_status()
+
+    assert status["supported"] is False
+    assert status["kind"] == "container"
+    assert status["reason"] == "Container updates must be run from the host."
+
+
+def test_docker_compose_host_trigger_allows_queued_container_updates(monkeypatch):
+    _dockerenv_exists(monkeypatch, True)
+    monkeypatch.setenv("PANDAMONIUM_UPDATE_TRIGGER", "docker-compose")
+    monkeypatch.delenv("PANDAMONIUM_UPDATE_ROOT", raising=False)
+    monkeypatch.setattr(release_updater.sys, "platform", "linux")
+
+    status = release_updater.installation_status()
+
+    assert status["supported"] is True
+    assert status["kind"] == "container"
+    assert status["trigger"] == "docker-compose"
+    assert status["reason"] is None

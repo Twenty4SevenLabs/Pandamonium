@@ -1,0 +1,9 @@
+[Unit]
+Description=Apply an owner-approved Pandamonium Docker update request
+
+[Path]
+PathExists=/mnt/dev-env/projects/pandamonium/data/updates/request.json
+Unit=pandamonium-docker-update.service
+
+[Install]
+WantedBy=multi-user.target

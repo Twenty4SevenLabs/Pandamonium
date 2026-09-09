@@ -30,6 +30,7 @@ services:
       - PANDAMONIUM_CURSOR_SETTING_SOURCES=project,user,plugins
       - PANDAMONIUM_CURSOR_WORKSPACES_JSON={"pandamonium":"/mnt/dev-env/projects/pandamonium"}
       - ODYSSEUS_CURSOR_WORKSPACES_JSON={"pandamonium":"/mnt/dev-env/projects/pandamonium"}
+      - PANDAMONIUM_UPDATE_TRIGGER=docker-compose
     ports: !override
       - "127.0.0.1:7080:7000"
 

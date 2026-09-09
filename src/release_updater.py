@@ -383,15 +383,19 @@ def installation_status(root: Path = ROOT) -> dict[str, Any]:
     install_root = managed_install_root(root)
     trigger = (os.getenv("PANDAMONIUM_UPDATE_TRIGGER") or "disabled").strip().lower()
     is_container = Path("/.dockerenv").exists()
-    supported = bool(
+    docker_host_trigger = trigger == "docker-compose" and sys.platform.startswith("linux")
+    native_supported = bool(
         install_root
         and (install_root / "current").is_symlink()
         and trigger == "systemd-path"
         and sys.platform.startswith("linux")
         and not is_container
     )
+    supported = native_supported or docker_host_trigger
     reason = None
-    if is_container:
+    if docker_host_trigger:
+        reason = None
+    elif is_container:
         reason = "Container updates must be run from the host."
     elif not install_root or not (install_root / "current").is_symlink():
         reason = "Atomic updates require a managed immutable-release install."

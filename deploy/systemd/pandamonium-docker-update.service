@@ -1,0 +1,15 @@
+[Unit]
+Description=Rebuild Pandamonium Docker image from the cursor-bridge checkout
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+RequiresMountsFor=/mnt/dev-env
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/mnt/dev-env/projects/pandamonium
+ExecStart=/usr/local/sbin/pandamonium-docker-host-update
+TimeoutStartSec=1800
+Nice=10
