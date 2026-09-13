@@ -16,8 +16,8 @@ from pydantic import ValidationError
 
 from core.models import ChatMessage
 from src.request_models import ChatRequest
-from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
-from src.agent_loop import stream_agent_loop
+from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback, REASONING_EFFORT_LEVELS
+from src.agent_loop import AGENT_EFFORT_ROUNDS, stream_agent_loop
 from src import agent_runs
 from src.model_context import annotate_context_messages, build_context_manifest, estimate_tokens
 from src.chat_helpers import coerce_message_and_session
@@ -82,6 +82,29 @@ def _selected_agent_context(label: str) -> str:
     )
 
 
+def _worker_adapter_details(worker: str) -> dict:
+    """Resolve a worker's catalog details (adapter, label, workspaces)."""
+    from src.agent_worker_adapters import configured_worker
+
+    return configured_worker(worker)
+
+
+def _direct_worker_route(worker: str) -> str:
+    """Classify a selected conversation worker for the direct (non-Jarvis) path.
+
+    "codex" covers the fixed pc-codex slot and Codex bridges registered as
+    node-agent endpoints; the Jarvis dispatcher is only bypassed for a worker
+    whose adapter is actually configured, so an unknown target never silently
+    reroutes.
+    """
+    if worker == "hermes":
+        return "hermes"
+    details = _worker_adapter_details(worker)
+    if details and details.get("adapter") == "codex-bridge":
+        return "codex"
+    return ""
+
+
 async def _direct_selected_identity_turn(
     worker: str,
     *,
@@ -91,22 +114,37 @@ async def _direct_selected_identity_turn(
     workspace: str,
     presenter: str,
     codex_thread_id: str | None = None,
+    codex_model: str | None = None,
+    codex_reasoning_effort: str | None = None,
+    explicit_workspace: bool = False,
+    turn_context: dict | None = None,
 ) -> tuple[str, Any, str]:
     """Route non-Jarvis selections without sending them through Jarvis's model."""
     from src.jarvis_agent import direct_codex_turn, direct_hermes_turn
+    from src.agent_turn_context import contextual_prompt
+
+    message = contextual_prompt(message, turn_context)
 
     if worker == "hermes":
         return "response", await direct_hermes_turn(
             session_id, message, owner=owner, workspace=workspace,
+            **({"images": turn_context["images"]} if turn_context and turn_context.get("images") else {}),
         ), "completed"
-    if worker == "pc-codex":
+    if _direct_worker_route(worker) == "codex":
         task, action = await direct_codex_turn(
             session_id,
             message,
             owner=owner,
             workspace=workspace,
             presenter=presenter,
+            # Omit the default so the fixed pc-codex call signature is
+            # unchanged; registered node agents pass their own worker id.
+            **({"worker": worker} if worker != "pc-codex" else {}),
             codex_thread_id=codex_thread_id,
+            codex_model=codex_model,
+            codex_reasoning_effort=codex_reasoning_effort,
+            explicit_workspace=explicit_workspace,
+            **({"images": turn_context["images"]} if turn_context and turn_context.get("images") else {}),
         )
         return "task", task, action
     raise ValueError("unsupported_conversation_target")
@@ -712,6 +750,10 @@ def setup_chat_routes(
         agent_target = str(form_data.get("agent_target") or "").strip()
         worker_workspace = str(form_data.get("worker_workspace") or "").strip()
         worker_thread_id = str(form_data.get("worker_thread_id") or "").strip()
+        codex_model = str(form_data.get("codex_model") or "").strip()
+        codex_reasoning_effort = str(form_data.get("codex_reasoning_effort") or "").strip()
+        agent_effort = str(form_data.get("agent_effort") or "").strip()
+        reasoning_effort = str(form_data.get("reasoning_effort") or "").strip().lower()
         authority_decision_id = str(form_data.get("authority_decision_id") or "").strip()
         authority_choice = str(form_data.get("authority_choice") or "").strip().lower()
         authority_scope = str(form_data.get("authority_scope") or "").strip().lower()
@@ -731,12 +773,26 @@ def setup_chat_routes(
                 worker_workspace = str(body.get("worker_workspace") or "").strip()
             if not worker_thread_id:
                 worker_thread_id = str(body.get("worker_thread_id") or "").strip()
+            if not codex_model:
+                codex_model = str(body.get("codex_model") or "").strip()
+            if not codex_reasoning_effort:
+                codex_reasoning_effort = str(body.get("codex_reasoning_effort") or "").strip()
+            if not agent_effort:
+                agent_effort = str(body.get("agent_effort") or "").strip()
+            if not reasoning_effort:
+                reasoning_effort = str(body.get("reasoning_effort") or "").strip().lower()
             if not authority_decision_id:
                 authority_decision_id = str(body.get("authority_decision_id") or "").strip()
             if not authority_choice:
                 authority_choice = str(body.get("authority_choice") or "").strip().lower()
             if not authority_scope:
                 authority_scope = str(body.get("authority_scope") or "").strip().lower()
+        if len(codex_model) > 128 or len(codex_reasoning_effort) > 32:
+            raise HTTPException(400, "Invalid Codex model selection")
+        if agent_effort and agent_effort not in AGENT_EFFORT_ROUNDS:
+            raise HTTPException(400, "Invalid agent work budget")
+        if reasoning_effort and reasoning_effort not in REASONING_EFFORT_LEVELS:
+            raise HTTPException(400, "Invalid reasoning effort")
         _authority_control = bool(authority_decision_id or authority_choice or authority_scope)
         if _authority_control and not (
             authority_decision_id
@@ -903,7 +959,7 @@ def setup_chat_routes(
                     selected_agent_label = str(details.get("label") or agent_target)[:80]
                     selected_agent_worker = agent_target
                     selected_agent_workspace = _selected_worker_workspace(agent_target, str(message or ""))
-                    if agent_target == "pc-codex" and worker_workspace:
+                    if worker_workspace and details.get("adapter") == "codex-bridge":
                         if worker_workspace not in set(details.get("workspaces") or []):
                             raise HTTPException(400, "Selected project is not allowlisted")
                         selected_agent_workspace = worker_workspace
@@ -1017,6 +1073,10 @@ def setup_chat_routes(
             agent_mode=(chat_mode == "agent" and not hermes_agent_api),
             allow_tool_preprocessing=allow_tool_preprocessing,
             persist_user=not _authority_control,
+            native_agent_images=(
+                selected_agent_worker == "hermes"
+                or _direct_worker_route(selected_agent_worker) == "codex"
+            ),
         )
         active_character_name = selected_agent_label or ctx.preset.character_name
 
@@ -1158,6 +1218,15 @@ def setup_chat_routes(
                 disabled_tools.update(WEB_TOOL_NAMES)
         elif _search_enabled:
             disabled_tools.difference_update(WEB_TOOL_NAMES)
+        # Release/version/update self-knowledge comes from the installation's
+        # local release state (version, updater, curated notes). Disable web
+        # tools for that turn so it cannot drift to public forks or unrelated
+        # projects even when the operator phrases it as a web search.
+        _explicit_release_intent = bool(
+            _tool_intent and _tool_intent.category == "release"
+        )
+        if _explicit_release_intent:
+            disabled_tools.update(WEB_TOOL_NAMES)
 
         # Nobody/incognito mode: deny tools that would expose the user's
         # persistent memory, past chats, or other identity-linked data.
@@ -1359,7 +1428,7 @@ def setup_chat_routes(
                 _active_streams.pop(session, None)
                 return
 
-            if selected_agent_worker in {"hermes", "pc-codex"}:
+            if selected_agent_worker and _direct_worker_route(selected_agent_worker):
                 route_started = time.monotonic()
                 route_model = selected_agent_label or selected_agent_worker
                 metrics = {
@@ -1375,6 +1444,21 @@ def setup_chat_routes(
                 yield f'data: {json.dumps({"type": "model_info", "model": route_model, "character_name": selected_agent_label})}\n\n'
                 try:
                     session_manager.save_sessions()
+                    from src.agent_turn_context import build_agent_turn_context
+
+                    turn_context = build_agent_turn_context(
+                        session_id=session, presenter=selected_agent_label,
+                        workspace=selected_agent_workspace or "home-lab",
+                        attachment_ids=att_ids, upload_handler=upload_handler, owner=_user,
+                    )
+                    from src.agent_gateway import register_context
+
+                    turn_context["gateway_context_id"] = register_context(
+                        turn_context, owner=_user, workspace=workspace or None,
+                        tool_policy=tool_policy, extension_bridge=text_extension_bridge,
+                        active_document=active_doc, active_email=active_email_ctx,
+                        used_memories=ctx.used_memories, context_manifest=ctx.context_manifest,
+                    )
                     kind, payload, action = await _direct_selected_identity_turn(
                         selected_agent_worker,
                         session_id=session,
@@ -1383,6 +1467,10 @@ def setup_chat_routes(
                         workspace=selected_agent_workspace or "home-lab",
                         presenter=selected_agent_label,
                         codex_thread_id=worker_thread_id or None,
+                        codex_model=codex_model or None,
+                        codex_reasoning_effort=codex_reasoning_effort or None,
+                        explicit_workspace=bool(worker_workspace),
+                        turn_context=turn_context,
                     )
                     if kind == "response":
                         reply = str(payload or "").strip()
@@ -1893,6 +1981,7 @@ def setup_chat_routes(
                     except (TypeError, ValueError):
                         _max_rounds = _DEFAULT_ROUNDS
                     _max_rounds = max(1, min(_max_rounds, 200))
+                    _max_rounds = AGENT_EFFORT_ROUNDS.get(agent_effort, _max_rounds)
 
                     _forced_tools = set()
                     if _search_enabled:
@@ -1942,6 +2031,7 @@ def setup_chat_routes(
                             if selected_agent_worker and selected_agent_worker != "jarvis"
                             else None
                         ),
+                        reasoning_effort=reasoning_effort or None,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:

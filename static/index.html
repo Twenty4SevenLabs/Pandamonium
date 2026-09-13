@@ -96,6 +96,13 @@
         var _us = localStorage.getItem('odysseus-ui-scale');
         if (_us && _us !== '100') document.documentElement.classList.add('ui-scale-' + _us);
       } catch(e){}
+      // Apply UI icon-size scale early too (same reason).
+      try {
+        var _is = parseInt(localStorage.getItem('odysseus-ui-icon-scale'), 10);
+        if (_is >= 50 && _is <= 200 && _is !== 100) {
+          document.documentElement.style.setProperty('--ui-icon-scale', String(_is / 100));
+        }
+      } catch(e){}
       // Apply background pattern on body once available
       if (t && t.bgPattern && t.bgPattern !== 'none') {
         document.addEventListener('DOMContentLoaded', function() {
@@ -619,8 +626,20 @@
           <div class="theme-fd-group">
             <label class="theme-fd-label">Text size</label>
             <select id="theme-text-size-select" class="theme-fd-select" aria-label="Text size">
+              <option value="90">Smaller</option>
               <option value="100">Default</option>
-              <option value="125">Larger</option>
+              <option value="110">Larger</option>
+              <option value="125">Much larger</option>
+              <option value="140">Extra large</option>
+            </select>
+          </div>
+          <div class="theme-fd-group">
+            <label class="theme-fd-label">Icon size</label>
+            <select id="theme-icon-size-select" class="theme-fd-select" aria-label="Icon size">
+              <option value="100">Default</option>
+              <option value="115">Large</option>
+              <option value="130">Larger</option>
+              <option value="150">Extra large</option>
             </select>
           </div>
           <div class="theme-fd-group" id="theme-frosted-group">
@@ -746,8 +765,9 @@
            assistant session is still maintained for log_to_assistant()
            writes from scheduled tasks. -->
 
-      <div class="section" id="sessions-section">
+      <div class="section" id="sessions-section" data-section-reorder="true">
         <div class="section-header-flex">
+          <button type="button" class="section-drag-handle" title="Drag to reorder this section" aria-label="Drag to reorder this section"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></button>
           <span class="section-title" id="chats-section-title"><svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span id="chats-section-label" class="section-title-label">Chats</span><span id="chats-notif-dot" class="sidebar-notif-dot" style="display:none"></span></span>
           <div style="position:relative; display:inline-block; display:flex; gap:4px; align-items:center;">
             <button type="button" class="section-header-btn list-item-plus-btn chats-manage-btn" id="chats-library-btn" title="Manage Chats (Library)">
@@ -794,6 +814,10 @@
         </div>
         <div id="session-list" role="listbox"></div>
         <section id="codex-workspace-browser" class="codex-workspace-browser" aria-label="Codex projects and tasks" hidden>
+          <div id="codex-pinned-view" hidden>
+            <div class="codex-browser-head"><strong>Pinned</strong></div>
+            <div id="codex-pinned-list" role="list"></div>
+          </div>
           <div class="codex-browser-head">
             <strong id="codex-browser-title">Projects</strong>
           </div>
@@ -802,11 +826,12 @@
             <button type="button" id="codex-project-more" class="codex-browser-more" hidden>Load more projects</button>
             <div id="codex-task-view" hidden>
               <div id="codex-task-list" class="codex-browser-list" role="list"></div>
-              <button type="button" id="codex-task-more" class="codex-browser-more" hidden>Load more tasks</button>
+              <button type="button" id="codex-task-more" class="codex-browser-more" hidden>Show more</button>
             </div>
           </div>
         </section>
       </div>
+
       <!-- Hidden dropdown for session actions -->
       <div id="session-actions-dropdown" class="dropdown hidden">
         <div class="dropdown-item" id="rename-session-option">
@@ -823,8 +848,9 @@
         </div>
       </div>
 
-      <div class="section" id="email-section">
+      <div class="section" id="email-section" data-section-reorder="true">
         <div class="section-header-flex">
+          <button type="button" class="section-drag-handle" title="Drag to reorder this section" aria-label="Drag to reorder this section"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></button>
           <span class="section-title" id="email-section-title" style="cursor:pointer;" title="Open email inbox"><svg class="section-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg><span>Email</span></span>
           <button type="button" class="section-header-btn list-item-plus-btn" id="email-compose-btn" title="Compose email">
             <svg class="list-item-plus-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -839,8 +865,9 @@
         </div>
       </div>
 
-      <div class="section" id="models-section">
+      <div class="section" id="models-section" data-section-reorder="true">
         <div class="section-header-flex">
+          <button type="button" class="section-drag-handle" title="Drag to reorder this section" aria-label="Drag to reorder this section"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></button>
           <span class="section-title"> Models</span>
           <div style="position:relative; display:inline-block;">
             <button type="button" class="section-header-btn" id="model-sort-btn" title="Sort models">
@@ -893,8 +920,9 @@
         <div id="cursor-agent-list" role="listbox" aria-label="Cursor agents"></div>
       </div>
 
-      <div class="section" id="tools-section">
+      <div class="section" id="tools-section" data-section-reorder="true">
         <div class="section-header-flex">
+          <button type="button" class="section-drag-handle" title="Drag to reorder this section" aria-label="Drag to reorder this section"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></button>
           <span class="section-title"><svg class="section-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>Tools</span>
         </div>
         <div class="list-item" id="tool-mad-mcp-btn" role="button" tabindex="0" aria-haspopup="dialog" aria-controls="mad-mcp-modal">
@@ -1000,8 +1028,9 @@
         </div>
       </div>
 
-      <div class="section" id="plugins-section">
+      <div class="section" id="plugins-section" data-section-reorder="true">
         <div class="section-header-flex">
+          <button type="button" class="section-drag-handle" title="Drag to reorder this section" aria-label="Drag to reorder this section"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg></button>
           <span class="section-title"><svg class="section-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8Z"/></svg>Plugins</span>
           <button type="button" class="section-header-btn list-item-plus-btn marketplace-launcher" id="add-plugins-btn" title="Browse plugins" aria-label="Browse plugins" aria-haspopup="dialog" aria-controls="marketplace-modal">
             <svg class="list-item-plus-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -1045,6 +1074,21 @@
   </nav>
 
   <main class="chat-container welcome-active" id="chat-container" aria-label="Chat area" aria-busy="false">
+    <button type="button" id="session-context-toggle" class="session-context-toggle" aria-controls="session-context-panel" aria-expanded="false" title="Session details">ⓘ <span>Details</span></button>
+    <aside id="session-context-panel" class="session-context-panel" aria-label="Session details" hidden>
+      <div class="session-context-heading"><strong>Session</strong><button type="button" id="session-context-close" aria-label="Close session details">×</button></div>
+      <section><div class="session-context-heading"><h2>Environment</h2><button type="button" class="context-view-all" data-context-view="environment">View all</button></div><dl id="session-context-environment"></dl></section>
+      <section><h2>Sources</h2><ul id="session-context-sources"></ul><button type="button" class="context-view-all" data-context-view="sources">View all</button></section>
+      <section><div class="session-context-heading"><h2>Tools used</h2><button type="button" class="context-view-all" data-context-view="tools">View all</button></div><ul id="session-context-tools"></ul></section>
+      <section><div class="session-context-heading"><h2>Outputs</h2><button type="button" class="context-view-all" data-context-view="outputs">View all</button></div><ul id="session-context-outputs"></ul></section>
+      <p id="session-context-status" role="status"></p>
+    </aside>
+    <dialog id="session-context-drawer" class="session-context-drawer" aria-labelledby="session-context-drawer-title">
+      <div class="session-context-heading"><h2 id="session-context-drawer-title">Sources</h2><button type="button" id="session-context-drawer-close" aria-label="Close details panel" autofocus>×</button></div>
+      <ul id="session-context-drawer-list"></ul>
+      <p id="session-context-drawer-status" role="status"></p>
+      <button type="button" id="session-context-drawer-more" class="codex-browser-more" hidden>Load earlier activity</button>
+    </dialog>
     <!-- Persistent page heading for assistive tech. Visually hidden so it
          never affects layout, but always present inside the main landmark
          (the sidebar that shows the visible brand is hidden off-canvas on
@@ -1066,7 +1110,6 @@
         </svg>
         <span class="incognito-label">Nobody</span>
       </button>
-      <div id="welcome-setup" style="display:none"></div>
     </div>
     <script nonce="{{CSP_NONCE}}">
     (function(){
@@ -1157,6 +1200,16 @@
     <input type="checkbox" id="incognito-toggle" style="display:none;">
     <input type="file" id="file-input" class="hidden" multiple />
 
+    <!-- Agent working plan / todos (MAD-917): collapsible progress list the
+         agent maintains via update_plan while working through a task. -->
+    <div id="agent-plan-panel" class="agent-plan-panel" hidden>
+      <button type="button" class="agent-plan-header" id="agent-plan-toggle" aria-expanded="true" aria-controls="agent-plan-list" title="Collapse or expand the agent plan">
+        <span id="agent-plan-count" class="agent-plan-count">0 of 0 todos completed</span>
+        <svg class="agent-plan-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 15 12 9 18 15"/></svg>
+      </button>
+      <ul id="agent-plan-list" class="agent-plan-list" aria-label="Agent plan"></ul>
+    </div>
+
     <!-- Unified chat input bar -->
     <div class="chat-input-bar">
       <div class="chat-input-top">
@@ -1165,7 +1218,13 @@
         <!-- Model picker (inside chatbox, top-right) -->
         <div class="model-picker-wrap" id="model-picker-wrap">
           <button type="button" class="model-picker-btn" id="model-picker-btn" title="Choose who to talk to" aria-haspopup="listbox" aria-controls="model-picker-list"><span id="model-picker-label">Choose who</span> <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></button>
+          <button type="button" class="composer-effort-btn" id="composer-effort-btn" aria-haspopup="dialog" aria-expanded="false" title="Reasoning effort" hidden>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16"/><path d="M4 12h10"/><path d="M4 18h7"/><circle cx="19" cy="12" r="2"/><circle cx="14" cy="18" r="2"/></svg>
+            <span id="composer-effort-value">Default</span>
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 15 12 9 18 15"/></svg>
+          </button>
           <div class="model-picker-menu hidden" id="model-picker-menu">
+            <div class="model-picker-heading" id="model-picker-heading">Select a model</div>
             <div class="model-picker-search-row">
               <div class="model-picker-search-wrap">
                 <input type="text" id="model-picker-search" placeholder="Search who you can talk to..." autocomplete="off" aria-label="Search who you can talk to">
@@ -1178,6 +1237,19 @@
               </button>
             </div>
             <div class="model-picker-list" id="model-picker-list" role="listbox" aria-label="Configured conversation identities"></div>
+          </div>
+          <div id="conversation-effort-card" class="conversation-effort-card composer-effort-popover" hidden>
+            <div class="effort-card-heading"><label for="conversation-effort" id="conversation-effort-label">Reasoning</label><button type="button" id="conversation-effort-reset" title="Use the default effort" aria-label="Reset effort">↺</button></div>
+            <output id="conversation-effort-value" for="conversation-effort">Default</output>
+            <div id="codex-model-controls" class="codex-model-controls" hidden>
+              <label for="codex-model" class="sr-only">Codex model</label>
+              <select id="codex-model" disabled><option value="">Loading models…</option></select>
+              <select id="codex-reasoning" aria-label="Codex reasoning effort" hidden disabled><option value="">Task default</option></select>
+              <span id="codex-model-status" role="status"></span>
+            </div>
+            <input id="conversation-effort" type="range" min="0" max="4" value="2" step="1" aria-describedby="conversation-effort-help">
+            <div class="effort-endpoints" aria-hidden="true"><span>Less</span><span>More</span></div>
+            <p id="conversation-effort-help"></p>
           </div>
         </div>
       </div>
@@ -1236,6 +1308,9 @@
               </button>
             </div>
           </div>
+          <button type="button" class="access-mode-btn" id="access-mode-btn" data-access-mode="ask_for_approval" title="Agent access: Ask for approval" aria-label="Agent access: Ask for approval" aria-expanded="false">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          </button>
           <!-- Workspace indicator (hidden until a folder is set) -->
           <button type="button" class="input-icon-btn tool-indicator" title="Workspace - click to clear" id="workspace-indicator-btn" aria-label="Clear workspace" style="display:none;">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
@@ -1280,6 +1355,20 @@
           <button type="submit" form="chat-form" class="send-btn newchat-mode" data-mode="newchat" aria-label="New chat">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg><span class="send-btn-label">+ New</span>
           </button>
+          <div class="access-mode-menu" id="access-mode-menu" hidden>
+            <button type="button" class="access-mode-option" data-access-value="ask_for_approval">
+              <span class="access-mode-name">Ask for approval</span>
+              <span class="access-mode-desc">Always ask to edit external files and use the internet</span>
+            </button>
+            <button type="button" class="access-mode-option" data-access-value="approve_for_me">
+              <span class="access-mode-name">Approve for me</span>
+              <span class="access-mode-desc">Only ask for actions detected as potentially unsafe</span>
+            </button>
+            <button type="button" class="access-mode-option" data-access-value="full_access">
+              <span class="access-mode-name">Full access</span>
+              <span class="access-mode-desc">Unrestricted access to the internet and any file on your computer</span>
+            </button>
+          </div>
           <button type="button" class="jarvis-input-sphere" id="jarvis-input-sphere" title="Pandamonium live call" aria-label="Pandamonium live call">
             <span class="jarvis-sphere-core" aria-hidden="true"></span>
           </button>
@@ -1667,9 +1756,43 @@
           </label>
           <button type="button" id="marketplace-retry">Refresh</button>
         </div>
+        <section class="marketplace-intake" id="marketplace-intake" aria-label="Add plugin from GitHub">
+          <h4>Add from GitHub</h4>
+          <p>Paste a public repository URL. Pandamonium fetches the pinned revision and scans it statically — capabilities, dependencies, licenses, and findings — before anything is installed.</p>
+          <div class="marketplace-intake-form">
+            <input id="marketplace-source-url" type="url" inputmode="url" placeholder="https://github.com/owner/repo.git" autocomplete="off" aria-label="Repository URL">
+            <input id="marketplace-source-ref" type="text" placeholder="HEAD" autocomplete="off" aria-label="Git ref" value="HEAD">
+            <button type="button" id="marketplace-source-scan">Scan repository</button>
+          </div>
+          <section class="mad-mcp-progress-card marketplace-scan-progress" id="marketplace-scan-progress" data-state="idle" aria-live="polite" hidden>
+            <div class="mad-mcp-progress-copy">
+              <strong id="marketplace-scan-title">Scan</strong>
+              <span id="marketplace-scan-detail"></span>
+              <div class="updater-progress-meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <span id="marketplace-scan-fill"></span>
+              </div>
+            </div>
+            <ol class="mad-mcp-phase-list" id="marketplace-scan-phases">
+              <li data-phase="fetch"><span></span>Fetch</li>
+              <li data-phase="classify"><span></span>Classify</li>
+              <li data-phase="extract"><span></span>Extract</li>
+              <li data-phase="audit"><span></span>Audit</li>
+              <li data-phase="report"><span></span>Report</li>
+            </ol>
+          </section>
+          <div class="marketplace-scan-results" id="marketplace-scan-results" hidden></div>
+          <div class="marketplace-scan-status" id="marketplace-scan-status" role="status" aria-live="polite"></div>
+        </section>
         <div id="marketplace-summary" class="marketplace-summary" role="status" aria-live="polite"></div>
         <div id="marketplace-workspace" class="marketplace-workspace">
           <section class="marketplace-results-pane" aria-label="Marketplace plugins">
+            <section class="marketplace-installed" id="marketplace-installed" aria-label="Installed plugins">
+              <div class="marketplace-installed-head">
+                <h4>Installed</h4>
+                <span id="marketplace-installed-summary">Loading installed plugins…</span>
+              </div>
+              <div id="marketplace-installed-list" class="marketplace-installed-list" role="list"></div>
+            </section>
             <div id="marketplace-results" class="marketplace-results"></div>
           </section>
           <article id="marketplace-detail" class="marketplace-detail" tabindex="-1" aria-live="polite">
@@ -2119,6 +2242,31 @@
         <!-- ═══ APPEARANCE TAB ═══ -->
         <div data-settings-panel="appearance" class="settings-appearance-panel hidden">
           <div class="admin-card" style="padding-bottom:6px;">
+            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>Display size</h2>
+            <div class="theme-fd-row" style="gap:12px;">
+              <div class="theme-fd-group" style="flex:1 1 0;">
+                <label class="theme-fd-label" for="set-text-size">Text size</label>
+                <select id="set-text-size" class="theme-fd-select" aria-label="Text size">
+                  <option value="90">Smaller</option>
+                  <option value="100" selected>Default</option>
+                  <option value="110">Larger</option>
+                  <option value="125">Much larger</option>
+                  <option value="140">Extra large</option>
+                </select>
+              </div>
+              <div class="theme-fd-group" style="flex:1 1 0;">
+                <label class="theme-fd-label" for="set-icon-size">Icon size</label>
+                <select id="set-icon-size" class="theme-fd-select" aria-label="Icon size">
+                  <option value="100" selected>Default</option>
+                  <option value="115">Large</option>
+                  <option value="130">Larger</option>
+                  <option value="150">Extra large</option>
+                </select>
+              </div>
+            </div>
+            <p class="admin-toggle-sub" style="margin:8px 0 0 2px;">Scales app text and sidebar/navigation icons. Saved for this browser.</p>
+          </div>
+          <div class="admin-card" style="padding-bottom:6px;">
             <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>Sidebar<span style="flex:1"></span><button type="button" class="vis-reset-btn" data-vis-reset title="Reset this section to defaults" aria-label="Reset Sidebar to defaults" style="background:none;border:none;padding:2px 4px;cursor:pointer;color:inherit;opacity:0.55;display:inline-flex;align-items:center;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></button></h2>
             <div class="vis-toggles">
               <label class="vis-row">
@@ -2510,6 +2658,8 @@
                     <select id="adm-epLocalType" style="padding:5px;width:66px;flex-shrink:0;border-top-right-radius:0;border-bottom-right-radius:0;border-right:0;">
                       <option value="llm" selected>LLM</option>
                       <option value="image">Image</option>
+                      <option value="stt">STT</option>
+                      <option value="tts">TTS</option>
                     </select>
                     <input id="adm-epLocalUrl" type="text" placeholder="Paste endpoint URL, e.g. http://localhost:11434/v1" style="flex:1;min-width:0;border-top-left-radius:0;border-bottom-left-radius:0;">
                   </div>
@@ -2606,6 +2756,60 @@
             </div>
           </div>
 
+          <!-- ── Tailnet card ───────────────────────────────────────── -->
+          <div class="admin-card">
+            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M6.5 6.5 10 10"/><path d="M17.5 6.5 14 10"/><path d="M6.5 17.5 10 14"/><path d="M17.5 17.5 14 14"/></svg>Add Tailscale Models <span style="opacity:0.45;font-weight:normal;font-size:0.82em">(Node URL)</span>
+              <span style="flex:1"></span>
+              <button class="admin-btn-sm" id="adm-epTailnetScanBtn" title="List online tailnet peers and probe the ones you select" aria-controls="adm-epTailnetResults" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:4px;">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Scan Tailnet
+              </button>
+            </h2>
+            <div class="admin-toggle-sub" style="margin:0 0 10px 2px;">Find model servers on your own tailnet nodes. Scan lists online peers; select up to 5 to probe, or paste a tailnet URL directly.</div>
+            <div class="adm-add-section">
+              <div class="admin-model-form">
+                <div class="admin-model-form-row">
+                  <input id="adm-epTailnetUrl" type="text" placeholder="Tailnet URL, e.g. http://100.x.y.z:8000/v1" style="flex:1;min-width:0;">
+                  <button class="admin-btn-add" id="adm-epTailnetAddBtn" style="min-width:55px;text-align:center;display:inline-flex;align-items:center;justify-content:center;gap:4px;flex-shrink:0;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Add
+                  </button>
+                </div>
+                <div id="adm-epTailnetMsg" class="adm-ep-inline-msg"></div>
+                <div id="adm-epTailnetResults" aria-live="polite" aria-label="Tailnet discovery results"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Agent node card ─────────────────────────────────────── -->
+          <div class="admin-card">
+            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/></svg>Add Agent Node <span style="opacity:0.45;font-weight:normal;font-size:0.82em">(Codex bridge)</span>
+              <span style="flex:1"></span>
+              <button class="admin-btn-sm" id="adm-agentTestBtn" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:4px;">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>Test
+              </button>
+            </h2>
+            <div class="admin-toggle-sub" style="margin:0 0 10px 2px;">Pair a workstation bridge as a conversation agent. On the node, start the bridge, copy its one-time pairing code, and paste it here.</div>
+            <div class="adm-add-section">
+              <div class="admin-model-form">
+                <div class="admin-model-form-row">
+                  <input id="adm-agentUrl" type="text" placeholder="Node bridge URL, e.g. http://192.168.1.20:8040" style="flex:1;min-width:0;">
+                </div>
+                <div class="admin-model-form-row">
+                  <input id="adm-agentToken" type="password" placeholder="One-time pairing code from the node" autocomplete="off" style="flex:1">
+                </div>
+                <div class="admin-model-form-row">
+                  <input id="adm-agentName" type="text" placeholder="Label shown in the picker (optional)" style="flex:1;min-width:0;">
+                </div>
+                <div class="admin-model-form-row">
+                  <input id="adm-agentWorkspaces" type="text" placeholder="Allowed workspaces, comma-separated (optional)" style="flex:1;min-width:0;">
+                  <button class="admin-btn-add" id="adm-agentAddBtn" style="min-width:55px;text-align:center;display:inline-flex;align-items:center;justify-content:center;gap:4px;flex-shrink:0;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Pair
+                  </button>
+                </div>
+                <div id="adm-agentMsg" class="adm-ep-inline-msg"></div>
+              </div>
+            </div>
+          </div>
+
         </div>
 
         <!-- ═══ ADDED MODELS TAB ═══ -->
@@ -2621,7 +2825,13 @@
               </button>
             </h2>
             <div class="admin-toggle-sub" style="margin-bottom:12px">Endpoints you've connected. Probe re-tests them all; Clear offline removes the dead ones.</div>
-            <div class="adm-ep-section">
+            <div class="adm-ep-section" style="margin-bottom:18px;">
+              <div class="adm-ep-section-head" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-bottom:6px;display:inline-flex;align-items:center;gap:5px;">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/></svg>Agents
+              </div>
+              <div id="adm-epList-agent"><div class="admin-empty">No agent nodes yet.</div></div>
+            </div>
+            <div class="adm-ep-section" style="margin-top:18px;">
               <div class="adm-ep-section-head" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-bottom:6px;display:inline-flex;align-items:center;gap:5px;">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>Local
               </div>
@@ -2632,6 +2842,12 @@
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>API
               </div>
               <div id="adm-epList-api"><div class="admin-empty">No API endpoints yet.</div></div>
+            </div>
+            <div class="adm-ep-section" style="margin-top:18px;">
+              <div class="adm-ep-section-head" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.7;margin-bottom:6px;display:inline-flex;align-items:center;gap:5px;">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M6.5 6.5 10 10"/><path d="M17.5 6.5 14 10"/><path d="M6.5 17.5 10 14"/><path d="M17.5 17.5 14 14"/></svg>Tailnet
+              </div>
+              <div id="adm-epList-tailnet"><div class="admin-empty">No tailnet endpoints yet.</div></div>
             </div>
           </div>
         </div>
@@ -2662,7 +2878,7 @@
               </div>
               <div class="settings-row">
                 <label class="settings-label">Max steps per message</label>
-                <input id="set-agentMaxRounds" type="text" inputmode="numeric" placeholder="20" class="settings-select" style="width:120px;">
+                <input id="set-agentMaxRounds" type="text" inputmode="numeric" placeholder="80" class="settings-select" style="width:120px;">
               </div>
               <div id="set-agentMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
@@ -2904,6 +3120,7 @@
 <script type="module" src="/static/js/tts-ai.js"></script>
 <script type="module" src="/static/js/jarvisVoice.js?v=20260905T210749Z"></script>
 <script type="module" src="/static/js/codexWorkspace.js"></script>
+<script type="module" src="/static/js/conversationContext.js"></script>
 <script type="module" src="/static/js/document.js"></script>
 <script type="module" src="/static/js/gallery.js"></script>
 <script type="module" src="/static/js/chatRenderer.js?v=20260906T203500Z"></script>

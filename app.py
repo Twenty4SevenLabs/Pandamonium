@@ -293,6 +293,8 @@ if AUTH_ENABLED:
         "/api/health",
         "/api/version",
         "/api/knowledge/sync",
+        "/api/agent-gateway/mcp/",
+        "/api/agent-gateway/mcp",
         "/login",
     }
     # V1 handlers validate their own per-agent or internal bearer tokens.
@@ -751,6 +753,10 @@ app.include_router(setup_preset_routes(preset_manager))
 from routes.diagnostics_routes import setup_diagnostics_routes
 app.include_router(setup_diagnostics_routes(rag_manager, rag_available, research_handler, memory_vector))
 
+# Setup status (read-only first-run truth for the setup wizard)
+from routes.setup_routes import setup_setup_routes
+app.include_router(setup_setup_routes())
+
 # Cleanup
 from routes.cleanup_routes import setup_cleanup_routes
 app.include_router(setup_cleanup_routes(session_manager))
@@ -843,6 +849,10 @@ app.include_router(setup_cookbook_routes())
 
 from routes.workspace_routes import setup_workspace_routes
 app.include_router(setup_workspace_routes())
+
+# Pandamonium agent workstation projects (MAD-902)
+from routes.project_routes import setup_project_routes
+app.include_router(setup_project_routes())
 
 # Hardware model fitting (cookbook "What Fits?" tab)
 from routes.hwfit_routes import setup_hwfit_routes
@@ -1122,13 +1132,17 @@ async def runtime_info() -> Dict[str, object]:
     }
 
 # ========= LIFECYCLE =========
+from src.agent_gateway import authenticated_gateway, gateway as agent_gateway
+
+app.mount("/api/agent-gateway/mcp", authenticated_gateway)
 
 @asynccontextmanager
 async def _lifespan(app):
     """Modern lifespan context manager replacing deprecated @app.on_event."""
     # ── STARTUP ──
     await _startup_event()
-    yield
+    async with agent_gateway.session_manager.run():
+        yield
     # ── SHUTDOWN ──
     await _shutdown_event()
 
@@ -1164,6 +1178,18 @@ async def _startup_event():
             _db.close()
     except Exception as e:
         logger.debug(f"Incognito purge skipped: {e}")
+    # MAD-920: convert legacy chat folder names into real projects exactly once
+    # so the sidebar's Projects group is backed by the project registry.
+    try:
+        from src import project_registry
+        _migration = await asyncio.to_thread(project_registry.migrate_session_folders)
+        if _migration.get("migrated") or _migration.get("bound"):
+            logger.info(
+                "Projects migration: created %s project(s), bound %s session(s)",
+                _migration.get("migrated"), _migration.get("bound"),
+            )
+    except Exception as e:
+        logger.warning(f"Session-folder project migration skipped: {e}")
     # Strong refs to fire-and-forget startup tasks. Without this, Python may
     # GC tasks created with `asyncio.create_task(...)` before they finish.
     _startup_tasks: list[asyncio.Task] = getattr(app.state, "_startup_tasks", [])

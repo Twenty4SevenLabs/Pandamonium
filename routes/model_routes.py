@@ -20,7 +20,7 @@ from core.database import SessionLocal, ModelEndpoint, Session as DbSession
 from core.log_safety import redact_url as _redact_url_for_log
 from core.middleware import require_admin
 from src.constants import COOKBOOK_STATE_FILE
-from src.llm_core import _detect_provider, _host_match, ANTHROPIC_MODELS
+from src.llm_core import _detect_provider, _host_match, ANTHROPIC_MODELS, reasoning_levels
 from src.tls_overrides import llm_verify
 from src.settings import load_settings as _load_settings, save_settings as _save_settings
 from src.endpoint_resolver import (
@@ -28,6 +28,15 @@ from src.endpoint_resolver import (
     build_chat_url,
     build_models_url,
     build_headers,
+)
+from src.agent_worker_adapters import (
+    AGENT_BRIDGE_PROTOCOLS,
+    CODEX_BRIDGE_PROTOCOL,
+    agent_endpoint_protocol,
+    agent_endpoint_workspaces,
+    agent_meta,
+    ensure_legacy_codex_endpoint,
+    invalidate_agent_adapter_cache,
 )
 from src.auth_helpers import _auth_disabled, effective_user, owner_filter
 
@@ -50,6 +59,20 @@ _ENDPOINT_FALLBACK_FIELDS = {
     "utility_model_fallbacks": "Utility Model Fallbacks",
     "vision_model_fallbacks":  "Vision Model Fallbacks",
 }
+
+# Model types an endpoint may be configured as. Chat model selection only
+# consumes "llm" (static/js/models.js), "image" powers Gallery, and "stt"/"tts"
+# configure local speech servers (selected via the endpoint:<id> voice
+# providers). Unknown values are rejected instead of being stored. Node-agent
+# endpoints (MAD-934) set model_type="agent" directly and never pass through
+# this model-transport validation.
+MODEL_ENDPOINT_TYPES = ("llm", "image", "stt", "tts")
+
+
+def normalize_model_endpoint_type(value) -> str:
+    """Return a validated endpoint model type, or "" when unsupported."""
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in MODEL_ENDPOINT_TYPES else ""
 
 
 def _speech_settings_using_endpoint(settings: dict, ep_id: str) -> list:
@@ -446,7 +469,7 @@ def _truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in ("true", "1", "yes", "on")
 
 
-_ENDPOINT_KINDS = {"auto", "local", "api", "proxy"}
+_ENDPOINT_KINDS = {"auto", "local", "api", "proxy", "tailnet", "agent"}
 _REFRESH_MODES = {"auto", "manual", "disabled"}
 
 
@@ -458,6 +481,10 @@ def _normalize_endpoint_kind(value: Any) -> str:
 def _normalize_refresh_mode(value: Any, endpoint_kind: str = "auto") -> str:
     mode = str(value or "").strip().lower()
     kind = _normalize_endpoint_kind(endpoint_kind)
+    if kind == "agent":
+        # Node-agent endpoints expose worker identity, not an OpenAI model
+        # catalog; never schedule a /models refresh against the bridge.
+        return "disabled"
     if mode in ("manual", "disabled"):
         return mode
     if mode == "auto" and kind != "proxy":
@@ -483,7 +510,7 @@ def _endpoint_refresh_interval(ep: Any, category: str) -> float:
         val = 0
     if val > 0:
         return float(max(30, val))
-    return 60.0 if category == "local" else 3600.0
+    return 60.0 if category in ("local", "tailnet") else 3600.0
 
 
 def _endpoint_refresh_timeout(ep: Any, category: str) -> float:
@@ -496,8 +523,8 @@ def _endpoint_refresh_timeout(ep: Any, category: str) -> float:
         return float(max(1, min(60, val)))
     # llama.cpp and other local OpenAI-compatible servers can block briefly
     # while warming/loading. A 2s local timeout makes working endpoints flicker
-    # offline before /v1/models is ready.
-    return 10.0 if category == "local" else 2.0
+    # offline before /v1/models is ready. Tailnet nodes behave like local.
+    return 10.0 if category in ("local", "tailnet") else 2.0
 
 
 def _manual_refresh_timeout(ep: Any, category: str, requested: Any = None) -> float:
@@ -510,7 +537,7 @@ def _manual_refresh_timeout(ep: Any, category: str, requested: Any = None) -> fl
     if requested_val is not None:
         return float(requested_val)
     stored = _parse_positive_int(getattr(ep, "model_refresh_timeout", None), minimum=1, maximum=60)
-    if category == "local":
+    if category in ("local", "tailnet"):
         return float(stored) if stored is not None else _endpoint_refresh_timeout(ep, category)
     return float(max(stored or 30, 30))
 
@@ -564,7 +591,7 @@ def _explicit_model_list_timeout(base_url: str, endpoint_kind: str = "auto", req
     category = _classify_endpoint(base_url, kind)
     if kind in ("api", "proxy") or category == "api":
         return 30.0
-    return 15.0 if category == "local" else (3.0 if _is_ollama_base(base_url) else 2.0)
+    return 15.0 if category in ("local", "tailnet") else (3.0 if _is_ollama_base(base_url) else 2.0)
 
 
 def _cached_model_ids(ep: Any) -> List[str]:
@@ -789,12 +816,17 @@ def _local_ip_literal(host: str) -> bool:
 
 
 def _classify_endpoint(base_url: str, endpoint_kind: str = "auto") -> str:
-    """Return 'local' if the endpoint URL points to a private/local address, else 'api'.
+    """Return 'local' if the endpoint URL points to a private/local address, 'tailnet'
+    for explicitly registered tailnet nodes, else 'api'.
     Includes the Tailscale CGNAT range (100.64.0.0/10) so tailnet-hosted
     servers (e.g. Cookbook serve endpoints) get reachability-probed too."""
     kind = _normalize_endpoint_kind(endpoint_kind)
+    if kind == "agent":
+        return "agent"
     if kind == "local":
         return "local"
+    if kind == "tailnet":
+        return "tailnet"
     if kind in ("api", "proxy"):
         return "api"
     try:
@@ -819,6 +851,306 @@ def _effective_endpoint_kind(ep: Any, base_url: str) -> str:
         except Exception:
             pass
     return "auto"
+
+
+def _is_agent_endpoint(ep: Any) -> bool:
+    """Return true for first-class node-agent endpoints (MAD-934)."""
+    return _endpoint_kind(ep) == "agent"
+
+
+_AGENT_HEALTH_TTL = 8.0
+_agent_health_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def _invalidate_agent_health_cache() -> None:
+    _agent_health_cache.clear()
+
+
+def _agent_error(message: str, *, state: str = "unreachable", reason: str = "connection_failed") -> dict:
+    return {"state": state, "reason": reason, "message": message}
+
+
+def _agent_health_failure(exc: Exception) -> dict:
+    """Classify a bridge connection failure without exposing the secret."""
+    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    if status_code in (401, 403):
+        return _agent_error(
+            "The node rejected the pairing code. Generate a new one-time code on the node and pair again.",
+            state="auth_required",
+            reason="authentication_failed",
+        )
+    return _agent_error(
+        "Could not reach the node bridge. Check the address and that the bridge is running."
+    )
+
+
+def _probe_agent_bridge(
+    base_url: str,
+    token: str,
+    *,
+    timeout: float = 5.0,
+    protocol: str = "codex-bridge",
+) -> Dict[str, Any]:
+    """Test one node bridge pairing live. Never echoes the pairing token."""
+    protocol = str(protocol or "codex-bridge").strip().lower() or "codex-bridge"
+    result: Dict[str, Any] = {
+        "ok": False,
+        "state": "unreachable",
+        "reason": "connection_failed",
+        "protocol": protocol,
+        "protocol_version": "",
+        "node_label": "",
+        "message": "Could not reach the node bridge. Check the address and that the bridge is running.",
+    }
+    if protocol not in AGENT_BRIDGE_PROTOCOLS:
+        result.update({
+            "state": "incompatible",
+            "reason": "unsupported_protocol",
+            "message": "Unsupported bridge protocol. Pair a node running the Codex bridge.",
+        })
+        return result
+    base = _normalize_base(base_url)
+    if not base:
+        result.update({
+            "reason": "invalid_url",
+            "message": "Enter the node bridge address, for example http://192.168.1.20:8040.",
+        })
+        return result
+    try:
+        response = httpx.get(
+            f"{base}/health",
+            headers={"Authorization": f"Bearer {str(token or '')}"},
+            timeout=timeout,
+            verify=llm_verify(),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        result.update(_agent_health_failure(exc))
+        return result
+    except Exception as exc:
+        result.update(_agent_health_failure(exc))
+        return result
+    payload = payload if isinstance(payload, dict) else {}
+    if payload.get("ok") is False or payload.get("app_server") is False:
+        reason = (
+            "codex_binary_not_found"
+            if payload.get("reason") == "codex_binary_not_found"
+            else "codex_unavailable"
+        )
+        result.update({
+            "state": "unreachable",
+            "reason": reason,
+            "message": "The bridge is running but its Codex worker is unavailable.",
+        })
+        return result
+    features = payload.get("features") if isinstance(payload.get("features"), dict) else {}
+    version = str(payload.get("protocol_version") or "")
+    if (
+        version != CODEX_BRIDGE_PROTOCOL
+        or features.get("project_catalog") is not True
+        or features.get("task_control") is not True
+    ):
+        result.update({
+            "state": "incompatible",
+            "reason": "bridge_update_required",
+            "protocol_version": version,
+            "message": "The node's bridge is out of date. Update the bridge and pair again.",
+        })
+        return result
+    installation = payload.get("installation") if isinstance(payload.get("installation"), dict) else {}
+    return {
+        "ok": True,
+        "state": "connected",
+        "reason": "",
+        "protocol": protocol,
+        "protocol_version": version,
+        "node_label": " ".join(str(installation.get("display_name") or "").split())[:80],
+        "message": "Connected. The node bridge accepted the pairing code.",
+    }
+
+
+def _normalize_agent_workspaces(raw: Any) -> List[str]:
+    """Validate and de-duplicate node workspaces from a form/JSON value."""
+    values = raw if isinstance(raw, list) else re.split(r"[,\n]+", str(raw or ""))
+    workspaces: List[str] = []
+    for value in values:
+        text = str(value or "").strip().lower()
+        if not text or text in workspaces:
+            continue
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", text):
+            continue
+        if len(workspaces) >= 32:
+            break
+        workspaces.append(text)
+    return workspaces
+
+
+def _agent_endpoint_health(ep: Any, *, timeout: float = 3.0) -> Dict[str, Any]:
+    """Cached, redacted availability for one registered node endpoint."""
+    base = _normalize_base(getattr(ep, "base_url", "") or "")
+    key = f"{base}\x00{getattr(ep, 'id', '')}"
+    now = _time.time()
+    cached = _agent_health_cache.get(key)
+    if cached and (now - float(cached.get("time") or 0.0)) < _AGENT_HEALTH_TTL:
+        return dict(cached.get("data") or {})
+    if not bool(getattr(ep, "is_enabled", True)):
+        data = {
+            "state": "disabled",
+            "reason": "endpoint_disabled",
+            "message": "This node is disabled. Enable it to reconnect.",
+            "protocol": agent_endpoint_protocol(ep),
+            "protocol_ready": False,
+        }
+    else:
+        probe = _probe_agent_bridge(
+            base,
+            str(getattr(ep, "api_key", "") or ""),
+            timeout=timeout,
+            protocol=agent_endpoint_protocol(ep),
+        )
+        data = {
+            "state": probe.get("state") or "unreachable",
+            "reason": str(probe.get("reason") or ""),
+            "message": str(probe.get("message") or ""),
+            "protocol": probe.get("protocol") or agent_endpoint_protocol(ep),
+            "protocol_ready": probe.get("state") == "connected",
+        }
+        if probe.get("node_label"):
+            data["node_label"] = probe["node_label"]
+    _agent_health_cache[key] = {"time": now, "data": data}
+    return dict(data)
+
+
+def _agent_endpoint_payload(ep: Any) -> Dict[str, Any]:
+    """Redacted status/availability payload for Added Models and pairing UIs."""
+    health = _agent_endpoint_health(ep)
+    state = str(health.get("state") or "unreachable")
+    connection: Dict[str, Any] = {"state": state}
+    for field in ("reason", "protocol"):
+        value = str(health.get(field) or "")
+        if value:
+            connection[field] = value
+    connection["protocol_ready"] = health.get("protocol_ready") is True
+    return {
+        "id": ep.id,
+        "name": ep.name,
+        "base_url": ep.base_url,
+        "has_key": bool(getattr(ep, "api_key", None)),
+        "api_key_fingerprint": _api_key_fingerprint(getattr(ep, "api_key", None)),
+        "is_enabled": bool(getattr(ep, "is_enabled", True)),
+        "models": [],
+        "pinned_models": [],
+        "hidden_count": 0,
+        "online": state == "connected",
+        "status": state,
+        "ping_error": health.get("message") if state != "connected" else None,
+        "model_type": "agent",
+        "supports_tools": None,
+        "endpoint_kind": "agent",
+        "category": "agent",
+        "protocol": health.get("protocol") or agent_endpoint_protocol(ep),
+        "workspaces": agent_endpoint_workspaces(ep),
+        "connection": connection,
+        "model_refresh_mode": "disabled",
+        "model_refresh_interval": None,
+        "model_refresh_timeout": None,
+    }
+
+
+def _register_agent_endpoint(
+    request: Request,
+    *,
+    name: str,
+    base_url: str,
+    api_key: str,
+    bridge_protocol: str = "codex-bridge",
+    workspaces: str = "",
+    shared: str = "true",
+) -> Dict[str, Any]:
+    """Pair with a node bridge and register it as a first-class agent endpoint.
+
+    Fails closed with human copy on any pairing failure; the pairing token is
+    stored encrypted in the endpoint row and never echoed back.
+    """
+    protocol = str(bridge_protocol or "codex-bridge").strip().lower() or "codex-bridge"
+    if protocol not in AGENT_BRIDGE_PROTOCOLS:
+        raise HTTPException(400, "Unsupported bridge protocol. Pair a node running the Codex bridge.")
+    token = str(api_key or "").strip()
+    if not token:
+        raise HTTPException(
+            400,
+            "Pairing code required. Paste the one-time code shown by the node bridge.",
+        )
+    base = _normalize_base(base_url)
+    if not base:
+        raise HTTPException(400, "Node bridge address is required.")
+    from src.endpoint_resolver import resolve_url
+    base = resolve_url(base)
+    base = _rewrite_loopback_for_docker(base)
+
+    probe = _probe_agent_bridge(base, token, protocol=protocol)
+    if not probe.get("ok"):
+        raise HTTPException(400, probe.get("message") or "Could not pair with the node bridge.")
+
+    normalized_workspaces = _normalize_agent_workspaces(workspaces)
+    label = " ".join(str(name or "").split())[:80]
+    if not label:
+        label = probe.get("node_label") or urlparse(base).hostname or base
+    meta_json = json.dumps({
+        "protocol": protocol,
+        "workspaces": normalized_workspaces,
+        "paired_at": datetime.utcnow().isoformat(timespec="seconds"),
+    })
+
+    from src.auth_helpers import get_current_user as _gcu
+    shared_flag = _truthy(shared or "true")
+    owner = None if shared_flag else (_gcu(request) or None)
+
+    db = SessionLocal()
+    try:
+        # Re-pairing the same node refreshes the row instead of duplicating it.
+        existing = (
+            db.query(ModelEndpoint)
+            .filter(
+                ModelEndpoint.endpoint_kind == "agent",
+                ModelEndpoint.base_url == base,
+            )
+            .filter((ModelEndpoint.owner.is_(None)) | (ModelEndpoint.owner == owner))
+            .order_by(ModelEndpoint.owner.desc())
+            .first()
+        )
+        if existing is not None:
+            existing.name = label or existing.name
+            existing.api_key = token
+            existing.is_enabled = True
+            existing.model_type = "agent"
+            existing.agent_meta = meta_json
+            db.commit()
+            row = existing
+            created = False
+        else:
+            row = ModelEndpoint(
+                id=str(uuid.uuid4())[:8],
+                name=label,
+                base_url=base,
+                api_key=token,
+                is_enabled=True,
+                model_type="agent",
+                endpoint_kind="agent",
+                agent_meta=meta_json,
+                owner=owner,
+            )
+            db.add(row)
+            db.commit()
+            created = True
+        payload = _agent_endpoint_payload(row)
+    finally:
+        db.close()
+    invalidate_agent_adapter_cache()
+    _invalidate_agent_health_cache()
+    payload["existing"] = not created
+    return payload
 
 
 def _is_loading_model_response(resp: Any) -> bool:
@@ -1255,6 +1587,14 @@ def _api_key_fingerprint(api_key: Optional[str]) -> str:
 def setup_model_routes(model_discovery):
     router = APIRouter(prefix="/api")
 
+    # MAD-934: migrate the legacy env-configured Codex bridge into a registered
+    # node endpoint once, so the pc-codex binding resolves from data. Idempotent
+    # and best-effort — a clean install has nothing to migrate.
+    try:
+        ensure_legacy_codex_endpoint()
+    except Exception:
+        logger.warning("Legacy Codex endpoint migration skipped", exc_info=True)
+
     # ---- Model list cache ----
     import time as _time
     # Per-user cache: { owner_key: {"data": ..., "time": ...} }. owner_key is
@@ -1440,6 +1780,10 @@ def setup_model_routes(model_discovery):
             db.close()
 
         for ep in endpoints:
+            if _is_agent_endpoint(ep):
+                # Node-agent endpoints are conversation targets, not model
+                # transports; the selector catalog lists them as workers.
+                continue
             base = _normalize_base(ep.base_url)
             provider = _safe_detect_provider(base)
             # Merge cached + pinned models, then filter out hidden ones
@@ -1464,6 +1808,14 @@ def setup_model_routes(model_discovery):
                     if m not in curated:
                         curated.append(m)
                 extra = [m for m in extra if m not in pinned]
+                # Per-model reasoning-effort support (MAD-900): only models with
+                # a provider reasoning contract get an entry, so the picker can
+                # hide its reasoning selector for everything else.
+                reasoning = {}
+                for mid in list(curated) + list(extra):
+                    levels = reasoning_levels(provider, mid)
+                    if levels:
+                        reasoning[mid] = list(levels)
                 items.append({
                     "host": "custom",
                     "port": 0,
@@ -1477,6 +1829,7 @@ def setup_model_routes(model_discovery):
                     "category": category,
                     "endpoint_kind": kind,
                     "model_type": ep_model_type,
+                    "reasoning_levels": reasoning,
                 })
             else:
                 # Endpoint unreachable but still show it greyed out
@@ -1594,6 +1947,10 @@ def setup_model_routes(model_discovery):
                 endpoints = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
                 local_eps = []
                 for ep in endpoints:
+                    if _is_agent_endpoint(ep):
+                        # Node-agent endpoints are conversation targets, not
+                        # model transports.
+                        continue
                     base = _normalize_base(ep.base_url)
                     kind = _effective_endpoint_kind(ep, base)
                     if _classify_endpoint(base, kind) == "local":
@@ -1746,6 +2103,8 @@ def setup_model_routes(model_discovery):
             # Detach from session
             ep_data = []
             for ep in endpoints:
+                if _is_agent_endpoint(ep):
+                    continue
                 ep_data.append({
                     "id": ep.id,
                     "name": ep.name,
@@ -1840,6 +2199,12 @@ def setup_model_routes(model_discovery):
     @router.get("/model-endpoints")
     def list_model_endpoints(request: Request) -> List[Dict[str, Any]]:
         require_admin(request)
+        # Lazy safety net: if startup could not migrate the legacy Codex bridge
+        # yet, do it the first time an admin opens Added Models.
+        try:
+            ensure_legacy_codex_endpoint()
+        except Exception:
+            pass
         db = SessionLocal()
         try:
             if _disable_stale_cookbook_local_endpoints(db):
@@ -1847,6 +2212,9 @@ def setup_model_routes(model_discovery):
             rows = db.query(ModelEndpoint).order_by(ModelEndpoint.created_at).all()
             results = []
             for r in rows:
+                if _is_agent_endpoint(r):
+                    results.append(_agent_endpoint_payload(r))
+                    continue
                 all_models = _cached_model_ids(r)
                 hidden = _hidden_model_ids(r)
                 pinned = _normalize_model_ids(getattr(r, "pinned_models", None))
@@ -1888,6 +2256,8 @@ def setup_model_routes(model_discovery):
         request: Request,
         name: str = Form(""),
         base_url: str = Form(...),
+        tailnet_peer_id: str = Form(""),
+        tailnet_port: str = Form(""),
         api_key: str = Form(""),
         skip_probe: str = Form("false"),
         require_models: str = Form("false"),
@@ -1903,11 +2273,42 @@ def setup_model_routes(model_discovery):
         # app's historical behaviour). Admins can pass `shared=false` to
         # scope a new endpoint to their own account only.
         shared: str = Form("true"),
+        bridge_protocol: str = Form("codex-bridge"),  # agent kind only
+        workspaces: str = Form(""),  # agent kind: comma/newline allowlist
     ):
         require_admin(request)
+        requested_kind = _normalize_endpoint_kind(endpoint_kind)
+        if requested_kind == "agent":
+            return _register_agent_endpoint(
+                request,
+                name=name,
+                base_url=base_url,
+                api_key=api_key,
+                bridge_protocol=bridge_protocol,
+                workspaces=workspaces,
+                shared=shared,
+            )
         base_url = _normalize_base(base_url)
+        # Tailnet registration: the browser only ever holds the opaque peer id
+        # issued by /api/discover?mode=tailnet_peers. The address is resolved
+        # server-side here, after the operator's explicit scan + selection.
+        tailnet_peer_id = (tailnet_peer_id or "").strip()
+        tailnet_port = (tailnet_port or "").strip()
+        if tailnet_peer_id or tailnet_port:
+            if not (tailnet_peer_id and tailnet_port):
+                raise HTTPException(400, "Tailnet peer selection is incomplete")
+            if model_discovery is None:
+                raise HTTPException(400, "Tailnet discovery is unavailable")
+            try:
+                base_url = model_discovery.resolve_tailnet_candidate(tailnet_peer_id, tailnet_port)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            endpoint_kind = "tailnet"
         if not base_url:
             raise HTTPException(400, "Base URL is required")
+        model_type = normalize_model_endpoint_type(model_type or "llm")
+        if not model_type:
+            raise HTTPException(400, "Unsupported model type")
         # Resolve hostname via Tailscale if DNS fails
         from src.endpoint_resolver import resolve_url
         base_url = resolve_url(base_url)
@@ -2025,6 +2426,7 @@ def setup_model_routes(model_discovery):
                     "existing": True,
                     "endpoint_kind": existing_kind,
                     "category": _classify_endpoint(existing.base_url, existing_kind),
+                    "model_type": getattr(existing, "model_type", None) or "llm",
                 }
         finally:
             _db_dedup.close()
@@ -2055,7 +2457,7 @@ def setup_model_routes(model_discovery):
                 base_url=base_url,
                 api_key=api_key.strip() or None,
                 is_enabled=True,
-                model_type=model_type.strip() if model_type else "llm",
+                model_type=model_type,
                 endpoint_kind=requested_kind,
                 model_refresh_mode=refresh_mode,
                 model_refresh_interval=refresh_interval,
@@ -2085,7 +2487,7 @@ def setup_model_routes(model_discovery):
                 current_default_ep = db.query(ModelEndpoint).filter(
                     ModelEndpoint.id == current_default_id
                 ).first()
-            if _default_endpoint_needs_assignment(
+            if model_type == "llm" and _default_endpoint_needs_assignment(
                 current_default_id,
                 enabled_ids,
                 current_default_endpoint=current_default_ep,
@@ -2112,6 +2514,7 @@ def setup_model_routes(model_discovery):
             "online": bool(model_ids) or bool(_pinned) or bool(ping.get("reachable")),
             "status": "online" if (model_ids or _pinned) else ("loading" if ping.get("loading") else ("empty" if ping.get("reachable") else "offline")),
             "ping_error": ping.get("error") if ping else None,
+            "model_type": model_type,
             "endpoint_kind": requested_kind,
             "category": _classify_endpoint(base_url, requested_kind),
         }
@@ -2146,6 +2549,25 @@ def setup_model_routes(model_discovery):
             "endpoint_kind": requested_kind,
             "category": _classify_endpoint(base_url, requested_kind),
         }
+
+    @router.post("/model-endpoints/pair-agent")
+    def pair_agent_endpoint(
+        request: Request,
+        base_url: str = Form(...),
+        api_key: str = Form(""),
+        bridge_protocol: str = Form("codex-bridge"),
+    ):
+        """Test one node-bridge pairing live; never persists, never echoes the token."""
+        require_admin(request)
+        base = _normalize_base(base_url)
+        if not base:
+            raise HTTPException(400, "Node bridge address is required.")
+        token = str(api_key or "").strip()
+        if not token:
+            raise HTTPException(400, "Pairing code required. Paste the one-time code shown by the node bridge.")
+        from src.endpoint_resolver import resolve_url
+        base = resolve_url(base)
+        return _probe_agent_bridge(base, token, protocol=bridge_protocol)
 
     @router.get("/model-endpoints/{ep_id}/probe")
     def probe_endpoint_models(ep_id: str, request: Request):
@@ -2424,7 +2846,10 @@ def setup_model_routes(model_discovery):
                 if "name" in body and isinstance(body["name"], str):
                     ep.name = body["name"].strip() or ep.name
                 if "model_type" in body and isinstance(body["model_type"], str):
-                    ep.model_type = body["model_type"].strip() or ep.model_type
+                    requested_type = normalize_model_endpoint_type(body["model_type"])
+                    if body["model_type"].strip() and not requested_type:
+                        raise HTTPException(400, "Unsupported model type")
+                    ep.model_type = requested_type or ep.model_type
                 if "pinned_models" in body:
                     _pinned = _normalize_model_ids(body["pinned_models"])
                     ep.pinned_models = json.dumps(_pinned) if _pinned else None
@@ -2454,11 +2879,19 @@ def setup_model_routes(model_discovery):
                     _new_base = _normalize_base(_new_base)
                     if _new_base:
                         ep.base_url = _new_base
+                if "workspaces" in body and _is_agent_endpoint(ep):
+                    _meta = agent_meta(ep)
+                    _meta["workspaces"] = _normalize_agent_workspaces(body["workspaces"])
+                    _meta.setdefault("protocol", agent_endpoint_protocol(ep))
+                    ep.agent_meta = json.dumps(_meta)
             else:
                 ep.is_enabled = not ep.is_enabled
             db.commit()
             _invalidate_models_cache()
             _local_probe_cache["data"] = None
+            if _is_agent_endpoint(ep):
+                invalidate_agent_adapter_cache()
+                _invalidate_agent_health_cache()
             return {
                 "id": ep.id,
                 "is_enabled": ep.is_enabled,
@@ -2471,6 +2904,14 @@ def setup_model_routes(model_discovery):
                 "model_refresh_mode": getattr(ep, "model_refresh_mode", None) or "auto",
                 "model_refresh_interval": getattr(ep, "model_refresh_interval", None),
                 "model_refresh_timeout": getattr(ep, "model_refresh_timeout", None),
+                **(
+                    {
+                        "protocol": agent_endpoint_protocol(ep),
+                        "workspaces": agent_endpoint_workspaces(ep),
+                    }
+                    if _is_agent_endpoint(ep)
+                    else {}
+                ),
             }
         finally:
             db.close()
@@ -2568,11 +3009,15 @@ def setup_model_routes(model_discovery):
             cleared_sessions = _clear_sessions_for_endpoint(db, ep.base_url)
             cleared_loaded_sessions = _clear_loaded_sessions_for_endpoint(ep.base_url)
             auth_id = getattr(ep, "provider_auth_id", None)
+            was_agent = _is_agent_endpoint(ep)
             db.delete(ep)
             cleared_provider_auth = _delete_orphaned_provider_auth(db, auth_id, exclude_ep_id=ep_id)
             db.commit()
             _invalidate_models_cache()
             _local_probe_cache["data"] = None
+            if was_agent:
+                invalidate_agent_adapter_cache()
+                _invalidate_agent_health_cache()
             return {
                 "deleted": True,
                 "cleared_settings": cleared,

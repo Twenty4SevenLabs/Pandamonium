@@ -444,6 +444,10 @@ async function _refreshAfterEndpointChange(deletedEndpointId) {
 }
 
 async function _selectAddedModelInChat(endpoint) {
+  // Only chat endpoints are candidates for the composer model selection;
+  // an STT/TTS server that lists models/voices must not become the chat model.
+  const modelType = (endpoint && endpoint.model_type) || 'llm';
+  if (modelType !== 'llm') return;
   const modelId = endpoint && Array.isArray(endpoint.models) ? endpoint.models[0] : '';
   if (!modelId) return;
   try {
@@ -463,9 +467,56 @@ async function _selectAddedModelInChat(endpoint) {
   } catch (_) {}
 }
 
+// Human copy for a node endpoint's connection state. Kept in the UI so the
+// row explains *why* an agent is unavailable without exposing bridge details.
+const _AGENT_STATE_LABELS = {
+  connected: 'connected',
+  auth_required: 'pairing rejected',
+  incompatible: 'bridge update needed',
+  unreachable: 'unreachable',
+  disabled: 'disabled',
+};
+
+function _agentRowHtml(ep) {
+  const state = String(ep.status || (ep.online ? 'connected' : 'unreachable'));
+  const badge = state === 'connected'
+    ? '<span class="admin-badge">connected</span>'
+    : `<span class="admin-badge admin-badge-off">${esc(_AGENT_STATE_LABELS[state] || state)}</span>`;
+  const workspaces = Array.isArray(ep.workspaces) && ep.workspaces.length
+    ? `<span style="font-size:10px;opacity:0.55;">workspaces: ${esc(ep.workspaces.join(', '))}</span>`
+    : '';
+  const keyLabel = ep.has_key
+    ? (ep.api_key_fingerprint ? ` (key ${esc(ep.api_key_fingerprint)})` : ' (key set)')
+    : '';
+  const detail = state !== 'connected' && ep.ping_error
+    ? `<div class="admin-error" style="font-size:11px;margin-top:4px;">${esc(ep.ping_error)}</div>`
+    : '';
+  const justAddedClass = (_recentlyAddedEpId && String(ep.id) === _recentlyAddedEpId) ? ' adm-ep-just-added' : '';
+  return `
+    <div class="admin-user-row${ep.is_enabled ? '' : ' admin-ep-disabled'}${justAddedClass}" data-adm-ep-id="${esc(ep.id)}">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0;">
+        <div class="admin-user-info" style="flex:1;flex-wrap:wrap;gap:0.3rem;align-items:center;">
+          <span class="admin-user-name">${esc(ep.name)}</span>
+          ${badge}
+          <span class="admin-badge">${esc(String(ep.protocol || 'codex-bridge').toUpperCase())}</span>
+          ${ep.is_enabled ? '' : '<span class="admin-badge admin-badge-off">disabled</span>'}
+          ${workspaces}
+        </div>
+        <div style="display:flex;gap:4px;align-items:center;">
+          <button class="admin-btn-sm" data-adm-toggle-ep="${esc(ep.id)}">${ep.is_enabled ? 'Disable' : 'Enable'}</button>
+          <button class="admin-btn-delete" data-adm-del-ep="${esc(ep.id)}" data-adm-ep-online="${ep.online ? '1' : '0'}">Delete</button>
+        </div>
+      </div>
+      <div class="admin-ep-detail">${esc(ep.base_url)}${keyLabel}</div>
+      ${detail}
+    </div>`;
+}
+
 async function loadEndpoints() {
   const listLocal = el('adm-epList-local');
   const listApi = el('adm-epList-api');
+  const listTailnet = el('adm-epList-tailnet');
+  const listAgent = el('adm-epList-agent');
   // Fallback to the legacy single list if the split containers don't exist
   // (older HTML or third-party embedding).
   const listLegacy = el('adm-epList');
@@ -495,10 +546,18 @@ async function loadEndpoints() {
       const empty = '<div class="admin-empty">None</div>';
       if (listLocal) listLocal.innerHTML = empty;
       if (listApi) listApi.innerHTML = '<div class="admin-empty">None</div>';
+      if (listTailnet) listTailnet.innerHTML = '<div class="admin-empty">None</div>';
       if (listLegacy) listLegacy.innerHTML = empty;
+      const agentSection = listAgent ? listAgent.closest('.adm-ep-section') : null;
+      if (agentSection) agentSection.style.display = 'none';
+      if (listAgent) listAgent.innerHTML = '';
       return;
     }
-    const rowHtml = data.map(ep => {
+    // Node-agent endpoints are conversation identities, not model transports:
+    // they render in their own node group and never join the model partition.
+    const agentEndpoints = data.filter(ep => (ep.endpoint_kind || '') === 'agent');
+    const modelEndpoints = data.filter(ep => (ep.endpoint_kind || '') !== 'agent');
+    const rowHtml = modelEndpoints.map(ep => {
       const epModels = Array.isArray(ep.models) ? ep.models : [];
       const visibleCount = epModels.length;
       const totalCount = visibleCount + (ep.hidden_count || 0);
@@ -553,20 +612,32 @@ async function loadEndpoints() {
       if (section) section.style.display = '';
       container.innerHTML = indices.map(i => rowHtml[i]).join('');
     };
-    const localIdx = [], apiIdx = [];
-    data.forEach((ep, i) => ((ep.category || (_isLocalEndpoint(ep.base_url) ? 'local' : 'api')) === 'local' ? localIdx : apiIdx).push(i));
+    const localIdx = [], apiIdx = [], tailnetIdx = [];
+    modelEndpoints.forEach((ep, i) => {
+      const category = ep.category || (_isLocalEndpoint(ep.base_url) ? 'local' : 'api');
+      if (category === 'tailnet') tailnetIdx.push(i);
+      else if (category === 'local') localIdx.push(i);
+      else apiIdx.push(i);
+    });
     // Sort each section: enabled endpoints first, disabled at the bottom.
     // Preserve original order within each group via stable sort.
-    const _sortByEnabled = (a, b) => Number(!!data[b].is_enabled) - Number(!!data[a].is_enabled);
+    const _sortByEnabled = (a, b) => Number(!!modelEndpoints[b].is_enabled) - Number(!!modelEndpoints[a].is_enabled);
     localIdx.sort(_sortByEnabled);
     apiIdx.sort(_sortByEnabled);
+    tailnetIdx.sort(_sortByEnabled);
     _renderInto(listLocal, localIdx);
     _renderInto(listApi, apiIdx);
+    _renderInto(listTailnet, tailnetIdx);
     if (listLegacy) listLegacy.innerHTML = rowHtml.join('');
-    // Iterate matching nodes across both containers.
+    // Node-agent group. Hidden entirely when no nodes are registered so the
+    // empty group doesn't take vertical space.
+    const agentSection = listAgent ? listAgent.closest('.adm-ep-section') : null;
+    if (agentSection) agentSection.style.display = agentEndpoints.length ? '' : 'none';
+    if (listAgent) listAgent.innerHTML = agentEndpoints.map(_agentRowHtml).join('');
+    // Iterate matching nodes across all containers.
     const queryAll = (sel) => {
       const out = [];
-      [listLocal, listApi, listLegacy].forEach(c => {
+      [listLocal, listApi, listTailnet, listAgent, listLegacy].forEach(c => {
         if (c) c.querySelectorAll(sel).forEach(n => out.push(n));
       });
       return out;
@@ -1748,6 +1819,212 @@ function initEndpointForm() {
       discoverBtn.disabled = false;
     });
   }
+
+  /* ── Tailnet models (MAD-933) ──
+     Lists online tailnet peers through the bounded server endpoint, probes
+     only the peers the operator selects, and registers chosen results with
+     endpoint_kind=tailnet. The browser never receives peer addresses; the
+     server resolves them at registration time. */
+  function initTailnetDiscovery() {
+    const scanBtn = el('adm-epTailnetScanBtn');
+    const results = el('adm-epTailnetResults');
+    const msg = el('adm-epTailnetMsg');
+    if (!scanBtn || !results) return;
+
+    const MAX_PEERS = 5;
+    let selected = new Set();
+
+    const setMsg = (text, cls) => {
+      if (!msg) return;
+      msg.textContent = text || '';
+      msg.className = 'adm-ep-inline-msg' + (cls ? ' ' + cls : '');
+    };
+
+    function renderPeers(peers) {
+      results.replaceChildren();
+      selected = new Set();
+      if (!peers.length) {
+        setMsg('No online tailnet peers found. Make sure the node is connected to your tailnet, or paste its URL below.', 'admin-error');
+        return;
+      }
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:8px;';
+      const probeBtn = document.createElement('button');
+      probeBtn.type = 'button';
+      probeBtn.className = 'admin-btn-sm';
+      probeBtn.textContent = 'Probe selected';
+      probeBtn.disabled = true;
+      probeBtn.style.cssText = 'align-self:flex-start;margin-top:6px;';
+      peers.forEach(peer => {
+        const row = document.createElement('label');
+        row.className = 'admin-ep-item';
+        row.style.cssText = 'align-items:center;gap:8px;margin-top:4px;cursor:pointer;';
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.dataset.tnPeerId = peer.id;
+        box.addEventListener('change', () => {
+          if (box.checked && selected.size >= MAX_PEERS) {
+            box.checked = false;
+            setMsg(`Select up to ${MAX_PEERS} peers at a time.`, 'admin-error');
+            return;
+          }
+          if (box.checked) selected.add(peer.id);
+          else selected.delete(peer.id);
+          probeBtn.disabled = selected.size === 0;
+          probeBtn.textContent = selected.size ? `Probe ${selected.size} selected` : 'Probe selected';
+        });
+        const info = document.createElement('div');
+        info.className = 'admin-ep-info';
+        const name = document.createElement('div');
+        name.className = 'admin-ep-name';
+        name.textContent = `Peer ${String(peer.id || '').slice(0, 8)}…`;
+        const detail = document.createElement('div');
+        detail.className = 'admin-ep-detail';
+        detail.textContent = `${peer.os || 'unknown OS'} · online`;
+        info.append(name, detail);
+        row.append(box, info);
+        wrap.appendChild(row);
+      });
+      probeBtn.addEventListener('click', () => probeSelected(probeBtn));
+      wrap.appendChild(probeBtn);
+      results.appendChild(wrap);
+      setMsg(`Found ${peers.length} online peer${peers.length === 1 ? '' : 's'}. Select up to ${MAX_PEERS} to probe.`, 'admin-success');
+    }
+
+    async function scan() {
+      scanBtn.disabled = true;
+      results.replaceChildren();
+      setMsg('Listing tailnet peers…');
+      try {
+        const res = await fetch('/api/discover?mode=tailnet_peers', { credentials: 'same-origin' });
+        if (!res.ok) throw new Error(`server returned ${res.status}`);
+        const data = await res.json();
+        renderPeers(Array.isArray(data.peers) ? data.peers : []);
+      } catch (e) {
+        setMsg('Tailnet scan failed: ' + (e && e.message ? e.message : 'request failed'), 'admin-error');
+      } finally {
+        scanBtn.disabled = false;
+      }
+    }
+
+    async function probeSelected(probeBtn) {
+      if (!selected.size) return;
+      const captured = [...selected];
+      probeBtn.disabled = true;
+      setMsg(`Probing ${captured.length} peer${captured.length === 1 ? '' : 's'}…`);
+      try {
+        const qs = new URLSearchParams({ mode: 'tailnet_probe' });
+        captured.forEach(id => qs.append('peer_id', id));
+        const res = await fetch('/api/discover?' + qs.toString(), { credentials: 'same-origin' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `server returned ${res.status}`);
+        await renderCandidates(Array.isArray(data.candidates) ? data.candidates : []);
+      } catch (e) {
+        setMsg('Tailnet probe failed: ' + (e && e.message ? e.message : 'request failed'), 'admin-error');
+      } finally {
+        probeBtn.disabled = selected.size === 0;
+      }
+    }
+
+    async function renderCandidates(candidates) {
+      if (!candidates.length) {
+        setMsg('No model servers answered on the selected peers. Check the node’s model server, or add its URL directly below.', 'admin-error');
+        return;
+      }
+      const list = document.createElement('div');
+      list.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin-top:8px;';
+      const PROVIDER_DISPLAY = {
+        'openai-compatible': 'OpenAI-compatible',
+        'llamacpp-compatible': 'llama.cpp',
+        'lmstudio-compatible': 'LM Studio',
+        'ollama': 'Ollama',
+      };
+      candidates.forEach(candidate => {
+        const models = Array.isArray(candidate.models) ? candidate.models : [];
+        const providerDisplay = PROVIDER_DISPLAY[candidate.provider] || candidate.provider || 'Model server';
+        const peerShort = String(candidate.peer_id || '').slice(0, 8);
+        const row = document.createElement('div');
+        row.className = 'admin-ep-item';
+        row.style.cssText = 'align-items:flex-start;margin-top:6px;';
+        const info = document.createElement('div');
+        info.className = 'admin-ep-info';
+        const name = document.createElement('div');
+        name.className = 'admin-ep-name';
+        name.textContent = `${providerDisplay} — peer ${peerShort}…`;
+        const detail = document.createElement('div');
+        detail.className = 'admin-ep-detail';
+        detail.textContent = models.length
+          ? `${models.length} model${models.length === 1 ? '' : 's'}: ${models.join(', ')}`
+          : 'No model IDs reported';
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'admin-btn-sm';
+        addBtn.textContent = 'Add';
+        addBtn.addEventListener('click', async () => {
+          addBtn.disabled = true;
+          addBtn.textContent = 'Adding…';
+          try {
+            const fd = new FormData();
+            fd.append('base_url', '');
+            fd.append('tailnet_peer_id', candidate.peer_id || '');
+            fd.append('tailnet_port', String(candidate.port || ''));
+            fd.append('endpoint_kind', 'tailnet');
+            fd.append('name', `${providerDisplay} (peer ${peerShort})`);
+            fd.append('model_refresh_mode', 'auto');
+            fd.append('skip_probe', 'false');
+            const r = await fetch('/api/model-endpoints', { method: 'POST', body: fd, credentials: 'same-origin' });
+            const dd = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(dd.detail || 'registration failed');
+            addBtn.textContent = 'Added';
+            await loadEndpoints();
+            await _selectAddedModelInChat(dd);
+            setMsg(`${providerDisplay} added with ${(dd.models || []).length} model${(dd.models || []).length === 1 ? '' : 's'}.`, 'admin-success');
+          } catch (e) {
+            addBtn.disabled = false;
+            addBtn.textContent = 'Add';
+            setMsg('Add failed: ' + (e && e.message ? e.message : 'request failed'), 'admin-error');
+          }
+        });
+        info.append(name, detail);
+        row.append(info, addBtn);
+        list.appendChild(row);
+      });
+      results.replaceChildren(list);
+      setMsg(`Found ${candidates.length} model server${candidates.length === 1 ? '' : 's'}. Review and add.`, 'admin-success');
+    }
+
+    scanBtn.addEventListener('click', scan);
+
+    const addBtn = el('adm-epTailnetAddBtn');
+    const urlInput = el('adm-epTailnetUrl');
+    if (addBtn && urlInput) {
+      addBtn.addEventListener('click', async () => {
+        const url = _normalizeBaseUrl(urlInput.value || '');
+        if (!url) { setMsg('Enter a tailnet URL first.', 'admin-error'); return; }
+        addBtn.disabled = true;
+        setMsg('Adding…');
+        try {
+          const fd = new FormData();
+          fd.append('base_url', url);
+          fd.append('endpoint_kind', 'tailnet');
+          fd.append('model_refresh_mode', 'auto');
+          fd.append('skip_probe', 'false');
+          const r = await fetch('/api/model-endpoints', { method: 'POST', body: fd, credentials: 'same-origin' });
+          const dd = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(dd.detail || 'registration failed');
+          urlInput.value = '';
+          await loadEndpoints();
+          await _selectAddedModelInChat(dd);
+          setMsg(`Added with ${(dd.models || []).length} model${(dd.models || []).length === 1 ? '' : 's'}.`, 'admin-success');
+        } catch (e) {
+          setMsg('Add failed: ' + (e && e.message ? e.message : 'request failed'), 'admin-error');
+        } finally {
+          addBtn.disabled = false;
+        }
+      });
+    }
+  }
+  initTailnetDiscovery();
 
   document.querySelectorAll('.adm-quickstart-section').forEach((sec) => {
     const head = sec.querySelector('.adm-quickstart-toggle');
@@ -3099,10 +3376,92 @@ function initLogsView() {
 /* ═══════════════════════════════════════════
    INIT & REFRESH
    ═══════════════════════════════════════════ */
+function initAgentNodeForm() {
+  const urlInput = el('adm-agentUrl');
+  const tokenInput = el('adm-agentToken');
+  const nameInput = el('adm-agentName');
+  const workspacesInput = el('adm-agentWorkspaces');
+  const msg = el('adm-agentMsg');
+  const addBtn = el('adm-agentAddBtn');
+  const testBtn = el('adm-agentTestBtn');
+  if (!urlInput || !tokenInput || !addBtn || !msg) return;
+  if (addBtn.dataset.agentBound === 'true') return;
+  addBtn.dataset.agentBound = 'true';
+
+  const _setMsg = (text, ok) => {
+    msg.textContent = text || '';
+    msg.className = 'adm-ep-inline-msg' + (text ? (ok ? ' admin-success' : ' admin-error') : '');
+  };
+  const _pair = async (mode) => {
+    const baseUrl = urlInput.value.trim();
+    const token = tokenInput.value.trim();
+    if (!baseUrl) { _setMsg('Enter the node bridge URL.', false); return null; }
+    if (!token) { _setMsg('Paste the one-time pairing code from the node.', false); return null; }
+    const fd = new FormData();
+    fd.append('base_url', baseUrl);
+    fd.append('api_key', token);
+    fd.append('bridge_protocol', 'codex-bridge');
+    if (mode !== 'test') {
+      fd.append('endpoint_kind', 'agent');
+      if (nameInput && nameInput.value.trim()) fd.append('name', nameInput.value.trim());
+      if (workspacesInput && workspacesInput.value.trim()) fd.append('workspaces', workspacesInput.value.trim());
+    }
+    const url = mode === 'test' ? '/api/model-endpoints/pair-agent' : '/api/model-endpoints';
+    const res = await fetch(url, { method: 'POST', body: fd, credentials: 'same-origin' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { _setMsg(data.detail || 'Pairing failed.', false); return null; }
+    if (data.ok === false) { _setMsg(data.message || 'Pairing failed.', false); return null; }
+    return data;
+  };
+
+  if (testBtn) {
+    testBtn.addEventListener('click', async () => {
+      testBtn.disabled = true;
+      testBtn.textContent = 'Testing...';
+      try {
+        const data = await _pair('test');
+        if (data) _setMsg(data.message || 'Connected.', true);
+      } catch (_) {
+        _setMsg('Test failed: request failed.', false);
+      }
+      testBtn.disabled = false;
+      testBtn.textContent = 'Test';
+    });
+  }
+
+  addBtn.addEventListener('click', async () => {
+    addBtn.disabled = true;
+    addBtn.textContent = 'Pairing...';
+    try {
+      const data = await _pair('register');
+      if (data) {
+        if (data.id) _recentlyAddedEpId = String(data.id);
+        urlInput.value = '';
+        tokenInput.value = '';
+        if (nameInput) nameInput.value = '';
+        if (workspacesInput) workspacesInput.value = '';
+        await loadEndpoints();
+        try {
+          if (window.modelsModule && window.modelsModule.refreshModels) {
+            window.modelsModule.refreshModels(true);
+          }
+        } catch (_) {}
+        const goLink = ' <a href="#" data-go-added-models style="margin-left:6px;text-decoration:underline;color:inherit;font-weight:600;">Added Models →</a>';
+        msg.className = 'adm-ep-inline-msg admin-success';
+        msg.innerHTML = 'Paired. The node now appears as an agent in the model picker.' + goLink;
+      }
+    } catch (_) {
+      _setMsg('Pairing failed: request failed.', false);
+    }
+    addBtn.disabled = false;
+    addBtn.textContent = 'Pair';
+  });
+}
+
 function initAll() {
   modalEl = el('settings-modal');
   const inits = [
-    initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
+    initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initAgentNodeForm, initMcpForm,
     initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
     () => settingsModule.initIntegrations()
   ];

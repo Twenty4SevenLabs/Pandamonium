@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import platform
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -24,6 +25,8 @@ from src.extension_installer import (
 )
 from src.extension_mcp_adapter import mcp_extension_adapter
 from src.extension_registry import ExtensionContractError
+from src.extension_plugin_view import installed_plugin_detail, installed_plugin_rows
+from src.extension_scan import ExtensionScanError, get_scan, start_scan
 from src.extension_skill_adapter import SkillBundleAdapter
 from src.marketplace_catalog import (
     MarketplaceCatalogError,
@@ -76,6 +79,13 @@ class SourcePlanRequest(BaseModel):
     ref: str = Field(default="HEAD", min_length=1, max_length=200)
 
 
+class SourceScanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_url: str = Field(min_length=1, max_length=2_048)
+    ref: str = Field(default="HEAD", min_length=1, max_length=200)
+
+
 class LifecyclePlanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -114,6 +124,22 @@ def public_extension_catalog(registry) -> dict[str, list[dict[str, str]]]:
         )
     plugins.sort(key=lambda item: (item["name"].lower(), item["id"]))
     return {"plugins": plugins}
+
+
+def _configured_plugin_surfaces() -> list[dict[str, str]]:
+    """Configured (non-registry) plugin surfaces for the operator UI."""
+    surfaces: list[dict[str, str]] = []
+    try:
+        oracle_url = os.getenv("ODYSSEUS_ORACLE_URL", "").strip()
+        if not oracle_url:
+            from src.extension_host import extension_runtime_host
+
+            oracle_url = str(extension_runtime_host.urls.get("oracle") or "").strip()
+    except Exception:
+        oracle_url = ""
+    if oracle_url:
+        surfaces.append({"id": "oracle", "name": "ORACLE", "runtime": "web"})
+    return surfaces
 
 
 def setup_extension_routes(
@@ -188,6 +214,28 @@ def setup_extension_routes(
     @router.get("/catalog")
     async def list_public_extensions(_owner: str = Depends(require_user)):
         return await asyncio.to_thread(public_extension_catalog, manager.registry)
+
+    @router.get("/installed")
+    async def list_installed_plugins(_owner: str = Depends(require_user)):
+        return {
+            "plugins": await asyncio.to_thread(
+                installed_plugin_rows,
+                manager.registry,
+                configured_surfaces=_configured_plugin_surfaces(),
+            )
+        }
+
+    @router.get("/installed/{extension_id}")
+    async def installed_plugin(extension_id: str, _owner: str = Depends(require_user)):
+        detail = await asyncio.to_thread(
+            installed_plugin_detail,
+            manager.registry,
+            extension_id,
+            configured_surfaces=_configured_plugin_surfaces(),
+        )
+        if detail is None:
+            raise HTTPException(status_code=404, detail="extension_plugin_not_found")
+        return detail
 
     @router.get("/marketplace")
     async def list_marketplace(_owner: str = Depends(require_user)):
@@ -336,6 +384,27 @@ def setup_extension_routes(
             )
         except (ExtensionLifecycleError, ExtensionContractError) as exc:
             raise _http_error(exc) from exc
+
+    @router.post("/scans", dependencies=[Depends(require_admin)])
+    async def start_source_scan(
+        payload: SourceScanRequest, owner: str = Depends(require_user)
+    ):
+        try:
+            return await asyncio.to_thread(
+                start_scan,
+                payload.source_url,
+                payload.ref,
+                operator_id=_operator(owner),
+            )
+        except ExtensionScanError as exc:
+            raise HTTPException(status_code=400, detail=str(exc.code)) from exc
+
+    @router.get("/scans/{scan_id}", dependencies=[Depends(require_admin)])
+    async def get_source_scan(scan_id: str, owner: str = Depends(require_user)):
+        job = await asyncio.to_thread(get_scan, scan_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="extension_scan_not_found")
+        return job
 
     @router.post("/plans/lifecycle", dependencies=[Depends(require_admin)])
     async def preview_lifecycle_plan(

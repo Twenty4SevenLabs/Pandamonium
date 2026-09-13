@@ -61,10 +61,51 @@ following maintained platform capabilities.
 - The server persists each conversation target. The left sidebar follows that
   target: conversational identities show only their dated chats, while a Codex
   worker shows its allowlisted projects with tasks loaded beneath each project.
+- Pins, project/chat ordering, and five-row **Show more** are shared sidebar
+  behavior for all configured agents and catalog workers. Visible drag handles
+  support pointer/touch reordering; **Alt + Up/Down** moves focused rows.
+  The signed-in owner's preferences preserve each worker's layout independently.
+  The local Codex catalog retains its desktop layout seed. Reordering never
+  changes a task's project or execution directory.
+- The rounded conversation picker, effort control, and Details card follow the
+  active Pandamonium theme. Assigned identity names remain separate from runtime
+  and configured node labels. Tailnet discovery probes selected nodes for model
+  endpoints; installed Codex/Claude capabilities come from configured bridges,
+  not from detecting arbitrary bare CLI installations.
+- Selecting a native Codex task loads its recent conversation. **Load earlier messages**
+  pages older turns. Commentary and tool activity collapse under **Worked**; the
+  final answer stays visible. Desktop-owned tasks continue through their existing
+  owner; active turns accept steering. Compact model/effort choices apply to the next turn.
+  Task selection survives reload. Update the selected [Codex bridge](services/pc-codex-bridge/README.md)
+  together with Pandamonium for native history support.
+- Pasted web links appear as the same compact link chips in the composer and sent
+  messages. Copying/submitting preserves the full URL; double-click a chip to edit
+  its URL. Plain-text paste, multiline drafts, and native undo/redo stay available.
+- **Details** keeps essential environment rows, three source previews, and short
+  tool/output previews compact. **View all** opens a themed sliding panel and
+  progressively reads earlier activity. Full paths remain available there; attachment
+  binaries stay on their originating node. Branch/model metadata is recorded state.
+- The model picker uses Codex's supported native reasoning efforts. The model-backed agent's
+  **Agent work budget** controls maximum model/tool rounds: Low 20, Medium 40,
+  High 80, Very high 120, Maximum 200. Reset uses the installation default (80).
+  The previous saved default of 20 upgrades to 80 once; other custom caps remain.
+  After upgrading, saving 20 explicitly retains that lower cap.
+  These are caps for the next text turn, not required loops or an intelligence
+  setting: successful completion stops early and authority/verification gates
+  still apply. Voice keeps its existing budget.
 - Tool-using assistant turns keep visible reasoning, status, and tool activity
   in one chronological disclosure above the final answer. The disclosure is
   collapsed after completion, expands in the page flow without a nested scroll
   region, and remains keyboard-accessible after reopening a saved conversation.
+
+Native history and Details demo views: [compact card](docs/screenshots/workspace-history-desktop.png),
+[full sources](docs/screenshots/workspace-sources-desktop.png), and
+[phone panel](docs/screenshots/workspace-sources-mobile.png).
+
+Workspace controls: [desktop preview](docs/screenshots/workspace-shared-desktop.png)
+and [mobile preview](docs/screenshots/workspace-shared-mobile.png).
+Earlier native Codex views: [desktop](docs/screenshots/workspace-context-desktop.png)
+and [mobile](docs/screenshots/workspace-context-mobile.png).
 
 ![Assistant turn disclosure on desktop](docs/images/chat-turn-disclosure-desktop.png)
 

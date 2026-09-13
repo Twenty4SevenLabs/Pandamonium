@@ -764,7 +764,7 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             save_settings(s)
             return {"response": f"Reset {key} to default ({DEFAULT_SETTINGS[key]}).", "exit_code": 0}
 
-        elif action in ("disable_tool", "enable_tool", "list_tools"):
+        elif action in ("disable_tool", "enable_tool", "list_tools", "load_tools", "mount_tools"):
             # Tool-toggle actions. These edit settings.json:disabled_tools
             # (the global list read on every chat request) rather than
             # prefs.json. Friendly aliases accepted: "shell" -> "bash",
@@ -799,14 +799,101 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             }
 
             if action == "list_tools":
+                # MAD-919: page + filter the catalog. The un-paged dump exceeded
+                # the 8,000-char structured-result budget and arrived truncated
+                # mid-JSON, so every page must stay small and say how to continue.
                 current = get_setting("disabled_tools", []) or []
+                from src.tool_catalog import catalog_page
+                try:
+                    offset = int(args.get("offset") or 0)
+                except (TypeError, ValueError):
+                    offset = 0
+                try:
+                    limit = int(args.get("limit") or 20)
+                except (TypeError, ValueError):
+                    limit = 20
+                page = catalog_page(
+                    disabled=current,
+                    offset=offset,
+                    limit=limit,
+                    category=str(args.get("category") or ""),
+                    search=str(args.get("search") or args.get("query") or ""),
+                )
+                shown_start = page["offset"] + 1 if page["count"] else page["offset"]
+                shown_end = page["offset"] + page["count"]
+                if page["next_offset"] is not None:
+                    position = (
+                        f"Showing {shown_start}-{shown_end} of {page['total']} "
+                        f"(continue with offset={page['next_offset']})"
+                    )
+                else:
+                    position = f"Showing {shown_start}-{shown_end} of {page['total']} (end)"
+                filters = []
+                if args.get("category"):
+                    filters.append(f"category={args['category']}")
+                if args.get("search") or args.get("query"):
+                    filters.append(f"search={args.get('search') or args.get('query')}")
+                filter_note = (" Filters: " + ", ".join(filters) + ".") if filters else ""
                 return {
                     "response": (
-                        f"Currently disabled: {', '.join(current) if current else '(none)'}.\n"
-                        "Common toggles: shell (bash), search (web_search), browser, documents, "
-                        "memory, skills, images, tasks, notes, calendar, email."
+                        f"{position}.{filter_note} "
+                        f"{page['enabled_count']}/{page['total']} enabled in this view. "
+                        "Every catalog page is in `tools` (id, category, description, enabled). "
+                        f"Categories: {', '.join(page['categories'])}. "
+                        f"Currently disabled: {', '.join(current) if current else '(none)'}."
                     ),
+                    "tools": page["tools"],
+                    "total": page["total"],
+                    "count": page["count"],
+                    "offset": page["offset"],
+                    "next_offset": page["next_offset"],
+                    "enabled_count": page["enabled_count"],
                     "disabled": list(current),
+                    "exit_code": 0,
+                }
+
+            if action in ("load_tools", "mount_tools"):
+                # MAD-907: mount an enabled built-in for the remainder of this
+                # request. The loop unions `mounted_tools` into its selection so
+                # the next round's schemas include it; `tool_sections` carries
+                # the exact fenced-block usage for text/local engines.
+                from src.tool_catalog import resolve_tool_mounts
+                raw = args.get("tools") or args.get("tool") or args.get("names") or []
+                if isinstance(raw, str):
+                    raw = [part for part in raw.replace(",", " ").split() if part]
+                elif isinstance(raw, (list, tuple, set)):
+                    raw = list(raw)
+                else:
+                    raw = [raw]
+                current = get_setting("disabled_tools", []) or []
+                resolved = resolve_tool_mounts(raw, disabled=current)
+                sections = ""
+                if resolved["mounted_tools"]:
+                    try:
+                        from src.agent_loop import tool_prompt_sections
+                        sections = tool_prompt_sections(set(resolved["mounted_tools"]))
+                    except Exception:
+                        sections = ""
+                parts = []
+                if resolved["mounted_tools"]:
+                    parts.append(
+                        "Mounted for the rest of this request: "
+                        + ", ".join(resolved["mounted_tools"]) + "."
+                    )
+                    if sections:
+                        parts.append("Exact usage:\n\n" + sections)
+                else:
+                    parts.append("No tools were mounted.")
+                if resolved["unknown_tools"]:
+                    parts.append("Unknown: " + ", ".join(resolved["unknown_tools"]) + ".")
+                if resolved["disabled_tools"]:
+                    parts.append("Disabled: " + ", ".join(resolved["disabled_tools"]) + ".")
+                return {
+                    "response": " ".join(parts),
+                    "mounted_tools": resolved["mounted_tools"],
+                    "unknown_tools": resolved["unknown_tools"],
+                    "disabled_tools": resolved["disabled_tools"],
+                    "tool_sections": sections,
                     "exit_code": 0,
                 }
 
@@ -855,6 +942,98 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
 
 
 
+# ---------------------------------------------------------------------------
+# Extension capability discovery / on-demand mount (MAD-913)
+# ---------------------------------------------------------------------------
+
+
+async def do_manage_extensions(content: str, owner: Optional[str] = None) -> Dict:
+    """List installed extensions, inspect capabilities, or mount tools for this request."""
+    try:
+        args = _parse_tool_args(content)
+    except ValueError:
+        return {"error": "Invalid JSON arguments", "exit_code": 1}
+    action = str(args.get("action") or "list").strip().lower()
+    try:
+        from src.extension_agent_mount import (
+            extension_catalog_rows,
+            inspect_extension,
+            mount_extension_capabilities,
+        )
+        from src.extension_registry import ExtensionRegistry
+
+        registry = ExtensionRegistry()
+
+        if action == "list":
+            rows = extension_catalog_rows(registry)
+            summary = ", ".join(
+                f"{row['name']} ({row['id']}, {'enabled' if row['enabled'] else 'disabled'}, "
+                f"{row['capability_count']} capabilities)"
+                for row in rows
+            ) or "(none installed)"
+            return {
+                "response": f"{len(rows)} installed extension(s): {summary}",
+                "extensions": rows,
+                "count": len(rows),
+                "exit_code": 0,
+            }
+
+        if action == "inspect":
+            extension_id = str(args.get("extension_id") or args.get("id") or "").strip()
+            if not extension_id:
+                return {"error": "extension_id is required for inspect", "exit_code": 1}
+            detail = inspect_extension(registry, extension_id)
+            if detail is None:
+                return {"error": f"Unknown extension: {extension_id}", "exit_code": 1}
+            if not detail["inventory_available"]:
+                return {"error": "extension_inventory_unavailable", "exit_code": 1}
+            listed = ", ".join(
+                f"{item['name']} ({item['kind']}, {item['permission_mode']})"
+                for item in detail["capabilities"]
+            ) or "(no capabilities)"
+            state = "enabled" if detail["enabled"] else "disabled"
+            advice = (
+                "Use action=mount with names to load any of these tools for this request."
+                if detail["mountable"]
+                else "No browserless mountable tools are available for this extension."
+            )
+            return {
+                "response": f"{detail['name']} is {state}; capabilities: {listed}. {advice}",
+                "extension": detail,
+                "capabilities": detail["capabilities"],
+                "count": len(detail["capabilities"]),
+                "exit_code": 0,
+            }
+
+        if action in ("mount", "mount_tools", "load_tools"):
+            raw = args.get("names") or args.get("tools") or []
+            if isinstance(raw, str):
+                raw = [raw]
+            if not isinstance(raw, list):
+                return {"error": "names must be a list", "exit_code": 1}
+            result = mount_extension_capabilities(registry, raw)
+            mounted = result["mounted"]
+            unavailable = result["unavailable"]
+            names = ", ".join(item["name"] for item in mounted) or "(none)"
+            text = f"Mounted extension tools for the rest of this request: {names}."
+            if unavailable:
+                reasons = "; ".join(
+                    f"{item['name']}: {item['error']}" for item in unavailable
+                )
+                text += f" Unavailable: {reasons}."
+            return {
+                "response": text,
+                "mounted_extension_tools": mounted,
+                "unavailable": unavailable,
+                "exit_code": 0,
+            }
+
+        return {"error": f"Unknown action: {action}", "exit_code": 1}
+    except Exception as e:
+        logger.error(f"manage_extensions error: {e}")
+        return {"error": str(e), "exit_code": 1}
+
+
 # ── registry adapters ────────────────────────────────────────────────────────
 def _owner_adapter(fn):
     """Wrap a do_*(content, owner) impl as a registry execute(content, ctx)."""
@@ -869,4 +1048,5 @@ ADMIN_TOOL_HANDLERS = {
     "manage_webhooks": _owner_adapter(do_manage_webhooks),
     "manage_tokens": _owner_adapter(do_manage_tokens),
     "manage_settings": _owner_adapter(do_manage_settings),
+    "manage_extensions": _owner_adapter(do_manage_extensions),
 }

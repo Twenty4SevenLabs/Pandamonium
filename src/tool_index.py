@@ -42,6 +42,13 @@ ALWAYS_AVAILABLE = frozenset({
     "ask_user",
     # Write back to the active plan (tick steps done / revise) during execution.
     "update_plan",
+    # MAD-907: the catalog discovery gateway. `list_tools` reports the real
+    # enabled catalog and `load_tools` mounts any entry for the rest of the
+    # request, so no engine may silently lose access to its own toolset.
+    "manage_settings",
+    # MAD-913: installed extensions must be inspectable without activation,
+    # and named extension tools must be mountable for the current request.
+    "manage_extensions",
 })
 
 # Tools that the Personal Assistant always has access to during scheduled
@@ -103,7 +110,8 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "manage_documents": "List, read, delete, or tidy documents in the editor panel. action='list' returns clickable rows (most-recent first) so the user can open any doc by clicking. action='read' (aka view/open/get) with document_id returns the content; supports offset=<N> + limit=<N> to page through large docs (response includes next_offset when more remains, so you can keep calling with offset=next_offset). action='delete' with document_id removes a doc (only way to delete). Use this for ANY 'show/read/list/open my documents/docs/files/notes' request — never shell or curl.",
     "manage_books": "Read the authenticated owner's private Books library. action=list returns book title, filename, pages, indexing status, chunk count, and OCR/needs-attention state. action=search semantically searches full indexed book text and returns source title, page, chunk, and excerpt. Use for any 'my Books library', OCR/status, or book-content question. Never use grep, shell, filesystem paths, or manage_documents for Books.",
     "manage_research": "List, read/open, or delete saved DEEP RESEARCH results from the Library. action='list' returns clickable [query](#research-<id>) rows (most-recent first). action='read' (aka open/view/get) with id returns the report + sources. action='delete' with id removes it. Use this for ANY 'open/read/find/delete my research / that report / the research on X' request. NOTE: this is for EXISTING research; to START new research use trigger_research.",
-    "manage_settings": "Change ANY real app setting (the ones the Settings panel writes) so the user never has to open it: TTS voice/provider/speed, STT, search engine + result count, default/teacher/task/utility/vision/image/research models, image quality, reminder channel (browser/email/ntfy), agent timeout/tool-call budget, and more. action=set with key (friendly aliases ok: voice, 'search engine', 'default model', 'teacher model', 'image quality', 'reminder channel'...) + value; get/list/reset too. Also toggles tools on/off (disable_tool/enable_tool/list_tools). Secrets/API keys are read-only. Use for any 'change my…/set my…/use X for…/turn on…' preference request.",
+    "manage_settings": "Change ANY real app setting (the ones the Settings panel writes) so the user never has to open it: TTS voice/provider/speed, STT, search engine + result count, default/teacher/task/utility/vision/image/research models, image quality, reminder channel (browser/email/ntfy), agent timeout/tool-call budget, and more. action=set with key (friendly aliases ok: voice, 'search engine', 'default model', 'teacher model', 'image quality', 'reminder channel'...) + value; get/list/reset too. Also toggles tools on/off (disable_tool/enable_tool/list_tools) and mounts any enabled built-in for the rest of the request (load_tools with tools=[...], returning its exact usage). Secrets/API keys are read-only. Use for any 'change my…/set my…/use X for…/turn on…' preference request.",
+    "manage_extensions": "Inspect installed plugins/extensions and their capabilities WITHOUT activating them, then mount exactly the tools the request needs. action=list returns installed extensions with capability counts (works while disabled); action=inspect with extension_id returns capability names/kinds/permission modes (advisory metadata, never schemas); action=mount with names loads those extension tools through the existing governed executor for the rest of this request (schemas come back in the result). Use whenever the user asks what a plugin/extension can do.",
     "create_session": "Create a new chat with a name and model.",
     "list_sessions": "List all chats with their metadata (the UI calls these 'chats'). Use for 'list my chats', 'rename all my chats' (list first, then manage_session to rename each).",
     "send_to_session": "Send a message to another chat. Cross-chat communication.",
@@ -125,7 +133,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "manage_notes": "Create and manage notes and checklists (Google Keep-style). ALWAYS use this for note/todo/checklist/reminder creation — NEVER hit /api/notes via app_api. Accepts natural-language `due_date` like 'tomorrow at 9am' or '11pm today' (parsed in the USER'S timezone). The due_date IS the reminder — it fires a notification at that time, so do NOT also create a calendar event for the same reminder. Set colors, labels, pin, archive. Do NOT use manage_memory for note content.",
     "manage_calendar": "Calendar event management: list, create, update, delete. Each event can carry a tag/category (event_type — work/personal/health/travel/meal/social/admin/other) and importance (low/normal/high/critical). Resolve today/tomorrow using the Current date and time context, then use ISO datetimes in the user's local wall time; supports all-day events. Use rrule only for explicit recurrence; for update_event pass rrule='' to remove repeats. For event reminders/alarms, pass reminder_minutes; this creates the Notes reminder, so do not also call manage_notes for the same reminder.",
     "read_calendar": "Read-only calendar access for voice and agent answers. Pulls the authenticated owner's connected CalDAV calendar first, then lists calendars or events. Never creates, updates, or deletes events; reports when freshness could not be confirmed.",
-    "get_runtime_status": "Read the configured Jarvis voice runtime and connected-worker status. Use only when the user asks what model, voice provider, runtime, or worker is actually active; do not guess from prompts.",
+    "get_runtime_status": "Read the running Pandamonium application version and local release state (canonical repository, updater status, curated release notes) plus server-verified model, context, voice, and configured-worker runtime facts. Use for version, release, update, release-notes, or repository questions about this installation; do not web-search for Pandamonium's own releases and do not guess from prompts.",
     "start_agent_task": "Delegate a bounded read-only task to one configured worker and allowlisted workspace. Worker execution continues in the background and returns a task ID for progress and cancellation. Never request write permission or caller preapproval.",
     "read_agent_task": "Read the authenticated owner's worker task status, progress, and terminal result by task ID. Use after start_agent_task when a current result is needed; never invent completion.",
     "search_jarvis_knowledge": "Search the authenticated owner's curated Jarvis knowledge for private background context. This is read-only and must not replace live-source inspection for current or changing facts.",
@@ -348,6 +356,14 @@ class ToolIndex:
 
     # Keyword hints: if the query mentions these words, force-include the tools.
     _KEYWORD_HINTS = {
+        # This installation's release truth (issue #894): release/version
+        # questions surface the local release-state tool even when embedding
+        # retrieval misses or times out.
+        frozenset({"release notes", "changelog", "what version", "which version",
+                   "up to date", "update available", "latest release",
+                   "latest version", "pandamonium repo", "pandamonium repository",
+                   "pandamonium release", "pandamonium version"}):
+            {"get_runtime_status"},
         # NOTE: "tell" was removed from this set. It fired on any "tell me ..."
         # request (e.g. "visit <url> and tell me the title"), force-including the
         # whole email toolset and crowding out the relevant tools — the model then

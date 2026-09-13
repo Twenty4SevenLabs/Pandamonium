@@ -6,6 +6,7 @@ All modules should import from here instead of accessing files directly.
 """
 
 import json
+import re
 import time
 import logging
 from typing import Any
@@ -40,6 +41,13 @@ DEFAULT_SETTINGS = {
         "hidden prompts, scratchpads, or private chain-of-thought."
     ),
     "agent_constitution_version": "1",
+    # Protocol layer: mount the versioned JOS protocol packs into the agent
+    # system prompt. The constitution above stays the light operator-editable
+    # layer; disabling this restores the exact prior prompt composition.
+    "protocol_layer_enabled": True,
+    # Protocol pack ids the operator disabled in Settings. Disabled packs stay
+    # diagnosable but are never mounted.
+    "disabled_protocol_packs": [],
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the
     # scheduled_emails table with status='agent_draft' and return a
@@ -62,11 +70,13 @@ DEFAULT_SETTINGS = {
     "tts_provider": "disabled",
     "tts_model": "tts-1",
     "tts_voice": "alloy",
-    "tts_agent_voices": {
-        "Jarvis": "jarvis_chatterbox",
-        "Gordon": "gordon_chatterbox",
-        "Friday": "friday_chatterbox",
-    },
+    # Optional per-identity TTS voice overrides keyed by the installation's
+    # configured agent or worker display names (for example the value of
+    # ODYSSEUS_PC_CODEX_LABEL). Ships empty: private installation identities
+    # such as Friday or Gordon must never be public defaults. An installation
+    # that configures names adds its own entries, and the generic tts_voice
+    # remains the fallback for every identity without an override.
+    "tts_agent_voices": {},
     "tts_speed": "1",
     "fish_api_key": "",
     "stt_enabled": False,
@@ -125,7 +135,8 @@ DEFAULT_SETTINGS = {
     # Tune via Settings or by editing data/settings.json.
     "research_run_timeout_seconds": 1800,
     "agent_max_tool_calls": 0,
-    "agent_max_rounds": 20,  # per-message agent step cap (clamped 1..200)
+    "agent_work_budget_version": 2,
+    "agent_max_rounds": 80,  # per-message agent step cap (clamped 1..200)
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
     # "auto" sentinel: it means "scale the budget to the model's context window"
     # (#1230) — so long-context models aren't capped at 6000. Set ANY OTHER value
@@ -143,6 +154,12 @@ DEFAULT_SETTINGS = {
     # want to actually use (e.g. 900_000 to fill a 1M-context model). See
     # `compute_input_token_budget`.
     "agent_input_token_hard_max": 200_000,
+    # Per-model context windows and input-token budgets, keyed by model id (exact
+    # match first, then longest substring). Operator overrides for API and
+    # self-hosted models; they outrank endpoint discovery and the built-in known
+    # table so the budget follows the selected model, not the agent or preset.
+    "model_context_windows": {},
+    "model_input_token_budgets": {},
     # Independent ceilings within the usable input budget. They do not need to
     # sum to 100; unused room stays available to current intent and active state.
     "context_class_budget_percent": {
@@ -256,7 +273,12 @@ def load_settings() -> dict:
             saved = json.load(f)
         if not isinstance(saved, dict):
             raise ValueError("settings must be an object")
+        # Upgrade the old materialized default once; retain other custom caps.
+        # Saving settings stamps version 2, so an explicit 20 remains available.
+        if saved.get("agent_work_budget_version", 1) == 1 and saved.get("agent_max_rounds") == 20:
+            saved["agent_max_rounds"] = DEFAULT_SETTINGS["agent_max_rounds"]
         merged = {**DEFAULT_SETTINGS, **saved}
+        merged["agent_work_budget_version"] = 2
     except (FileNotFoundError, PermissionError, json.JSONDecodeError, ValueError):
         merged = dict(DEFAULT_SETTINGS)
     _settings_cache = (now, merged)
@@ -266,7 +288,7 @@ def load_settings() -> dict:
 def save_settings(settings: dict):
     """Persist settings to disk (atomic; see core.atomic_io)."""
     from core.atomic_io import atomic_write_json
-    atomic_write_json(SETTINGS_FILE, settings, indent=2)
+    atomic_write_json(SETTINGS_FILE, {**settings, "agent_work_budget_version": 2}, indent=2)
     _invalidate_caches()
 
 
@@ -353,3 +375,74 @@ def save_features(features: dict):
     from core.atomic_io import atomic_write_json
     atomic_write_json(FEATURES_FILE, features, indent=2)
     _invalidate_caches()
+
+
+def sanitize_model_number_map(
+    value: Any, *, max_keys: int = 200, max_value: int = 10_000_000
+) -> dict[str, int]:
+    """Validate an operator model -> positive-integer settings map."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("must be an object")
+    if len(value) > max_keys:
+        raise ValueError(f"must contain at most {max_keys} entries")
+    sanitized: dict[str, int] = {}
+    for key, raw in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("keys must be non-empty strings")
+        if isinstance(raw, bool):
+            raise ValueError("values must be integers")
+        try:
+            number = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"invalid value for {key.strip()[:60]}")
+        if number <= 0 or number > max_value:
+            raise ValueError(f"value out of range for {key.strip()[:60]}")
+        sanitized[key.strip()[:200]] = number
+    return sanitized
+
+
+def sanitize_protocol_pack_ids(value: Any) -> list[str]:
+    """Validate an operator list of disabled protocol pack ids."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("must be a list")
+    if len(value) > 100:
+        raise ValueError("must contain at most 100 entries")
+    sanitized: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("entries must be non-empty strings")
+        pack_id = item.strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", pack_id):
+            raise ValueError(f"invalid pack id: {pack_id[:60]}")
+        if pack_id not in sanitized:
+            sanitized.append(pack_id)
+    return sanitized
+
+
+def sanitize_tts_agent_voices(value: Any) -> dict[str, str]:
+    """Normalize an installation-owned display-name -> voice-code map.
+
+    Keys are installation-configured agent or worker display names, so the
+    map starts empty and this helper never injects built-in names. Invalid
+    entries are dropped rather than corrected.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("must be an object")
+    sanitized: dict[str, str] = {}
+    for agent, voice in value.items():
+        if not isinstance(agent, str) or not isinstance(voice, str):
+            continue
+        name = " ".join(agent.split())
+        if not name or len(name) > 80 or any(ord(char) < 32 for char in name):
+            continue
+        code = voice.strip()[:128]
+        if not code:
+            continue
+        sanitized[name] = code
+    return sanitized

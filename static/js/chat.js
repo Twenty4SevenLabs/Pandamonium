@@ -25,6 +25,7 @@ import { createStreamRenderer } from './streamingRenderer.js';
 import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composerArrowUpRecall.js';
 import { getBrandName } from './brand.js';
 import { emitVoiceLifecycle } from './voiceLifecycle.js';
+import { getSelectedAgentSelection } from './modelPicker.js';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const RESEARCH_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
@@ -440,42 +441,141 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
   let _queuedDrainTimer = null;
   let _queuedPromoteTimer = null;
   let _queuedRequestSeq = 0;
-  let _queuedBubbleHost = null;
+  let _queuedStrip = null;
+  let _queueOutsideClickBound = false;
 
-  function _escapeQueueText(s) {
-    return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
-  function _ensureQueuedBubbleHost() {
-    const chatBox = document.getElementById('chat-history');
-    if (!chatBox) return null;
-    if (_queuedBubbleHost && _queuedBubbleHost.isConnected) return _queuedBubbleHost;
-    let host = document.getElementById('chat-queued-bubble-host');
-    if (!host) {
-      host = document.createElement('div');
-      host.id = 'chat-queued-bubble-host';
-      host.className = 'chat-queued-bubble-host';
+  function _ensureQueueStrip() {
+    if (_queuedStrip && _queuedStrip.isConnected) return _queuedStrip;
+    const bar = document.querySelector('.chat-input-bar');
+    if (!bar) return null;
+    let strip = document.getElementById('chat-queue-strip');
+    if (!strip) {
+      strip = document.createElement('div');
+      strip.id = 'chat-queue-strip';
+      strip.className = 'chat-queue-strip';
+      strip.setAttribute('aria-label', 'Queued messages');
+      strip.hidden = true;
     }
-    chatBox.appendChild(host);
-    _queuedBubbleHost = host;
-    return host;
+    bar.insertBefore(strip, bar.firstChild);
+    _queuedStrip = strip;
+    _bindQueueOutsideClick();
+    return strip;
   }
 
-  function _createQueuedBubble(item) {
-    const host = _ensureQueuedBubbleHost();
-    if (!host) return null;
-    const wrap = document.createElement('div');
-    wrap.className = 'msg msg-user msg-user-queued';
-    wrap.dataset.queueId = item.id;
-    wrap.title = 'Queued - click to send now and stop the current response';
-    wrap.innerHTML = `<div class="role">You <span class="queued-pill"><svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>Queued</span></div><div class="body">${_escapeQueueText(item.message)}</div>`;
-    wrap.addEventListener('click', (ev) => {
-      if (ev.target && ev.target.closest && ev.target.closest('button, a, textarea, input')) return;
-      _promoteQueuedRequest(item.id);
+  function _bindQueueOutsideClick() {
+    if (_queueOutsideClickBound) return;
+    _queueOutsideClickBound = true;
+    document.addEventListener('click', (ev) => {
+      if (ev.target && ev.target.closest && ev.target.closest('.chat-queue-item')) return;
+      _closeQueueMenus();
     });
-    host.appendChild(wrap);
-    uiModule.scrollHistory();
-    return wrap;
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') _closeQueueMenus();
+    });
+  }
+
+  function _closeQueueMenus() {
+    document.querySelectorAll('.chat-queue-menu').forEach(menu => { menu.hidden = true; });
+    document.querySelectorAll('.chat-queue-more').forEach(btn => { btn.setAttribute('aria-expanded', 'false'); });
+  }
+
+  function _syncQueueStrip() {
+    const strip = _ensureQueueStrip();
+    if (!strip) return;
+    strip.hidden = _queuedAgentRequests.length === 0;
+  }
+
+  function _autoSizeQueueEdit(input) {
+    if (!input) return;
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
+  }
+
+  function _enterQueueEdit(item) {
+    const card = item.el;
+    if (!card) return;
+    _closeQueueMenus();
+    card.classList.add('chat-queue-item-editing');
+    const input = card.querySelector('.chat-queue-edit-input');
+    if (!input) return;
+    input.value = item.message;
+    _autoSizeQueueEdit(input);
+    const saveBtn = card.querySelector('.chat-queue-save');
+    if (saveBtn) saveBtn.disabled = !input.value.trim();
+    input.focus();
+    if (input.setSelectionRange) input.setSelectionRange(input.value.length, input.value.length);
+  }
+
+  function _exitQueueEdit(item, { save = false } = {}) {
+    const card = item.el;
+    if (!card) return;
+    const input = card.querySelector('.chat-queue-edit-input');
+    if (save && input) {
+      const next = String(input.value || '').trim();
+      if (next) {
+        item.message = next;
+        const text = card.querySelector('.chat-queue-text');
+        if (text) text.textContent = next;
+      }
+    }
+    card.classList.remove('chat-queue-item-editing');
+  }
+
+  function _createQueuedCard(item) {
+    const strip = _ensureQueueStrip();
+    if (!strip) return null;
+    const card = document.createElement('div');
+    card.className = 'chat-queue-item';
+    card.dataset.queueId = item.id;
+    card.innerHTML = `<span class="chat-queue-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></span><div class="chat-queue-body"><div class="chat-queue-text"></div><textarea class="chat-queue-edit-input" rows="1" aria-label="Edit queued message"></textarea></div><div class="chat-queue-actions"><button type="button" class="chat-queue-steer" title="Send this message now and stop the current response">Steer</button><button type="button" class="chat-queue-save" title="Save changes">Save</button><button type="button" class="chat-queue-cancel" title="Cancel editing">Cancel</button><button type="button" class="chat-queue-more" aria-haspopup="menu" aria-expanded="false" title="More options" aria-label="More options"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg></button></div><div class="chat-queue-menu" role="menu" hidden><button type="button" class="chat-queue-menu-item" role="menuitem" data-queue-action="edit">Edit</button><button type="button" class="chat-queue-menu-item" role="menuitem" data-queue-action="delete">Delete</button></div>`;
+    const textEl = card.querySelector('.chat-queue-text');
+    if (textEl) textEl.textContent = item.message;
+    const steerBtn = card.querySelector('.chat-queue-steer');
+    if (steerBtn) steerBtn.addEventListener('click', () => _promoteQueuedRequest(item.id));
+    const saveBtn = card.querySelector('.chat-queue-save');
+    if (saveBtn) saveBtn.addEventListener('click', () => _exitQueueEdit(item, { save: true }));
+    const cancelBtn = card.querySelector('.chat-queue-cancel');
+    if (cancelBtn) cancelBtn.addEventListener('click', () => _exitQueueEdit(item, { save: false }));
+    const moreBtn = card.querySelector('.chat-queue-more');
+    const menu = card.querySelector('.chat-queue-menu');
+    if (moreBtn && menu) {
+      moreBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const wasOpen = !menu.hidden;
+        _closeQueueMenus();
+        menu.hidden = wasOpen;
+        moreBtn.setAttribute('aria-expanded', wasOpen ? 'false' : 'true');
+      });
+    }
+    if (menu) {
+      menu.addEventListener('click', (ev) => {
+        const actionBtn = ev.target && ev.target.closest ? ev.target.closest('[data-queue-action]') : null;
+        if (!actionBtn) return;
+        const action = actionBtn.dataset.queueAction;
+        if (action === 'edit') _enterQueueEdit(item);
+        else if (action === 'delete') _removeQueuedRequest(item.id);
+      });
+    }
+    const input = card.querySelector('.chat-queue-edit-input');
+    if (input) {
+      input.addEventListener('input', () => {
+        _autoSizeQueueEdit(input);
+        const btn = card.querySelector('.chat-queue-save');
+        if (btn) btn.disabled = !input.value.trim();
+      });
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' && !ev.shiftKey) {
+          ev.preventDefault();
+          _exitQueueEdit(item, { save: true });
+        } else if (ev.key === 'Escape') {
+          ev.preventDefault();
+          _exitQueueEdit(item, { save: false });
+        }
+      });
+    }
+    strip.appendChild(card);
+    _syncQueueStrip();
+    return card;
   }
 
   function _removeQueuedRequest(id) {
@@ -483,6 +583,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
     if (idx < 0) return null;
     const [item] = _queuedAgentRequests.splice(idx, 1);
     if (item && item.el && item.el.parentNode) item.el.remove();
+    _syncQueueStrip();
     return item;
   }
 
@@ -537,9 +638,9 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
     const msg = String(message || '').trim();
     if (!msg) return false;
     const item = { id: `q${++_queuedRequestSeq}`, message: msg, createdAt: Date.now(), el: null };
-    item.el = _createQueuedBubble(item);
     _queuedAgentRequests.push(item);
-    try { uiModule.showToast && uiModule.showToast(_queuedAgentRequests.length === 1 ? 'Queued for after this response' : `${_queuedAgentRequests.length} requests queued`); } catch (_) {}
+    item.el = _createQueuedCard(item);
+    _syncQueueStrip();
     return true;
   }
 
@@ -776,6 +877,8 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
 
     const el = uiModule.el;
     const msg = el('message').value;
+    const selectedCodexContext = sessionModule.getChatAgentTarget() === 'pc-codex'
+      ? window.codexWorkspaceBrowser?.getSelectedContext?.() : null;
     // Allow empty text when a regen carries over the original message's
     // attachment ids — a photo-only message still has something to send.
     if (!msg.trim() && !_authorityControl && !fileHandlerModule.getPendingCount() && !(_pendingRegenAttachments && _pendingRegenAttachments.length)) { _releaseSendFlag(); return; }
@@ -919,6 +1022,11 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
     // Capture session ID for background stream detection
     const streamSessionId = sessionModule.getCurrentSessionId();
     const streamAgentTarget = sessionModule?.getChatAgentTarget?.() || '';
+    // Adaptive routing removed the old chat/agent mode flag, but the loading
+    // text, spinner, and timeout messages still branch on "agent turn". An
+    // agent turn is any send with a selected agent/worker target. Declared
+    // outside the try block because the catch path reads it too.
+    const _isAgent = !!streamAgentTarget;
     _streamSessionId = streamSessionId;
     const streamQuery = msg;
     _lastReaderActivity = Date.now();
@@ -949,6 +1057,10 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
     let timeoutId = null;
     let responseTimeoutCleared = false;
     let clearResponseTimeout = () => {};
+    // Streaming TTS is declared outside the try block so the catch path can
+    // stop it (streamingTTS && aiTTSManager.stop()) without a ReferenceError
+    // masking the real stream failure. Initialized after the reader is ready.
+    let streamingTTS = false;
     let firstTokenWaitTimers = [];
     const clearFirstTokenWaitTimers = () => {
       firstTokenWaitTimers.forEach(t => { try { clearTimeout(t); } catch (_) {} });
@@ -1222,10 +1334,20 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
         _pendingAuthorityControl = null;
       }
       if (streamAgentTarget) fd.append('agent_target', streamAgentTarget);
+      const agentEffort = window.conversationContext?.getAgentEffort?.();
+      if (agentEffort && (!streamAgentTarget || streamAgentTarget === 'jarvis')) fd.append('agent_effort', agentEffort);
+      const reasoningEffort = window.conversationContext?.getReasoningEffort?.();
+      if (reasoningEffort && (!streamAgentTarget || streamAgentTarget === 'jarvis')) fd.append('reasoning_effort', reasoningEffort);
       if (streamAgentTarget === 'pc-codex') {
-        const codexContext = window.codexWorkspaceBrowser?.getSelectedContext?.();
+        const currentContext = window.codexWorkspaceBrowser?.getSelectedContext?.();
+        if (selectedCodexContext?.workspace !== currentContext?.workspace || selectedCodexContext?.codexThreadId !== currentContext?.codexThreadId) {
+          throw new Error('The selected Codex task changed. Send the message again in the intended task.');
+        }
+        const codexContext = selectedCodexContext;
         if (codexContext?.workspace) fd.append('worker_workspace', codexContext.workspace);
         if (codexContext?.codexThreadId) fd.append('worker_thread_id', codexContext.codexThreadId);
+        if (codexContext?.codexModel) fd.append('codex_model', codexContext.codexModel);
+        if (codexContext?.codexReasoningEffort) fd.append('codex_reasoning_effort', codexContext.codexReasoningEffort);
       }
       if (_textExtensionBridge) {
         fd.append('extension_bridge_session', _textExtensionBridge.sessionId);
@@ -1338,6 +1460,8 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
 
       var roleLabel = _modelRouteLabel(modelName, modelName);
       var _charNameInit = presetsModule.getCharacterName ? presetsModule.getCharacterName() : '';
+      const selectedAgent = getSelectedAgentSelection();
+      if (streamAgentTarget && streamAgentTarget !== 'jarvis') _charNameInit = selectedAgent?.target === streamAgentTarget ? selectedAgent.label || streamAgentTarget : streamAgentTarget;
       if (_charNameInit) roleLabel = _charNameInit;
       const roleTs = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
       holder.innerHTML = `<div class="role">${uiModule.esc(roleLabel)} <span class="role-timestamp">${roleTs}</span></div><div class="body"></div>`;
@@ -1443,7 +1567,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
       let isThinking = false;
       let thinkingStartTime = null;
       // Streaming TTS: synthesize sentence-by-sentence during streaming
-      const streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
+      streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
       if (streamingTTS) window.aiTTSManager.streamingStart();
       // One assistant turn owns every visible round and tool lifecycle entry.
       let roundHolder = holder;
@@ -1905,6 +2029,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                 continue;
               }
               if (json.delta) {
+                if (holder) holder.hidden = false;
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
                 // Text arrived after tools — connect thread line to this bubble
@@ -2349,6 +2474,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                 if (holder && json.task_id) {
                   holder.dataset.taskId = String(json.task_id);
                   holder.dataset.worker = String(json.worker || '');
+                  if (!accumulated && json.worker === 'pc-codex') holder.hidden = true;
                 }
                 window.jarvisVoice?.trackWorkerTask?.(json);
                 continue;
@@ -2442,6 +2568,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                   });
                 }
               } else if (json.type === 'attachments') {
+                window.dispatchEvent(new CustomEvent('odysseus:session-activity', { detail: { sessionId: streamSessionId, sources: Array.isArray(json.data) ? json.data : [] } }));
                 if (_isBg) continue;
                 // Update user bubble — replace file chips with image previews
                 const _ub = document.querySelector('#chat-history .msg-user:last-of-type');
@@ -2547,6 +2674,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
                 if (currentHolder && json.id) currentHolder.dataset.dbId = json.id;
 
               } else if (json.type === 'tool_start') {
+                window.dispatchEvent(new CustomEvent('odysseus:session-activity', { detail: { sessionId: streamSessionId, tool: json.tool } }));
                 if (_isBg) continue;
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
@@ -2914,10 +3042,11 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
 
               } else if (json.type === 'plan_update') {
                 if (_isBg) continue;
-                // Agent wrote back to the plan (ticked a step / revised). Update
-                // the stored plan + live-refresh the docked plan window.
+                // Agent wrote back to its working plan (ticked a step / revised).
+                // Store it per session and refresh the docked todo panel above
+                // the composer.
                 const _pu = (json.data && json.data.plan) ? json.data.plan : '';
-                if (_pu) _setStoredPlan(_pu);
+                if (_pu) window.agentPlanModule?.update?.(_pu, streamSessionId);
 
               } else if (json.type === 'agent_step') {
                 if (_isBg) continue;
@@ -3525,6 +3654,7 @@ import { emitVoiceLifecycle } from './voiceLifecycle.js';
       clearResponseTimeout();
       clearProcessingProbe();
       clearFirstTokenWaitTimers();
+      window.dispatchEvent(new CustomEvent('odysseus:turn-completed', { detail: { sessionId: streamSessionId } }));
       // Streaming done — let screen readers announce the settled response.
       const _chatLogDone = document.getElementById('chat-history');
       if (_chatLogDone) _chatLogDone.setAttribute('aria-busy', 'false');

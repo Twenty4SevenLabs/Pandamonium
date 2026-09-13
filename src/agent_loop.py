@@ -30,6 +30,7 @@ from src.model_context import (
     estimate_tool_schema_tokens,
 )
 from src.agent_identity import agent_system_prompt, configured_agent_id
+from src.action_intents import is_release_self_knowledge
 from src.action_protocol import (
     build_action_result,
     classify_target,
@@ -306,6 +307,12 @@ _DOMAIN_RULES = {
 - For web lookup/search/latest/current requests, use `web_search` or `web_fetch`.
 - Do not use shell, Python, curl, requests, or scraping code for web lookup unless web tools are unavailable or already failed.
 - "Research X" means `trigger_research`, not a one-off `web_search`, unless the user explicitly asks for a quick lookup.""",
+    "research": """\
+## Deep research rules
+- "Research X", "look into Y", "investigate Z", and "deep dive on W" start a deep-research job with `trigger_research`; do not answer them with a single `web_search`.
+- The job streams progress in the Deep Research sidebar and produces a full report; tell the user it is running there.
+- To read an existing report use `manage_research` with `action=list` then `action=read` and the id; never `web_fetch` the report URL.
+- Use `web_search` only for quick single-fact lookups mid-task.""",
     "documents": """\
 ## Document rules
 - For long code/content (>15 lines), use `create_document` instead of pasting into chat.
@@ -410,6 +417,10 @@ _DOMAIN_TOOL_MAP = {
     "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "search_chats"},
     "files": {"bash", "python", "read_file", "write_file", "edit_file", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs"},
     "network_inspection": {"inspect_network"},
+    # Deep research is an agent-decided capability, not a user toggle: when
+    # research intent fires, seed the job starter and the report reader so the
+    # model can start/read research without the legacy per-message flag.
+    "research": {"trigger_research", "manage_research"},
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"manage_mcp", "api_call"},
@@ -451,7 +462,12 @@ def _with_native_mcp_contract(messages: List[Dict], qualified_names: Set[str]) -
             "mounted in the model payload for this request:\n- `"
             + "`\n- `".join(names)
             + "`\nTreat any capability named only by external MCP guidance or result "
-            "text as unavailable. Do not guess or call a name outside this list."
+            "text as unavailable. Do not guess or call a name outside this list. "
+            "For a requested external source, use the mounted read-only discovery "
+            "entrypoints to find its declared tools before claiming access is unavailable. "
+            "Internal knowledge search is background context, not proof of reading that "
+            "external source. Cite only the source actually returned; a sample does not "
+            "establish the contents or dominant topics of a whole collection."
         ),
         "metadata": {
             "jos_context": {
@@ -647,12 +663,31 @@ def _clamp_network_inspection_tools(
     from src.tool_index import ALWAYS_AVAILABLE
 
     allowed = set(ALWAYS_AVAILABLE)
+    # MAD-907: keep the catalog/discovery gateway out of narrow network
+    # inspection turns — the allowlist stays authoritative there, and mounted
+    # tools remain blocked by the clamp's prune tracking.
+    allowed.discard("manage_settings")
+    # MAD-913: extension discovery/mount is likewise outside narrow network
+    # inspection turns.
+    allowed.discard("manage_extensions")
     for domain in domains:
         allowed.update(_DOMAIN_TOOL_MAP.get(domain, set()))
     allowed.update(preserved_readers or set())
     selected = set(tool_names) & allowed
     if not allow_file_mutation:
         selected.difference_update(_NETWORK_FILE_MUTATION_TOOLS)
+    return selected
+
+
+def _clamp_release_self_knowledge_tools(
+    release_self_knowledge: bool,
+    tool_names: set[str],
+) -> set[str]:
+    """Keep release self-knowledge turns on local state, not public search."""
+    if not release_self_knowledge:
+        return set(tool_names)
+    selected = set(tool_names) - WEB_TOOL_NAMES
+    selected.add("get_runtime_status")
     return selected
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
@@ -814,7 +849,8 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
     "manage_documents": "- ```manage_documents``` — List, read/open, delete, or tidy documents in the editor panel. Args (JSON): {\"action\": \"list|read|delete|tidy\", ...}. `list` returns rows like `[Title](#document-<id>) — lang, size, updated 5m ago` sorted MOST-RECENT FIRST; the user clicks the anchor to open. `read` (aliases: view/open/get) takes `document_id` and returns the content. When the user asks \"open/show/read my notes\" or \"what documents do I have\", use this — do NOT shell out, do NOT curl.",
     "manage_books": "- ```manage_books``` — Read the current user's private Books catalog or search indexed book text. Args (JSON): {\"action\":\"list|search\", \"query\":\"...\", \"limit\":5}. Use list for title/indexing/OCR status; use search for content and cite returned title/page. Never use filesystem tools or guessed paths for Books.",
     "manage_research": "- ```manage_research``` — List, read/open, or delete saved DEEP RESEARCH results from the Library. Args (JSON): {\"action\": \"list|read|delete\", \"id\": \"<id>\", \"search\": \"...\"}. `list` returns rows like `[query](#research-<id>) — N sources` MOST-RECENT FIRST; the user clicks to open. `read` (aliases: open/view/get) takes `id` and returns the report text + sources. Use when the user says \"open/read/find/delete my research\" or \"that report\". This IS how you read a finished report: when the user refers to a just-completed deep-research job (\"check it out\", \"read that report\", \"summarize the research\") WITHOUT giving an id, call `manage_research` with `action:list` to get the most-recent id, then `action:read` with that id, and answer from the returned text. Do NOT `web_fetch`/`app_api` the `/api/research/report/{id}` URL — that endpoint renders HTML for the browser, not clean text — and do NOT start a fresh `web_search`/`trigger_research` just to read an existing report. To START new research, use trigger_research instead.",
-    "manage_settings": "- ```manage_settings``` — View/change the REAL app settings (same ones the Settings panel writes) AND turn tools on/off. Change a setting: `{\"action\":\"set\",\"key\":\"...\",\"value\":\"...\"}` — keys accept friendly aliases, e.g. voice→tts_voice, \"search engine\"→search_provider, \"default model\"→default_model, \"teacher model\"→teacher_model, \"task/background model\"→task_model, \"image quality\"→image_quality, \"reminder channel\"→reminder_channel (browser|email|ntfy), \"agent timeout\"/\"max tool calls\"/\"token budget\". Read: `{\"action\":\"get\",\"key\":\"...\"}`; see all: `{\"action\":\"list\"}`; reset one: `{\"action\":\"reset\",\"key\":\"...\"}`. Use this when the user asks to change ANY preference instead of making them open Settings. Secrets/API keys are read-only (tell them to set those in the panel). Tool toggles: `{\"action\":\"disable_tool|enable_tool\",\"tool\":\"shell\"}` (aliases: shell/search/browser/documents/memory/skills/images/tasks/notes/calendar/email), list disabled: `{\"action\":\"list_tools\"}`.",
+    "manage_settings": "- ```manage_settings``` — View/change the REAL app settings (same ones the Settings panel writes) AND turn tools on/off. Change a setting: `{\"action\":\"set\",\"key\":\"...\",\"value\":\"...\"}` — keys accept friendly aliases, e.g. voice→tts_voice, \"search engine\"→search_provider, \"default model\"→default_model, \"teacher model\"→teacher_model, \"task/background model\"→task_model, \"image quality\"→image_quality, \"reminder channel\"→reminder_channel (browser|email|ntfy), \"agent timeout\"/\"max tool calls\"/\"token budget\". Read: `{\"action\":\"get\",\"key\":\"...\"}`; see all: `{\"action\":\"list\"}`; reset one: `{\"action\":\"reset\",\"key\":\"...\"}`. Use this when the user asks to change ANY preference instead of making them open Settings. Secrets/API keys are read-only (tell them to set those in the panel). Tool toggles: `{\"action\":\"disable_tool|enable_tool\",\"tool\":\"shell\"}` (aliases: shell/search/browser/documents/memory/skills/images/tasks/notes/calendar/email), list the whole built-in catalog with categories, descriptions, and enabled state: `{\"action\":\"list_tools\"}` — inspect this before claiming a tool is missing or counting what you have; it returns the `total` plus one page, so continue with `offset`/`limit` (or filter with `category`/`search`) until `next_offset` is null. If the catalog lists a tool your prompt lacks, mount it for this request: `{\"action\":\"load_tools\",\"tools\":[\"grep\",\"generate_image\"]}` — the exact usage comes back in the result and the tool stays available for the rest of the request.",
+    "manage_extensions": "- ```manage_extensions``` — Inspect installed plugins' capabilities without activating them, then mount what this request needs. Args (JSON): {\"action\":\"list\"} extensions + counts (works disabled); {\"action\":\"inspect\",\"extension_id\":\"<id>\"} capability names/modes; {\"action\":\"mount\",\"names\":[\"<tool>\"]} loads them for the rest of this request. Disabled or browser-surface plugins are not mountable.",
     "manage_notes": """\
 ```manage_notes
 {"action": "add", "title": "<short todo>", "due_date": "<natural language or ISO datetime>"}
@@ -884,7 +920,7 @@ Read a delegated task's authenticated status or terminal result. Use this when t
     "pipeline": "- ```pipeline``` — Run a multi-step AI pipeline. Args (JSON) with ordered steps, each specifying a model and prompt. Use for complex workflows.",
     "ui_control": "- ```ui_control``` — OPEN or CLOSE the embedded ORACLE workspace, open panels, open email reply drafts, switch models, and change themes. Conversation and built-in tool routing are adaptive and cannot be switched per turn by the model. Durable tool enable/disable requests use `manage_settings`, subject to installation policy and user privileges. ORACLE lifecycle commands are only `oracle_protocol engage` and `oracle_protocol shutdown`; active ORACLE map actions use its native tools. Other commands: `open_panel <name>` (panels: documents, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), `open_email_reply <uid> <folder> <reply|reply-all|ai-reply> <body text>` (opens an email compose document pre-filled with body, DOES NOT send; use this for normal “write/draft a reply saying X” requests), `switch_model <name>`, `set_theme <preset>`, `create_theme <name> <bg> <fg> <panel> <border> <accent>` (optional key=val for advanced colors AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false). \"open documents\" / \"open library\" / \"show gallery\" / \"open inbox\" / \"open notes\" / \"open cookbook\" all map to `open_panel <name>`. Built-in theme presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute. For any other vibe/name, use create_theme.",
     "ask_user": "- ```ask_user``` — Ask the user a multiple-choice question when the task is genuinely ambiguous and the answer changes what you do next (pick an approach, confirm an assumption, choose a target). Args (JSON): {\"question\": \"...\", \"options\": [{\"label\": \"...\", \"description\": \"...\"?}, ...], \"multi\": false?}. 2-6 options. The user gets clickable buttons; calling this ENDS your turn and their choice comes back as your next message. Prefer sensible defaults — only ask when you truly can't proceed well without their input.",
-    "update_plan": "- ```update_plan``` — While executing an approved plan, write the plan back: tick steps done or revise them. Args (JSON): {\"plan\": \"- [x] done step\\n- [ ] next step\"}. Always pass the COMPLETE checklist, not a diff. Call it after finishing each step (mark it `- [x]`) and whenever the user asks to change the plan. The user's docked plan window updates live. Does nothing if there's no active plan.",
+    "update_plan": "- ```update_plan``` — Publish your working plan so the user can follow along: a live todo panel above the composer shows every step and its state. Call it once you know the steps (three or more steps), and again after finishing each step or when the user asks to change the plan. Args (JSON): {\"plan\": \"- [x] done step\\n- [ ] next step\"}. Always pass the COMPLETE GitHub-style markdown checklist, not a diff.",
     "list_served_models": "- ```list_served_models``` — Show what the Cookbook (LLM-serving subsystem) is currently running. NO args. Use this for ANY 'what's running' / 'what's serving' / 'show my cookbook' / 'is anything up' query. DO NOT shell out (`ps aux`, `docker ps`, etc.) — this tool is the source of truth. Failed serve tasks include recent logs plus diagnosis/retry suggestions; use those suggestions to call `serve_model` again with an adjusted command when appropriate.",
     "stop_served_model": "- ```stop_served_model``` — Stop a running model server. Args (JSON): {\"session_id\": \"<from list_served_models>\"}. Use for 'kill my cookbook' / 'stop the model' / 'shut down vLLM'.",
     "tail_serve_output": "- ```tail_serve_output``` — Read the actual tmux stderr/traceback of a CURRENTLY failing cookbook task. Args (JSON): {\"session_id\": \"<from list_served_models>\", \"tail\": 150?}. **Use ONLY after** you just launched something via `serve_model` AND `list_served_models` reports YOUR new task as `crashed`/`error`. DO NOT use it on old stopped/completed download tasks (they're historical noise — won't predict whether a new launch succeeds). DO NOT call it before launching a fresh attempt. When you do call it, bump `tail` to 400+ only if the visible error references 'see root cause above'.",
@@ -1019,6 +1055,32 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
     return "\n\n".join(parts)
 
 
+def tool_prompt_sections(tool_names: set) -> str:
+    """Exact fenced-block prompt text for the named tools.
+
+    MAD-907: `manage_settings action=load_tools` returns this so a text/local
+    engine can format the mounted call immediately instead of waiting for a
+    rebuilt system prompt.
+    """
+    names = {str(name) for name in (tool_names or set())}
+    full_blocks = []
+    one_liners = []
+    for name, default_section in TOOL_SECTIONS.items():
+        if name not in names:
+            continue
+        section = _section_text(name, default_section)
+        if section.startswith("- "):
+            one_liners.append(section)
+        elif section.startswith("```"):
+            full_blocks.append(section)
+    parts = []
+    if full_blocks:
+        parts.append("\n\n".join(full_blocks))
+    if one_liners:
+        parts.append("## Additional tools\n" + "\n".join(one_liners))
+    return "\n\n".join(parts)
+
+
 # Legacy: full prompt with all tools (fallback when RAG unavailable)
 AGENT_SYSTEM_PROMPT = _assemble_prompt(set(TOOL_SECTIONS.keys()))
 
@@ -1045,12 +1107,6 @@ _API_HOSTS = frozenset([
 ])
 _MCP_KEYWORDS = frozenset(["mcp", "browse", "browser", "website", "calendar", "event", "email",
                            "gmail", "screenshot", "navigate", "click", "miniflux", "rss", "feed"])
-_ADMIN_SCHEMA_NAMES = frozenset([
-    "manage_session", "manage_skills", "manage_tasks",
-    "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens",
-    "create_session", "list_sessions", "send_to_session", "pipeline",
-    "ask_teacher", "list_models", "search_chats",
-])
 _TOOL_SELECTION_TIMEOUT_SECONDS = 1.5
 
 
@@ -1684,6 +1740,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
             "low_signal": True,
             "continuation": False,
             "domains": set(),
+            "release_self_knowledge": False,
             "retrieval_query": text,
         }
 
@@ -1723,6 +1780,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("web")
     if has(r"\b(research|deep dive|investigate|look into)\b"):
         domains.add("web")
+        domains.add("research")
     if has(r"\b(open|show|toggle|turn on|turn off|disable|enable|switch model|change model|settings|theme|panel)\b"):
         domains.add("ui")
     if has(r"\b(session|chat history|rename chat|delete chat|archive chat|fork chat|list chats)\b"):
@@ -1858,11 +1916,23 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     ):
         domains.add("platform")
 
+    # The installation owns its release truth. Questions about Pandamonium's
+    # version, updates, repository, or release notes answer from local release
+    # state, so the generic web/cookbook keyword matches must not drag the turn
+    # into public search results or model-serving state. An explicit "research"
+    # request keeps its deep-research intent (MAD-887).
+    _release_self_knowledge = is_release_self_knowledge(retrieval_query)
+    if _release_self_knowledge:
+        domains.add("platform")
+        domains.discard("web")
+        domains.discard("cookbook")
+
     low_signal = not continuation and not domains
     return {
         "low_signal": low_signal,
         "continuation": continuation,
         "domains": domains,
+        "release_self_knowledge": _release_self_knowledge,
         "retrieval_query": retrieval_query,
     }
 
@@ -2373,7 +2443,18 @@ def _build_system_prompt(
             _cached_base_prompt = agent_prompt
             _cached_base_prompt_key = cache_key
 
-    agent_prompt = agent_system_prompt(agent_prompt, model=model)
+    from src.action_intents import classify_tool_intent
+
+    _turn_intent = classify_tool_intent(_extract_last_user_message(messages))
+    _protocol_domains = (
+        [_turn_intent.category] if _turn_intent.needs_tools and _turn_intent.category else []
+    )
+    agent_prompt = agent_system_prompt(
+        agent_prompt,
+        model=model,
+        trace_surface="agent",
+        protocol_domains=_protocol_domains,
+    )
 
     # Dynamic parts that change per request
     mcp_schemas = []
@@ -3412,6 +3493,9 @@ def _record_repeated_api_failure(
     return fingerprint if failure_freq[fingerprint] >= threshold else None
 
 
+AGENT_EFFORT_ROUNDS = {"low": 20, "medium": 40, "high": 80, "xhigh": 120, "max": 200}
+
+
 async def stream_agent_loop(
     endpoint_url: str,
     model: str,
@@ -3447,6 +3531,7 @@ async def stream_agent_loop(
     persist_worker_results: bool = True,
     worker_workspace: Optional[str] = None,
     worker_target: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
     _is_teacher_run: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
@@ -3547,8 +3632,17 @@ async def stream_agent_loop(
             "mcp__email__list_emails", "mcp__email__read_email",
         })
     _prompt_active_document = active_document if _active_document_relevant else None
+    _mcp_discovery_tools: set[str] = set()
+    if (mcp_mgr and not guide_only and not _casual_low_signal_turn
+            and not _is_native_mcp_management_request(_last_user)
+            and hasattr(mcp_mgr, "native_discovery_tool_names")):
+        try:
+            _mcp_discovery_tools = mcp_mgr.native_discovery_tool_names()
+        except (TypeError, ValueError, AttributeError) as exc:
+            logger.warning("[tool-rag] MCP discovery selection failed: %s", exc)
     _direct_low_signal = (
         _low_signal_turn
+        and not _mcp_discovery_tools
         and not _existing_conversation
         and not bool(_intent.get("continuation"))
         and not plan_mode
@@ -3612,6 +3706,7 @@ async def stream_agent_loop(
                 timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
                 session_id=session_id,
                 workload=workload,
+                reasoning_effort=reasoning_effort,
             ):
                 if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                     try:
@@ -3799,6 +3894,18 @@ async def stream_agent_loop(
                 _relevant_tools.update(tools)
         logger.info(f"[tool-rag] Keyword fallback selected: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
 
+    # MAD-913: the catalog and extension discovery/mount gateways must survive
+    # every selection path, including caller-provided allowlists. Without them
+    # in the selection the server-side action catalog can reject the very
+    # capability the model needs to discover or mount anything.
+    if _relevant_tools is not None:
+        _relevant_tools.update({"manage_settings", "manage_extensions"})
+
+    # MAD-905: API engines mount the full built-in catalog. Intent clamps
+    # below still prune tools they deliberately steer away from; track those
+    # removals so "uncapped" never means "ignores a per-turn clamp".
+    _intent_pruned_tools: Set[str] = set()
+
     # If deterministic domain detection fired, seed the corresponding domain
     # tools into the selected tool set. This is not direct prompt-pack
     # injection: `_assemble_prompt()` still derives domain rules from the final
@@ -3816,11 +3923,13 @@ async def stream_agent_loop(
             # and editor-document tools out of explicit Books turns so the
             # model cannot fall back to guessed local paths. Explicit source-
             # code work about the Books service still retains worker tools.
-            _relevant_tools.difference_update(
+            _books_pruned_tools = (
                 _DOMAIN_TOOL_MAP["files"]
                 | _DOMAIN_TOOL_MAP["documents"]
                 | _DOMAIN_TOOL_MAP["workers"]
             )
+            _intent_pruned_tools.update(_books_pruned_tools)
+            _relevant_tools.difference_update(_books_pruned_tools)
             _relevant_tools.add("manage_books")
         if "cookbook" in (_intent.get("domains") or set()):
             _relevant_tools.update({
@@ -3854,6 +3963,10 @@ async def stream_agent_loop(
             # bounded query as ordinary tool retrieval so the native route does
             # not disappear and expose a generic API fallback mid-task.
             _native_mcp_tools = mcp_mgr.native_tool_names_for_request(_retrieval_query)
+            if _native_mcp_tools:
+                _mcp_discovery_tools = set()
+            elif _mcp_discovery_tools and _relevant_tools is not None:
+                _relevant_tools.update(_mcp_discovery_tools)
         except Exception as _native_route_error:
             logger.warning("[tool-rag] native MCP route selection failed: %s", _native_route_error)
         if _native_mcp_tools:
@@ -3862,11 +3975,12 @@ async def stream_agent_loop(
                 _relevant_tools = set(ALWAYS_AVAILABLE)
             _relevant_tools.update(_native_mcp_tools)
             _relevant_tools.difference_update({"manage_mcp", "api_call", "app_api", "pipeline"})
+            _intent_pruned_tools.update({"manage_mcp", "api_call", "app_api", "pipeline"})
             _needs_admin = False
             logger.info("[tool-rag] Selected native MCP tools: %s", sorted(_native_mcp_tools))
     _native_mcp_server_prefixes = {
         f"mcp__{name.split('__', 2)[1]}__"
-        for name in _native_mcp_tools
+        for name in (_native_mcp_tools | _mcp_discovery_tools)
         if len(name.split("__", 2)) == 3
     }
     # If this turn targets the open document, keep editing tools available
@@ -3884,6 +3998,7 @@ async def stream_agent_loop(
                 "list_email_accounts", "list_emails", "read_email",
                 "mcp__email__list_emails", "mcp__email__read_email",
             }
+            _intent_pruned_tools.update(_email_fetch_tools)
             removed = sorted(_relevant_tools & _email_fetch_tools)
             if removed:
                 _relevant_tools.difference_update(_email_fetch_tools)
@@ -3998,6 +4113,7 @@ async def stream_agent_loop(
             "run_shell",
             "write_file",
         }
+        _intent_pruned_tools.update(_doc_irrelevant_file_tools)
         _removed_doc_file_tools = sorted(_relevant_tools & _doc_irrelevant_file_tools)
         if _removed_doc_file_tools:
             _relevant_tools.difference_update(_doc_irrelevant_file_tools)
@@ -4027,6 +4143,26 @@ async def stream_agent_loop(
                 sorted(_relevant_tools - _network_clamped_tools),
             )
             _relevant_tools = _network_clamped_tools
+        if "network_inspection" in _intent_domains:
+            # The clamp is an allowlist. Keep it authoritative for the API
+            # catalog too: anything known but not allowed stays unmounted.
+            from src.tool_policy import known_tool_names as _known_network_tools
+            _intent_pruned_tools.update(
+                _known_network_tools() - set(_network_clamped_tools)
+            )
+        _release_clamped_tools = _clamp_release_self_knowledge_tools(
+            bool(_intent.get("release_self_knowledge")),
+            _relevant_tools,
+        )
+        if _release_clamped_tools != _relevant_tools:
+            logger.info(
+                "[agent-intent] release self-knowledge clamp removed web tools=%s",
+                sorted(_relevant_tools - _release_clamped_tools),
+            )
+            _intent_pruned_tools.update(
+                set(WEB_TOOL_NAMES) - set(_release_clamped_tools)
+            )
+            _relevant_tools = _release_clamped_tools
         logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
 
     prep_timings["tool_selection"] = time.time() - _t1
@@ -4197,10 +4333,13 @@ async def stream_agent_loop(
     _t3 = time.time()
     try:
         from src.context_compactor import trim_for_context
-        from src.context_budget import compute_input_token_budget, DEFAULT_HARD_MAX, DEFAULT_BUDGET, budget_is_explicit as _budget_is_explicit
+        from src.context_budget import compute_input_token_budget, DEFAULT_HARD_MAX, DEFAULT_BUDGET, budget_is_explicit as _budget_is_explicit, model_input_token_budget
         from src.model_context import budget_context_for_model
 
         soft_budget = int(get_setting("agent_input_token_budget", DEFAULT_BUDGET) or 0)
+        model_budget_override = model_input_token_budget(model)
+        if model_budget_override > 0:
+            soft_budget = model_budget_override
         if soft_budget > 0:
             before_trim_tokens = estimate_tokens(messages)
             reserve_tokens = min(max(max_tokens or 1024, 512), 2048)
@@ -4216,7 +4355,7 @@ async def stream_agent_loop(
             # Default value = auto sentinel (scale to the window); any other value =
             # explicit cap. Value-based, not presence-based, because the save path
             # materializes defaults so a persisted default must still read as auto (#4121).
-            budget_is_explicit = _budget_is_explicit(soft_budget)
+            budget_is_explicit = _budget_is_explicit(soft_budget) or model_budget_override > 0
             # Scale only off a window we actually discovered, bound to the value it
             # proves (else 0) — not the passed-in context_length, which can be stale
             # or unset for some callers (#4122 review).
@@ -4228,6 +4367,30 @@ async def stream_agent_loop(
                 hard_max=hard_max,
             )
             _effective_input_budget = max(effective_budget - reserve_tokens, 64)
+            # Advisory protocol text yields to tool evidence under pressure.
+            if before_trim_tokens > _effective_input_budget:
+                try:
+                    from src.protocol_registry import PROTOCOL_BEGIN, strip_protocol_block
+
+                    stripped_messages = [
+                        {**message, "content": strip_protocol_block(message["content"])}
+                        if message.get("role") == "system"
+                        and isinstance(message.get("content"), str)
+                        and PROTOCOL_BEGIN in message["content"]
+                        else message
+                        for message in messages
+                    ]
+                    stripped_tokens = estimate_tokens(stripped_messages)
+                    if stripped_tokens < before_trim_tokens:
+                        logger.info(
+                            "[agent] dropped protocol layer under context pressure: %s -> %s tokens",
+                            before_trim_tokens,
+                            stripped_tokens,
+                        )
+                        messages = stripped_messages
+                        before_trim_tokens = stripped_tokens
+                except Exception as strip_error:
+                    logger.warning("[agent] protocol layer strip skipped: %s", strip_error)
             trimmed_messages = trim_for_context(
                 messages,
                 effective_budget,
@@ -4304,6 +4467,12 @@ async def stream_agent_loop(
     # signatures + consecutive no-text tool rounds to bail early.
     _recent_call_sigs = collections.deque(maxlen=6)
     _stuck_rounds = 0
+    # MAD-907: tools mounted mid-request via manage_settings load_tools.
+    # Kept front-of-line when the measured budget caps the catalog.
+    _mounted_tools: Set[str] = set()
+    # MAD-913: extension tools mounted mid-request through manage_extensions.
+    # name -> {extension_id, permission_mode, descriptor, schema}
+    _mounted_extension_specs: Dict[str, Dict[str, Any]] = {}
     # Frequency of each exact call signature (tool + args), for the runaway
     # backstop. Counting identical repeats — not distinct same-tool calls —
     # lets a legit batch (e.g. 18 calendar events at once) through.
@@ -4391,38 +4560,27 @@ async def stream_agent_loop(
             # write the answer instead of flailing further.
             all_tool_schemas = []
         elif _is_api_model:
-            # Filter schemas by RAG-selected tools (if available)
-            if _relevant_tools:
-                # _build_base_prompt unions _ADMIN_TOOLS into the prompt
-                # sections when admin intent fires — the schema list must
-                # offer the same names, or the model reads prose describing
-                # tools it cannot call and substitutes the nearest schema
-                # it does have (e.g. manage_memory for manage_skills).
-                _schema_names = set(_relevant_tools)
-                if _needs_admin:
-                    _schema_names |= _ADMIN_TOOLS
-                base_schemas = [
-                    _effective_builtin_schema(s, context_extensions)
-                    for s in FUNCTION_TOOL_SCHEMAS
-                    if s.get("function", {}).get("name") in _schema_names
-                ]
-                _mcp_filtered = [
-                    s for s in mcp_schemas
-                    if s.get("function", {}).get("name") in _relevant_tools
-                ]
-                _extra_filtered = [
-                    s for s in extra_tool_schemas
-                    if s.get("function", {}).get("name") in _relevant_tools
-                ]
-                all_tool_schemas = base_schemas + _mcp_filtered + _extra_filtered
-            else:
-                base_schemas = [
-                    _effective_builtin_schema(s, context_extensions)
-                    for s in FUNCTION_TOOL_SCHEMAS
-                    if _needs_admin
-                    or s.get("function", {}).get("name") not in _ADMIN_SCHEMA_NAMES
-                ]
-                all_tool_schemas = base_schemas + mcp_schemas + extra_tool_schemas
+            # MAD-905: API engines mount the complete enabled built-in
+            # catalog every round. RAG still narrows MCP/extension schemas,
+            # but built-ins are no longer silently withheld — the measured
+            # tool-catalog budget below (cap_tool_schemas) is the only cap,
+            # and `_relevant_tools` is ranked first when it has to trim.
+            base_schemas = [
+                _effective_builtin_schema(s, context_extensions)
+                for s in FUNCTION_TOOL_SCHEMAS
+                if s.get("function", {}).get("name") not in _intent_pruned_tools
+            ]
+            _mcp_filtered = [
+                s for s in mcp_schemas
+                if not _relevant_tools
+                or s.get("function", {}).get("name") in _relevant_tools
+            ]
+            _extra_filtered = [
+                s for s in extra_tool_schemas
+                if not _relevant_tools
+                or s.get("function", {}).get("name") in _relevant_tools
+            ]
+            all_tool_schemas = base_schemas + _mcp_filtered + _extra_filtered
             if _ody_qwen_finetune_model:
                 all_tool_schemas = []
             if disabled_tools:
@@ -4434,7 +4592,7 @@ async def stream_agent_loop(
         else:
             # Local: only MCP schemas when message suggests MCP tool usage
             _last_content = _retrieval_query.lower()
-            _wants_mcp = any(kw in _last_content for kw in _MCP_KEYWORDS)
+            _wants_mcp = bool(_native_mcp_tools or _mcp_discovery_tools) or any(kw in _last_content for kw in _MCP_KEYWORDS)
             all_tool_schemas = (
                 [
                     schema for schema in mcp_schemas
@@ -4463,10 +4621,25 @@ async def stream_agent_loop(
             set(forced_tools or set())
             | _extension_names
             | _native_mcp_tools
+            | _mcp_discovery_tools
+            | set(_relevant_tools or ())
         )
+        # MAD-907: the discovery gateway must survive any budget cap so a
+        # capped engine can always list and mount what it needs.
+        _schema_priority.add("manage_settings")
+        # MAD-913: extension discovery/mount must survive the same cap.
+        _schema_priority.add("manage_extensions")
         _priority_order: List[str] = []
         if "ui_control" in _schema_priority:
             _priority_order.append("ui_control")
+        if workspace and "get_workspace" in _schema_priority:
+            # Tiny discovery schema first: capping must never leave the model
+            # able to read files but unable to resolve "this project".
+            _priority_order.append("get_workspace")
+        for _mounted_name in sorted(_mounted_tools):
+            # Explicitly mounted tools win the budget cap over incidental ones.
+            if _mounted_name in _schema_priority and _mounted_name not in _priority_order:
+                _priority_order.append(_mounted_name)
         _priority_order.extend(
             name for name in (
                 schema.get("function", {}).get("name")
@@ -4480,6 +4653,22 @@ async def stream_agent_loop(
                 for schema in mcp_schemas
             )
             if name and name in _native_mcp_tools and name not in _priority_order
+        )
+        # MAD-907: the discovery gateway ranks after explicitly requested MCP
+        # tools but ahead of incidental retrieval, so it survives the cap.
+        if "manage_settings" in _schema_priority and "manage_settings" not in _priority_order:
+            _priority_order.append("manage_settings")
+        # Retrieved/domain tools keep their catalog (source) order ahead of
+        # non-priority schemas. Sorting these alphabetically made greedy
+        # budget capping drop small earlier tools and reorder the payload
+        # between identical turns — source order is both fairer and
+        # prompt-cache stable.
+        _priority_order.extend(
+            name for name in (
+                schema.get("function", {}).get("name")
+                for schema in all_tool_schemas
+            )
+            if name and name in _schema_priority and name not in _priority_order
         )
         _priority_order.extend(
             name for name in sorted(_schema_priority)
@@ -4681,6 +4870,7 @@ async def stream_agent_loop(
                 timeout=agent_stream_timeout,
                 session_id=session_id,
                 workload=workload,
+                reasoning_effort=reasoning_effort,
             )
         async for chunk in _model_chunks:
             if not _round_first_event_logged:
@@ -5022,6 +5212,7 @@ async def stream_agent_loop(
                     _raw = await llm_call_async(
                         url=endpoint_url, model=model, messages=_synth_messages,
                         headers=headers, temperature=0.3, max_tokens=max_tokens, timeout=60,
+                        reasoning_effort=reasoning_effort,
                     )
                     _synth = _strip_think_blocks(strip_tool_blocks(_raw or "")).strip()
                 except Exception as _e:
@@ -5546,6 +5737,28 @@ async def stream_agent_loop(
                             custom_result = await tool_executor(block, _push_progress)
                             if custom_result is not None:
                                 return custom_result
+                        # MAD-913: extension tools mounted this request execute
+                        # through the existing MCP extension adapter, which
+                        # re-reconciles the live catalog before every call.
+                        _extension_spec = _mounted_extension_specs.get(block.tool_type)
+                        if _extension_spec is not None:
+                            from src.extension_agent_mount import (
+                                execute_mounted_extension_tool,
+                            )
+
+                            try:
+                                _extension_args = json.loads(block.content or "{}")
+                            except json.JSONDecodeError:
+                                _extension_args = {}
+                            if not isinstance(_extension_args, dict):
+                                _extension_args = {}
+                            _extension_result = await execute_mounted_extension_tool(
+                                _extension_spec, _extension_args
+                            )
+                            return (
+                                f"Extension tool: {block.tool_type}",
+                                _extension_result,
+                            )
                         return await execute_tool_block(
                             block,
                             session_id=session_id,
@@ -5637,6 +5850,72 @@ async def stream_agent_loop(
                                 break
                     except Exception as _e:
                         logger.debug(f"skill requires_toolsets unlock skipped: {_e}")
+
+            # MAD-907: `manage_settings action=load_tools` results carry
+            # `mounted_tools`. Unlock them for the NEXT round so a capped or
+            # text-only engine can pull any enabled built-in into reach. The
+            # tool result already includes the exact fenced-block usage for
+            # text engines; this hook makes the native schema list catch up.
+            if _relevant_tools is not None and isinstance(result, dict):
+                _mounted_raw = result.get("mounted_tools")
+                if isinstance(_mounted_raw, (list, tuple, set)):
+                    from src.tool_policy import known_tool_names as _known_mount_names
+                    _known_mounts = _known_mount_names()
+                    _new_mounts = {
+                        str(_name)
+                        for _name in _mounted_raw
+                        if str(_name) in _known_mounts
+                        and str(_name) not in disabled_tools
+                        and str(_name) not in _intent_pruned_tools
+                        and str(_name) not in _relevant_tools
+                    }
+                    if _new_mounts:
+                        _relevant_tools.update(_new_mounts)
+                        _mounted_tools.update(_new_mounts)
+                        logger.info(
+                            "[tool-rag] mounted tools for the remainder of the request: %s",
+                            sorted(_new_mounts),
+                        )
+
+            # MAD-913: `manage_extensions action=mount` results carry
+            # `mounted_extension_tools`. Register their schemas for the NEXT
+            # round and remember the owning extension so dispatch can route
+            # calls through the existing extension MCP adapter.
+            if _relevant_tools is not None and isinstance(result, dict):
+                _mounted_extension_raw = result.get("mounted_extension_tools")
+                if isinstance(_mounted_extension_raw, (list, tuple)):
+                    for _spec in _mounted_extension_raw:
+                        if not isinstance(_spec, Mapping):
+                            continue
+                        _ext_name = str(_spec.get("name") or "").strip()
+                        _ext_schema = _spec.get("schema")
+                        if (
+                            not _ext_name
+                            or not isinstance(_ext_schema, Mapping)
+                            or _ext_name in disabled_tools
+                            or _ext_name in _intent_pruned_tools
+                        ):
+                            continue
+                        _mounted_extension_specs[_ext_name] = dict(_spec)
+                        if not any(
+                            _existing.get("function", {}).get("name") == _ext_name
+                            for _existing in extra_tool_schemas
+                            if isinstance(_existing, Mapping)
+                        ):
+                            extra_tool_schemas.append(dict(_ext_schema))
+                        extension_capabilities[_ext_name] = {
+                            "extension_id": str(_spec.get("extension_id") or ""),
+                            "permission_mode": str(
+                                _spec.get("permission_mode") or "read_only"
+                            ),
+                        }
+                        _relevant_tools.add(_ext_name)
+                        _mounted_tools.add(_ext_name)
+                    if _mounted_extension_specs:
+                        logger.info(
+                            "[tool-rag] mounted extension tools for the remainder of the request: %s",
+                            sorted(_mounted_extension_specs),
+                        )
 
             # Extract structured web sources from web_search tool output.
             # web_search returns {"output": ..., "exit_code": 0}; check "output"
@@ -5981,7 +6260,7 @@ async def stream_agent_loop(
                 _effectful_used = True
 
             formatted = format_tool_result(desc, result)
-            if _native_mcp_tools and block.tool_type.startswith("mcp__"):
+            if (_native_mcp_tools or _mcp_discovery_tools) and block.tool_type.startswith("mcp__"):
                 formatted = _project_native_mcp_guidance_for_model(
                     formatted,
                     block.tool_type,
@@ -6235,6 +6514,7 @@ async def stream_agent_loop(
         context_manifest=_final_context_manifest,
     )
     metrics["requested_model"] = requested_model
+    metrics["max_rounds"] = max_rounds
     if _exhausted_rounds:
         metrics["rounds_exhausted"] = max_rounds
     if _tool_budget_exceeded:

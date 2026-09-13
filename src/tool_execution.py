@@ -313,6 +313,7 @@ _ADMIN_TOOLS = {
     "manage_webhooks",
     "manage_tokens",
     "manage_settings",
+    "manage_extensions",
     "download_model",
     "serve_model",
     "serve_preset",
@@ -564,10 +565,11 @@ async def _document_tool_dispatch(
     content: str,
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
+    document_id: Optional[str] = None,
 ) -> Optional[Dict]:
     """Route a document tool through TOOL_HANDLERS with the right ctx shape."""
     from src.agent_tools import TOOL_HANDLERS
-    ctx = {"session_id": session_id, "owner": owner}
+    ctx = {"session_id": session_id, "owner": owner, "doc_id": document_id}
     if tool in TOOL_HANDLERS:
         return await TOOL_HANDLERS[tool](content, ctx)
     return None
@@ -589,6 +591,7 @@ async def execute_tool_block(
     persist_worker_result: bool = True,
     worker_workspace: Optional[str] = None,
     worker_target: Optional[str] = None,
+    document_id: Optional[str] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -609,6 +612,7 @@ async def execute_tool_block(
             persist_worker_result=persist_worker_result,
             worker_workspace=worker_workspace,
             worker_target=worker_target,
+            document_id=document_id,
         )
         return output
     finally:
@@ -626,6 +630,7 @@ async def _execute_tool_block_impl(
     persist_worker_result: bool = True,
     worker_workspace: Optional[str] = None,
     worker_target: Optional[str] = None,
+    document_id: Optional[str] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -782,7 +787,7 @@ async def _execute_tool_block_impl(
     elif tool in ("create_document", "update_document", "edit_document",
                   "suggest_document", "manage_documents"):
         desc = f"{tool}: {content.split(chr(10))[0][:80]}"
-        result = await _document_tool_dispatch(tool, content, session_id, owner) \
+        result = await _document_tool_dispatch(tool, content, session_id, owner, document_id) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
         if tool in ("edit_document", "suggest_document") and "title" in (result or {}):
             desc = f"{tool}: {result.get('title', '')}"
@@ -797,7 +802,7 @@ async def _execute_tool_block_impl(
         # src/agent_tools/model_interaction_tools.py.
         first_line = content.split(chr(10))[0].strip()[:60]
         desc = f"{tool}: {first_line}" if first_line else tool
-        result = await _document_tool_dispatch(tool, content, session_id, owner) \
+        result = await _document_tool_dispatch(tool, content, session_id, owner, document_id) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool in ("create_session", "list_sessions", "send_to_session", "manage_session"):
         # Migrated to the agent_tools registry (#3629): dispatched through
@@ -805,7 +810,7 @@ async def _execute_tool_block_impl(
         # live in src/agent_tools/session_tools.py.
         first_line = content.split(chr(10))[0].strip()[:60]
         desc = f"{tool}: {first_line}" if first_line else tool
-        result = await _document_tool_dispatch(tool, content, session_id, owner) \
+        result = await _document_tool_dispatch(tool, content, session_id, owner, document_id) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool in ("pipeline", "manage_memory", "ui_control"):
         from src.ai_interaction import dispatch_ai_tool
@@ -953,10 +958,40 @@ async def _execute_tool_block_impl(
             result = {"error": "MCP manager not available", "exit_code": 1}
     elif tool == "get_runtime_status":
         from src.jarvis_agent import runtime_status
+        from src.update_status import release_facts
 
         desc = "get_runtime_status"
-        runtime = await runtime_status(owner=owner)
-        result = {**runtime, "output": json.dumps(runtime, ensure_ascii=False), "exit_code": 0}
+        args: Dict[str, Any] = {}
+        if content and str(content).strip():
+            try:
+                parsed = json.loads(content)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                args = parsed
+        runtime = runtime_status(owner=owner)
+        if args.get("release") is not False:
+            # The model-endpoint probe and the release-channel check are
+            # independent; run them together so a release question pays the
+            # slower of the two, not their sum.
+            runtime_payload, release_payload = await asyncio.gather(
+                runtime,
+                release_facts(
+                    notes_version=args.get("release_notes_version") or None,
+                    include_notes=True,
+                ),
+            )
+            payload: Dict[str, Any] = {
+                **runtime_payload,
+                "release": release_payload,
+            }
+        else:
+            payload = dict(await runtime)
+        result = {
+            **payload,
+            "output": json.dumps(payload, ensure_ascii=False),
+            "exit_code": 0,
+        }
     elif tool == "start_agent_task":
         from src.jarvis_agent import start_task
 
@@ -1067,6 +1102,10 @@ _FORMATTER_HANDLED_KEYS = {
 
 def format_tool_result(description: str, result: Dict) -> str:
     """Format a tool result into text for feeding back to the LLM."""
+    if "structured_content" in result or description.startswith("mcp: "):
+        from src.tool_result_projection import format_mcp_result
+
+        return format_mcp_result(result)
     parts = [f"### {description}"]
 
     if "model_content" in result:

@@ -607,11 +607,15 @@ def test_extension_routes_expose_preview_execute_and_readback(tmp_path, git_fixt
     assert set(routes) == {
         "/api/extensions",
         "/api/extensions/catalog",
+        "/api/extensions/installed",
+        "/api/extensions/installed/{extension_id}",
         "/api/extensions/marketplace",
         "/api/extensions/marketplace/plans",
         "/api/extensions/plans/source",
         "/api/extensions/plans/lifecycle",
         "/api/extensions/plans/{plan_id}/execute",
+        "/api/extensions/scans",
+        "/api/extensions/scans/{scan_id}",
     }
     dependencies = {
         path: {dependency.call.__name__ for dependency in route.dependant.dependencies}
@@ -630,5 +634,10 @@ def test_extension_routes_expose_preview_execute_and_readback(tmp_path, git_fixt
     assert all(
         "require_admin" in route_dependencies
         for path, route_dependencies in dependencies.items()
-        if path not in {"/api/extensions/catalog", "/api/extensions/marketplace"}
+        if path not in {
+            "/api/extensions/catalog",
+            "/api/extensions/installed",
+            "/api/extensions/installed/{extension_id}",
+            "/api/extensions/marketplace",
+        }
     )

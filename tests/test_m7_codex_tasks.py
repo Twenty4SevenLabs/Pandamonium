@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,56 @@ assert SPEC and SPEC.loader
 SPEC.loader.exec_module(bridge)
 
 THREAD_ID = "019f5022-a520-7de0-9208-018cd2d4d222"
+
+
+def test_codex_models_are_discovered_and_selection_is_validated(monkeypatch):
+    def rpc(method, params):
+        assert (method, params) == ("model/list", {"limit": 100, "includeHidden": False})
+        return {"data": [{
+            "model": "fixture-model", "displayName": "Fixture",
+            "supportedReasoningEfforts": [{"reasoningEffort": "medium"}, {"reasoningEffort": "high"}],
+            "defaultReasoningEffort": "medium", "private": "not exposed",
+        }]}
+
+    monkeypatch.setattr(bridge, "_app_server_call", rpc)
+    assert "private" not in bridge.catalog_models()["items"][0]
+    assert bridge._model_selection({}) == (None, None)
+    assert bridge._model_selection({"codex_model": "fixture-model"}) == ("fixture-model", "medium")
+    assert bridge._model_selection({"codex_model": "fixture-model", "codex_reasoning_effort": "high"}) == ("fixture-model", "high")
+    for payload in ({"codex_model": "unknown"}, {"codex_reasoning_effort": "high"},
+                    {"codex_model": "fixture-model", "codex_reasoning_effort": "ultra"}):
+        with pytest.raises(ValueError, match="invalid_codex_"):
+            bridge._model_selection(payload)
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_selected_model_reaches_codex_turn_without_changing_project_instructions(tmp_path, monkeypatch, resume):
+    process = SimpleNamespace(
+        stdin=io.StringIO(), stderr=io.StringIO(), poll=lambda: 0,
+        stdout=io.StringIO(json.dumps({"method": "turn/completed", "params": {}}) + "\n"),
+    )
+    monkeypatch.setattr(bridge.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(bridge, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(bridge, "_validate_resume_thread", lambda *_args: None)
+    monkeypatch.setattr(bridge, "_read_until", lambda _task, request_id: {
+        1: {}, 2: {"thread": {"id": THREAD_ID}}, 3: {"turn": {"id": "turn-1"}},
+    }[request_id])
+    task = _bridge_task(tmp_path)
+    task.data.update(prompt="Read the project instructions.", permission_mode="read_only", approved=False,
+                     codex_model="fixture-model", codex_reasoning_effort="high",
+                     codex_thread_id=THREAD_ID if resume else None)
+
+    bridge._run_task(task)
+
+    sent = [json.loads(line) for line in process.stdin.getvalue().splitlines()]
+    opened = next(message for message in sent if message.get("id") == 2)
+    assert opened["method"] == ("thread/resume" if resume else "thread/start")
+    assert opened["params"]["cwd"] == str(tmp_path)
+    assert opened["params"]["developerInstructions"] == bridge.DEVELOPER_INSTRUCTIONS
+    turn = next(message for message in sent if message.get("id") == 3)
+    assert turn["params"]["model"] == "fixture-model"
+    assert turn["params"]["effort"] == "high"
+    assert turn["params"]["threadId"] == THREAD_ID
 
 
 def _bridge_task(root: Path) -> object:
@@ -283,12 +334,39 @@ async def test_direct_codex_turn_resumes_the_thread_selected_in_the_sidebar(brok
         workspace="other-project",
         presenter="Friday",
         codex_thread_id=selected_thread,
+        codex_model="fixture-model",
+        codex_reasoning_effort="high",
+        explicit_workspace=True,
     )
 
     assert action == "started"
     assert task["workspace"] == "other-project"
     assert task["codex_thread_id"] == selected_thread
     assert adapter.started[0]["codex_thread_id"] == selected_thread
+    assert adapter.started[0]["codex_model"] == "fixture-model"
+    assert adapter.started[0]["codex_reasoning_effort"] == "high"
+
+    with pytest.raises(RuntimeError, match="finish before changing"):
+        await jarvis_agent.direct_codex_turn(
+            "session-2", "Continue", owner="leo", workspace="other-project",
+            presenter="Friday", codex_model="another-model",
+        )
+
+
+@pytest.mark.asyncio
+async def test_explicit_friday_project_does_not_silently_follow_an_old_binding(broker_fixture):
+    adapter, _tasks_file = broker_fixture
+    first, _ = await jarvis_agent.direct_codex_turn(
+        "session-1", "Inspect", owner="leo", workspace="disposable", presenter="Friday",
+    )
+    adapter.remote_status[first["remote_task_id"]] = "completed"
+    await jarvis_agent.refresh_task(first["task_id"], owner="leo")
+    with pytest.raises(RuntimeError, match="conversation_project_mismatch"):
+        await jarvis_agent.direct_codex_turn(
+            "session-1", "Inspect", owner="leo", workspace="other-project",
+            presenter="Friday", explicit_workspace=True,
+        )
+    assert len(adapter.started) == 1
 
 
 @pytest.mark.asyncio
@@ -634,11 +712,59 @@ async def test_execution_rollback_switches_fail_closed_without_worker_or_bridge_
     monkeypatch.setenv("JARVIS_CODEX_EXECUTION_ENABLED", "false")
     monkeypatch.setattr(bridge, "WORKSPACES", {"disposable": str(root)})
     monkeypatch.setattr(bridge, "WORKSPACE_NAMES", {"disposable": "Disposable"})
+    monkeypatch.setattr(bridge, "_desktop_sidebar", lambda: {})
+    monkeypatch.setattr(bridge, "_app_server_call", lambda *_args: {"data": []})
     assert bridge.catalog_projects()["items"] == [{
         "project_id": "disposable",
         "display_name": "Disposable",
         "approved_root": "workspace:disposable",
         "availability": "available",
+        "task_order": [],
     }]
     with pytest.raises(RuntimeError, match="codex_task_execution_disabled"):
         bridge.create_task({"workspace": "disposable", "prompt": "Do not run."})
+
+
+@pytest.mark.asyncio
+async def test_native_history_route_requires_user_and_preserves_cursor(tmp_path, monkeypatch):
+    import httpx
+    from fastapi import FastAPI
+    from src.agent_worker_adapters import CodexBridgeAdapter
+
+    token = tmp_path / 'token'
+    token.write_text('private-fixture-token')
+    adapter = CodexBridgeAdapter('pc-codex', 'http://bridge.test', token, enabled=True, machine='workstation')
+    requests = []
+
+    def bridge_request(request):
+        requests.append(request)
+        assert request.headers['authorization'] == 'Bearer private-fixture-token'
+        return httpx.Response(200, json={'items': [], 'next_cursor': 'more'})
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr('src.agent_worker_adapters.httpx.AsyncClient', lambda **kwargs: original_client(transport=httpx.MockTransport(bridge_request), **kwargs))
+    monkeypatch.setattr(agent_task_routes, 'adapters', lambda: {'pc-codex': adapter})
+    monkeypatch.setattr(agent_task_routes, 'configure', lambda *_args: None)
+    monkeypatch.setenv('AUTH_ENABLED', 'true')
+    monkeypatch.setattr(agent_task_routes, 'owner_is_admin_or_single_user', lambda owner: owner == 'alice')
+    app = FastAPI()
+    app.state.auth_manager = SimpleNamespace(is_configured=True)
+    app.include_router(agent_task_routes.setup_agent_task_routes(SimpleNamespace()))
+
+    @app.middleware('http')
+    async def test_identity(request, call_next):
+        request.state.current_user = request.headers.get('x-test-user')
+        return await call_next(request)
+
+    async with original_client(transport=httpx.ASGITransport(app=app), base_url='http://app.test') as client:
+        path = '/api/codex/projects/allowed/tasks/selected/history?cursor=opaque%2Bcursor&limit=5'
+        assert (await client.get(path)).status_code == 401
+        assert requests == []
+        assert (await client.get(path, headers={'x-test-user': 'bob'})).status_code == 403
+        assert requests == []
+        response = await client.get(path, headers={'x-test-user': 'alice'})
+        assert response.status_code == 200 and response.json()['next_cursor'] == 'more'
+        assert requests[-1].url.path == '/v1/catalog/projects/allowed/tasks/selected/history'
+        assert requests[-1].url.params['cursor'] == 'opaque+cursor'
+        assert 'private-fixture-token' not in response.text
+        assert (await client.get(path + '0', headers={'x-test-user': 'alice'})).status_code == 422

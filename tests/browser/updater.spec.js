@@ -10,7 +10,7 @@ const RELEASED_V1021_UPDATER = readFileSync('tests/fixtures/releases/v1.0.21/upd
 const RELEASED_WORKER = readFileSync('tests/fixtures/releases/v1.0.20/sw.js', 'utf8');
 const CURRENT_UPDATER = readFileSync('static/js/updater.js', 'utf8');
 const CURRENT_WORKER = readFileSync('static/sw.js', 'utf8');
-const FUTURE_WORKER = CURRENT_WORKER.replace('pandamonium-v392', 'pandamonium-v393');
+const FUTURE_WORKER = CURRENT_WORKER.replace('pandamonium-v416', 'pandamonium-v417');
 
 function shellRoutes(page, handler) {
   return page.route('**/api/**', route => {
@@ -44,7 +44,7 @@ for (const [scenario, bridgeReload] of [
     .toBe('d8eb76b8e6e038aa38d07416933f01a1a3b457b8dac1d1fd6e059e500d379f84');
   expect(RELEASED_WORKER).toContain("const CACHE_NAME = 'pandamonium-v387';");
   expect(RELEASED_V1021_UPDATER).not.toContain('registration.update()');
-  expect(FUTURE_WORKER).toContain("const CACHE_NAME = 'pandamonium-v393';");
+  expect(FUTURE_WORKER).toContain("const CACHE_NAME = 'pandamonium-v417';");
   const sourceVersion = bridgeReload ? '1.0.21' : '1.0.24';
   const sourceCommit = bridgeReload
     ? '1e5d2e3ab95b53d85b22bbe63a0aa8ee40f9d530'
@@ -54,8 +54,8 @@ for (const [scenario, bridgeReload] of [
   const sourceUpdater = bridgeReload ? RELEASED_V1021_UPDATER : CURRENT_UPDATER;
   const sourceWorker = bridgeReload ? RELEASED_WORKER : CURRENT_WORKER;
   const targetWorker = bridgeReload ? CURRENT_WORKER : FUTURE_WORKER;
-  const sourceCache = bridgeReload ? 'pandamonium-v387' : 'pandamonium-v392';
-  const targetCache = bridgeReload ? 'pandamonium-v392' : 'pandamonium-v393';
+  const sourceCache = bridgeReload ? 'pandamonium-v387' : 'pandamonium-v416';
+  const targetCache = bridgeReload ? 'pandamonium-v416' : 'pandamonium-v417';
   let finishInitialStatus;
   let applied = false;
   let applyCalls = 0;
@@ -891,4 +891,61 @@ test('updater dialog fits a phone viewport and disables scan motion when request
   expect(await page.locator('#updater-progress-card .mad-mcp-scan-line').evaluate(
     element => getComputedStyle(element).animationName,
   )).toBe('none');
+});
+
+test('installed update reloads even when the replacement worker does not navigate', async ({ page }) => {
+  // Regression (MAD-918): the refresh used to be delegated entirely to the new
+  // worker's activate reconcile. When that reconcile cannot run (terminal
+  // status read misses during the restart window), nothing reloaded the page.
+  let applied = false;
+  let documentLoads = 0;
+  let applyCalls = 0;
+  page.on('request', request => {
+    if (request.resourceType() === 'document') documentLoads += 1;
+  });
+  await page.context().route('**/static/sw.js', route => route.fulfill({
+    body: applied
+      ? '// future worker (no reconcile navigation)\nself.addEventListener("install", () => self.skipWaiting());\n'
+      : '// base worker (no reconcile navigation)\nself.addEventListener("install", () => self.skipWaiting());\n',
+    contentType: 'text/javascript',
+    headers: { 'Cache-Control': 'no-cache' },
+  }));
+  await shellRoutes(page, (route, path) => {
+    if (path === '/api/version') return route.fulfill({ json: {
+      version: applied ? '1.0.24' : '1.0.23',
+      commit: applied ? NEW_COMMIT : OLD_COMMIT,
+      release: applied ? '1.0.24-22222222' : '1.0.23-11111111',
+      latest_version: applied ? '1.0.24' : '1.0.23',
+      update_available: false, update_status: 'current', compatible: true, can_update: false,
+      installation: { supported: true, kind: 'managed-native', trigger: 'systemd-path' },
+      release_check: { status: 'current', message: null },
+    } });
+    if (path === '/api/update/check') return route.fulfill({ json: {
+      version: '1.0.23', commit: OLD_COMMIT, release: '1.0.23-11111111',
+      latest_version: '1.0.24', latest_commit: NEW_COMMIT,
+      update_available: true, update_status: 'available', compatible: true, can_update: true,
+      installation: { supported: true, kind: 'managed-native', trigger: 'systemd-path' },
+      release_check: { status: 'available', message: null },
+    } });
+    if (path === '/api/update/apply') {
+      applyCalls += 1;
+      applied = true;
+      return route.fulfill({ json: {
+        status: 'queued', phase: 'queued', progress: 0, message: 'Update queued',
+        rollback_available: false,
+      } });
+    }
+    if (path === '/api/update/status') return route.fulfill({ json: applied ? {
+      status: 'succeeded', phase: 'complete', progress: 100,
+      message: 'Updated to v1.0.24', rollback_available: true,
+    } : { status: 'idle' } });
+    return null;
+  });
+
+  await page.goto('/static/index.html');
+  await page.locator('#sidebar-update-check').click();
+  await page.locator('#updater-apply').click();
+  await page.locator('#styled-confirm-ok').click();
+  await expect.poll(() => documentLoads, { timeout: 20000 }).toBe(2);
+  expect(applyCalls).toBe(1);
 });

@@ -25,6 +25,7 @@ EXTENSION_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 SKILL_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,59}$")
 TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
 REVISION_PATTERN = re.compile(r"^(?:self|[0-9a-f]{40}|[0-9a-f]{64})$")
+CONFIGURATION_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 IMMUTABLE_REVISION_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 PERMISSION_MODES = frozenset(
     {"read_only", "bounded_write", "external_side_effect", "destructive", "controlled_administrative"}
@@ -35,9 +36,9 @@ SKILL_BUNDLE_FORMATS = frozenset({"agent_skill", "codex_plugin"})
 _TOP_LEVEL_FIELDS = frozenset({
     "protocol_version", "extension_id", "name", "version", "source", "runtime",
     "capabilities", "permissions", "health", "lifecycle", "data_boundaries",
-    "removal", "rollback",
+    "removal", "rollback", "configuration",
 })
-_REQUIRED_FIELDS = _TOP_LEVEL_FIELDS
+_REQUIRED_FIELDS = _TOP_LEVEL_FIELDS - {"configuration"}
 
 
 class ExtensionContractError(ValueError):
@@ -138,6 +139,11 @@ def _normalize_tools(value: Any) -> list[dict[str, Any]]:
     return tools
 
 
+def normalize_tool_schema(raw: Any) -> dict[str, Any]:
+    """Public strict tool-schema normalizer for inventory and mount contracts."""
+    return _normalize_tool_schema(raw)
+
+
 def validate_extension_manifest(manifest: Any) -> dict[str, Any]:
     """Return a normalized strict v1 manifest without performing I/O."""
     value = _object(manifest, "extension_manifest_invalid")
@@ -217,6 +223,39 @@ def validate_extension_manifest(manifest: Any) -> dict[str, Any]:
     ):
         raise ExtensionContractError("extension_permission_capability_unknown")
 
+    configuration_raw = value.get("configuration", [])
+    if not isinstance(configuration_raw, list) or len(configuration_raw) > 32:
+        raise ExtensionContractError("extension_configuration_invalid")
+    configuration: list[dict[str, Any]] = []
+    seen_configuration_keys: set[str] = set()
+    for raw_item in configuration_raw:
+        item = _object(raw_item, "extension_configuration_invalid")
+        _strict_fields(
+            item,
+            {"key", "description", "required", "secret"},
+            "extension_configuration_unknown_field",
+        )
+        if {"key", "description"} - set(item):
+            raise ExtensionContractError("extension_configuration_invalid")
+        config_key = _bounded_text(item.get("key"), "extension_configuration_key_invalid", maximum=64)
+        if not CONFIGURATION_KEY_PATTERN.fullmatch(config_key) or config_key in seen_configuration_keys:
+            raise ExtensionContractError("extension_configuration_key_invalid")
+        seen_configuration_keys.add(config_key)
+        required = item.get("required", False)
+        secret = item.get("secret", False)
+        if not isinstance(required, bool) or not isinstance(secret, bool):
+            raise ExtensionContractError("extension_configuration_flag_invalid")
+        configuration.append({
+            "key": config_key,
+            "description": _bounded_text(
+                item.get("description"),
+                "extension_configuration_description_invalid",
+                maximum=200,
+            ),
+            "required": required,
+            "secret": secret,
+        })
+
     health = _object(value.get("health"), "extension_health_invalid")
     health_type = str(health.get("type") or "")
     if health_type == "catalog":
@@ -282,6 +321,10 @@ def validate_extension_manifest(manifest: Any) -> dict[str, Any]:
         "removal": removal,
         "rollback": {"strategy": "pinned_revision", "retain_revisions": retain},
     })
+    if configuration:
+        normalized["configuration"] = configuration
+    else:
+        normalized.pop("configuration", None)
     return normalized
 
 
@@ -426,7 +469,10 @@ class ExtensionRegistry:
             try:
                 _strict_fields(
                     record,
-                    {"enabled", "manifest", "catalog_version", "effective_capabilities", "admitted_skills"},
+                    {
+                        "enabled", "manifest", "catalog_version", "effective_capabilities",
+                        "admitted_skills", "capability_inventory",
+                    },
                     "extension_registry_record_unknown_field",
                 )
                 manifest = validate_extension_manifest(record["manifest"])
@@ -493,6 +539,45 @@ class ExtensionRegistry:
                         raise ExtensionContractError("extension_registry_skill_invalid")
                 elif admitted_skills:
                     raise ExtensionContractError("extension_registry_skill_invalid")
+                capability_inventory = None
+                if record.get("capability_inventory") is not None:
+                    try:
+                        from src.extension_capability_inventory import (
+                            inventory_is_current,
+                            manifest_digest,
+                            validate_capability_inventory,
+                        )
+
+                        capability_inventory = validate_capability_inventory(
+                            record["capability_inventory"]
+                        )
+                        if not inventory_is_current(
+                            capability_inventory,
+                            source_revision=manifest["source"]["revision"],
+                            manifest_digest_value=manifest_digest(manifest),
+                        ):
+                            capability_inventory = None
+                    except ExtensionContractError:
+                        capability_inventory = None
+                elif capabilities or admitted_skills:
+                    # MAD-916 backfill: records installed before the inventory
+                    # existed rebuild it from the already-validated effective
+                    # metadata, without re-running any adapter.
+                    try:
+                        from src.extension_capability_inventory import (
+                            build_capability_inventory,
+                        )
+
+                        capability_inventory = build_capability_inventory(
+                            {
+                                "manifest": manifest,
+                                "capabilities": capabilities,
+                                "admitted_skills": admitted_skills,
+                            },
+                            source_revision=manifest["source"]["revision"],
+                        )
+                    except ExtensionContractError:
+                        capability_inventory = None
                 extensions[extension_id] = {
                     "enabled": record["enabled"],
                     "manifest": manifest,
@@ -503,6 +588,7 @@ class ExtensionRegistry:
                     ),
                     "effective_capabilities": capabilities,
                     "admitted_skills": admitted_skills,
+                    "capability_inventory": capability_inventory,
                 }
             except (ExtensionContractError, KeyError, TypeError):
                 continue
@@ -526,6 +612,11 @@ class ExtensionRegistry:
             health_available=health_available,
         )
         extension_id = reconciled["manifest"]["extension_id"]
+        from src.extension_capability_inventory import build_capability_inventory
+
+        capability_inventory = build_capability_inventory(
+            reconciled, source_revision=reconciled["manifest"]["source"]["revision"]
+        )
         with self._lock:
             state = self._read()
             existing_names = {
@@ -543,6 +634,7 @@ class ExtensionRegistry:
                 "catalog_version": reconciled["catalog_version"],
                 "effective_capabilities": reconciled["capabilities"],
                 "admitted_skills": reconciled["admitted_skills"],
+                "capability_inventory": capability_inventory,
             }
             state["extensions"][extension_id] = record
             self._write(state)
@@ -595,6 +687,15 @@ class ExtensionRegistry:
             for extension_id, record in self._read()["extensions"].items()
             if extension_id in engaged and record.get("enabled")
         }
+
+    def capability_inventory(self, extension_id: str) -> dict[str, Any] | None:
+        """Revision-bound advisory inventory for one installed extension.
+
+        Present while disabled; never execution authority on its own. Tampered,
+        stale, or absent inventories return ``None``.
+        """
+        record = self._read()["extensions"].get(extension_id)
+        return record.get("capability_inventory") if record else None
 
     def snapshot(self) -> dict[str, Any]:
         return json.loads(json.dumps(self._read()))

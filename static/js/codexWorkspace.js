@@ -2,12 +2,15 @@ import { getSelectedAgentSelection } from './modelPicker.js';
 import {
   renderAuthorityApprovalCard,
   renderAuthorityDecisionResolved,
+  _openImageLightbox,
 } from './chatRenderer.js';
 
 const PAGE_SIZE = 50;
+const VISIBLE_TASKS = 5;
 
 const state = {
   mode: null,
+  available: false,
   target: '',
   targetLabel: '',
   governedTaskActions: false,
@@ -27,12 +30,156 @@ const state = {
   projectRequest: 0,
   taskRequest: 0,
   transcriptRequest: 0,
+  nativePage: null,
 };
 const pendingAuthorityActions = new Map();
 const retryableRequestIds = new Map();
 let authorityLifecycle = 0;
+let codexModels = [];
+let modelRequest = 0;
+let projects = [];
+let taskItems = [];
+let visibleTasks = VISIBLE_TASKS;
+let desktopPins = [];
+let codexLayout = { projects: [], tasks: {}, pins: null };
+let workerLayouts = Object.create(null);
+let layoutRevision = 0;
+let layoutWrites = Promise.resolve();
+
+function cleanLayout(value = {}) {
+  return {
+    projects: Array.isArray(value?.projects) ? value.projects.filter(id => typeof id === 'string') : [],
+    tasks: value?.tasks && typeof value.tasks === 'object' && !Array.isArray(value.tasks) ? value.tasks : {},
+    pins: Array.isArray(value?.pins) ? value.pins.filter(item => item && typeof item.task_id === 'string' && typeof item.project_id === 'string') : null,
+  };
+}
+
+function layout() {
+  if (state.mode === 'codex') return codexLayout;
+  return workerLayouts[state.target] ||= cleanLayout();
+}
+
+const layoutReady = Promise.all([
+  requestJson('/api/prefs/codex-sidebar-layout').catch(() => ({})),
+  requestJson('/api/prefs/worker-sidebar-layouts').catch(() => ({})),
+]).then(([codex, workers]) => {
+  if (layoutRevision) return;
+  codexLayout = cleanLayout(codex.value);
+  if (workers.value && typeof workers.value === 'object' && !Array.isArray(workers.value)) {
+    for (const [target, value] of Object.entries(workers.value)) {
+      if (/^[a-z][a-z0-9_-]{0,63}$/.test(target)) workerLayouts[target] = cleanLayout(value);
+    }
+  }
+});
+
+function saveLayout() {
+  layoutRevision += 1;
+  const key = state.mode === 'codex' ? 'codex-sidebar-layout' : 'worker-sidebar-layouts';
+  const value = JSON.stringify({ value: state.mode === 'codex' ? codexLayout : workerLayouts });
+  layoutWrites = layoutWrites.catch(() => {}).then(() => requestJson(`/api/prefs/${key}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: value,
+  })).catch(() => window.uiModule?.showToast?.('Could not save the sidebar layout. Try the change again.'));
+}
+
+function ordered(items, ids, key) {
+  const order = new Map((Array.isArray(ids) ? ids : []).map((id, index) => [id, index]));
+  return [...items].sort((a, b) => (order.get(a[key]) ?? Infinity) - (order.get(b[key]) ?? Infinity));
+}
+
+function pins() { return layout().pins ?? (state.mode === 'codex' ? desktopPins : []); }
+function isPinned(taskId, projectId = state.selectedProject) { return pins().some(task => task.task_id === taskId && task.project_id === projectId); }
+
+function moveVisibleOrder(items, existing) {
+  const ids = items.map(item => item.dataset.taskId || item.dataset.projectId);
+  const moved = new Set(ids);
+  let index = 0;
+  const result = [...new Set([...existing, ...ids])].map(id => moved.has(id) ? ids[index++] : id);
+  return result;
+}
+
+function saveTaskOrder(items) {
+  const baseline = ordered(taskItems, layout().tasks[state.selectedProject] || projects.find(p => p.project_id === state.selectedProject)?.task_order, 'task_id').map(task => task.task_id);
+  layout().tasks[state.selectedProject] = moveVisibleOrder(items, baseline);
+  saveLayout();
+}
+
+function enableSort(id, selector, handleSelector, onReorder) {
+  window.dragSortModule?.enable(id, selector, { handleSelector, onReorder });
+  const container = byId(id);
+  if (!container || container.dataset.keyboardSort) return;
+  container.dataset.keyboardSort = '1';
+  container.addEventListener('keydown', event => {
+    if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    const row = event.target.closest(selector);
+    if (!row || row.parentElement !== container) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const focus = document.activeElement;
+    const sibling = event.key === 'ArrowUp' ? row.previousElementSibling : row.nextElementSibling;
+    if (!sibling?.matches(selector)) return;
+    container.insertBefore(row, event.key === 'ArrowUp' ? sibling : sibling.nextElementSibling);
+    focus?.focus();
+    onReorder([...container.querySelectorAll(selector)]);
+  });
+}
+
+function dragHandle(kind) {
+  const handle = document.createElement('span');
+  handle.className = `workspace-drag ${kind}-drag`;
+  handle.textContent = '⠿';
+  handle.setAttribute('aria-hidden', 'true');
+  handle.title = 'Drag to reorder; Alt + Arrow keys also move this row';
+  return handle;
+}
 
 function byId(id) { return document.getElementById(id); }
+
+function renderReasoningOptions() {
+  const select = byId('codex-reasoning');
+  if (!select) return;
+  const model = codexModels.find(item => item.model === byId('codex-model')?.value);
+  const efforts = model?.reasoning_efforts || [];
+  select.replaceChildren(...(efforts.length
+    ? efforts.map(effort => new Option(effort, effort))
+    : [new Option('Task default', '')]));
+  if (efforts.includes(model?.default_reasoning_effort)) select.value = model.default_reasoning_effort;
+  select.disabled = !efforts.length;
+  document.dispatchEvent(new CustomEvent('odysseus:effort-options-changed'));
+}
+
+async function loadModels() {
+  const request = ++modelRequest;
+  const saved = new URLSearchParams(window.location.search);
+  const select = byId('codex-model');
+  if (!select) return;
+  select.disabled = true;
+  byId('codex-model-status').textContent = 'Loading models from the selected Codex connection…';
+  try {
+    const catalog = await requestJson('/api/codex/models');
+    if (request !== modelRequest || state.mode !== 'codex') return;
+    const previous = select.value;
+    codexModels = (Array.isArray(catalog.items) ? catalog.items : [])
+      .filter(item => typeof item.model === 'string' && Array.isArray(item.reasoning_efforts));
+    select.replaceChildren(new Option('Task / node default', ''),
+      ...codexModels.map(item => new Option(item.display_name || item.model, item.model)));
+    const desired = previous || saved.get('codex_model');
+    if (codexModels.some(item => item.model === desired)) select.value = desired;
+    select.disabled = !codexModels.length;
+    byId('codex-model-status').textContent = codexModels.length
+      ? 'Model changes apply to the next turn.' : 'No Codex models are available.';
+    renderReasoningOptions();
+    if ([...byId('codex-reasoning').options].some(option => option.value === saved.get('codex_effort'))) {
+      byId('codex-reasoning').value = saved.get('codex_effort');
+      document.dispatchEvent(new CustomEvent('odysseus:effort-options-changed'));
+    }
+  } catch (error) {
+    if (request !== modelRequest || state.mode !== 'codex') return;
+    codexModels = [];
+    select.replaceChildren(new Option('Task / node default', ''));
+    byId('codex-model-status').textContent = error.message;
+    renderReasoningOptions();
+  }
+}
 
 async function requestJson(path, options = {}) {
   const response = await fetch(path, { credentials: 'same-origin', ...options });
@@ -81,7 +228,7 @@ function renderProjects(items, append = false) {
     }
     list.replaceChildren();
   }
-  items.forEach(project => {
+  ordered(items, layout().projects, 'project_id').forEach(project => {
     const projectId = String(project.project_id || '');
     const projectName = String(project.display_name || projectId || 'Project');
     const group = document.createElement('div');
@@ -101,21 +248,28 @@ function renderProjects(items, append = false) {
     const title = document.createElement('span');
     title.className = 'codex-browser-label';
     title.textContent = projectName;
+    button.append(dragHandle('project'));
     button.append(folderIcon(), title);
     if (button.disabled) button.append(activityDot('unavailable', button.title));
     group.appendChild(button);
     list.appendChild(group);
   });
   if (!list.children.length) list.appendChild(statusRow(`No projects are available for ${state.targetLabel || 'this worker'}.`));
+  enableSort('codex-project-list', '.codex-project-group', '.project-drag', rows => {
+    layout().projects = rows.map(row => row.dataset.projectId);
+    saveLayout();
+  });
 }
 
 function renderExternalWorkspaces() {
-  renderProjects(state.workspaces.map(workspace => ({
+  projects = state.workspaces.map(workspace => ({
     project_id: workspace,
     display_name: workspace,
     availability: 'available',
     approved_root: `workspace:${workspace}`,
-  })));
+  }));
+  renderProjects(projects);
+  renderPinned();
 }
 
 function taskState(value) {
@@ -123,17 +277,21 @@ function taskState(value) {
   if (normalized === 'cancelled') return 'canceled';
   return new Set([
     'loading', 'empty', 'unavailable', 'reconnecting', 'queued', 'active', 'running',
-    'waiting', 'waiting_approval', 'completed', 'failed', 'canceled', 'blocked', 'stale',
+    'waiting', 'waiting_approval', 'idle', 'completed', 'failed', 'canceled', 'blocked', 'stale',
   ]).has(normalized) ? normalized : 'stale';
 }
 
-function renderTasks(items, append = false) {
-  const list = byId('codex-task-list');
+function renderTasks(items, append = false, pinned = false) {
+  const list = byId(pinned ? 'codex-pinned-list' : 'codex-task-list');
   if (!list) return;
   if (!append) list.replaceChildren();
   items.forEach(task => {
     const taskId = String(task.task_id || task.task_ref || '');
     const status = taskState(task.status);
+    const row = document.createElement('div');
+    row.className = 'codex-task-entry';
+    row.dataset.taskId = taskId;
+    row.dataset.projectId = String(task.project_id || state.selectedProject || '');
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'codex-browser-row codex-task-row';
@@ -146,15 +304,46 @@ function renderTasks(items, append = false) {
     const title = document.createElement('span');
     title.className = 'codex-browser-label';
     title.textContent = button.dataset.taskTitle;
+    button.append(dragHandle('task'));
     button.append(title);
     if (['active', 'running', 'queued', 'waiting', 'waiting_approval', 'reconnecting'].includes(status)) {
       button.append(activityDot('active', status.replaceAll('_', ' ')));
     } else if (['unavailable', 'failed', 'canceled', 'blocked', 'stale'].includes(status)) {
       button.append(activityDot('unavailable', status.replaceAll('_', ' ')));
     }
-    list.appendChild(button);
+    const pin = document.createElement('button');
+    pin.type = 'button';
+    pin.className = 'codex-pin-button';
+    pin.textContent = isPinned(taskId, row.dataset.projectId) ? '◆' : '◇';
+    pin.setAttribute('aria-label', `${isPinned(taskId, row.dataset.projectId) ? 'Unpin' : 'Pin'} ${task.title || 'task'}`);
+    pin.setAttribute('aria-pressed', String(isPinned(taskId, row.dataset.projectId)));
+    pin.addEventListener('click', () => {
+      layout().pins = isPinned(taskId, row.dataset.projectId) ? pins().filter(item => item.task_id !== taskId || item.project_id !== row.dataset.projectId) : [...pins(), task];
+      saveLayout();
+      renderPinned();
+      renderVisibleTasks();
+    });
+    row.append(button, pin);
+    list.appendChild(row);
   });
   if (!list.children.length) list.appendChild(statusRow('No tasks in this project yet.'));
+  enableSort(list.id, '.codex-task-entry', '.task-drag', pinned ? rows => {
+    layout().pins = rows.map(row => pins().find(task => task.task_id === row.dataset.taskId && task.project_id === row.dataset.projectId)).filter(Boolean);
+    saveLayout();
+  } : saveTaskOrder);
+}
+
+function renderPinned() {
+  const available = pins().filter(task => projects.some(project => project.project_id === task.project_id));
+  byId('codex-pinned-view').hidden = !available.length;
+  renderTasks(available, false, true);
+}
+
+function renderVisibleTasks() {
+  const preferred = layout().tasks[state.selectedProject] || projects.find(p => p.project_id === state.selectedProject)?.task_order;
+  const tasks = ordered(taskItems, preferred, 'task_id').filter(task => !isPinned(task.task_id));
+  renderTasks(tasks.slice(0, visibleTasks));
+  byId('codex-task-more').hidden = tasks.length <= visibleTasks;
 }
 
 async function loadProjects({ append = false } = {}) {
@@ -170,18 +359,36 @@ async function loadProjects({ append = false } = {}) {
   if (append && state.projectCursor) params.set('cursor', state.projectCursor);
   try {
     const page = await requestJson(`/api/codex/projects?${params}`);
+    await layoutReady;
     if (requestId !== state.projectRequest) return;
-    renderProjects(Array.isArray(page.items) ? page.items : [], append);
+    projects = append ? [...projects, ...(page.items || [])] : (page.items || []);
+    if (!append) desktopPins = Array.isArray(page.pinned_tasks) ? page.pinned_tasks : [];
+    renderProjects(projects);
+    renderPinned();
     state.projectCursor = page.next_cursor || null;
     if (more) more.hidden = !state.projectCursor;
+    const saved = new URLSearchParams(window.location.search);
+    if (!state.selectedTask && saved.get('codex_task') && projects.some(project => project.project_id === saved.get('codex_project'))) {
+      const button = document.createElement('button');
+      Object.assign(button.dataset, { projectId: saved.get('codex_project'), taskId: saved.get('codex_task'), taskTitle: 'Codex task' });
+      await selectTask(button, { restore: true });
+      renderVisibleTasks();
+    }
   } catch (error) {
     if (requestId !== state.projectRequest || !list) return;
-    list.replaceChildren(statusRow(error.message || 'Friday workstation is unavailable.', true));
+    list.replaceChildren(statusRow(error.message || 'The selected Codex connection is unavailable.', true));
   }
 }
 
 async function loadTasks({ append = false } = {}) {
   if (!state.selectedProject) return;
+  if (append) {
+    visibleTasks += VISIBLE_TASKS;
+    renderVisibleTasks();
+    return;
+  }
+  visibleTasks = VISIBLE_TASKS;
+  taskItems = [];
   const list = byId('codex-task-list');
   const more = byId('codex-task-more');
   const requestId = ++state.taskRequest;
@@ -193,14 +400,21 @@ async function loadTasks({ append = false } = {}) {
   const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
   if (append && state.taskCursor) params.set('cursor', state.taskCursor);
   try {
-    const path = state.mode === 'external'
-      ? `/api/agent-workers/${encodeURIComponent(state.target)}/tasks?workspace=${encodeURIComponent(state.selectedProject)}&${params}`
-      : `/api/codex/projects/${encodeURIComponent(state.selectedProject)}/tasks?${params}`;
-    const page = await requestJson(path);
-    if (requestId !== state.taskRequest) return;
-    renderTasks(Array.isArray(page.items) ? page.items : [], append);
-    state.taskCursor = page.next_cursor || null;
-    if (more) more.hidden = !state.taskCursor;
+    const seen = new Set();
+    do {
+      const path = state.mode === 'external'
+        ? `/api/agent-workers/${encodeURIComponent(state.target)}/tasks?workspace=${encodeURIComponent(state.selectedProject)}&${params}`
+        : `/api/codex/projects/${encodeURIComponent(state.selectedProject)}/tasks?${params}`;
+      const page = await requestJson(path);
+      if (requestId !== state.taskRequest) return;
+      taskItems.push(...(Array.isArray(page.items) ? page.items : []));
+      state.taskCursor = page.next_cursor || null;
+      if (state.taskCursor && seen.has(state.taskCursor)) throw new Error('Task pagination stopped making progress.');
+      seen.add(state.taskCursor);
+      if (state.taskCursor) params.set('cursor', state.taskCursor);
+    } while (state.taskCursor);
+    taskItems = [...new Map(taskItems.map(task => [task.task_id || task.task_ref, { ...task, task_id: task.task_id || task.task_ref, project_id: task.project_id || state.selectedProject }])).values()];
+    renderVisibleTasks();
   } catch (error) {
     if (requestId !== state.taskRequest || !list) return;
     list.replaceChildren(statusRow(error.message || `${state.targetLabel || 'Worker'} task list is unavailable.`, true));
@@ -209,6 +423,8 @@ async function loadTasks({ append = false } = {}) {
 
 function clearTranscript() {
   state.transcriptRequest += 1;
+  state.nativePage = null;
+  byId('codex-history-more')?.remove();
   document.querySelectorAll('[data-external-agent-transcript="true"]').forEach(node => node.remove());
 }
 
@@ -234,7 +450,7 @@ function clearExternalAuthorityUI({ denyPending = false } = {}) {
   });
 }
 
-function addTranscriptMessage(role, text, taskId) {
+function addTranscriptMessage(role, text, taskId, metadata = {}) {
   const visibleRole = role === 'user' ? 'user' : 'assistant';
   const prefix = role === 'system' || role === 'tool' ? `[${role}] ` : '';
   const message = window.chatModule?.addMessage?.(visibleRole, `${prefix}${String(text || '')}`, '', {
@@ -242,9 +458,142 @@ function addTranscriptMessage(role, text, taskId) {
     worker: state.target,
     task_id: taskId,
     character_name: state.targetLabel || 'External worker',
+    _fromHistory: true,
+    ...metadata,
   });
   if (message) message.dataset.externalAgentTranscript = 'true';
   return message;
+}
+
+function saveNativeLocation() {
+  if (state.mode !== 'codex' || !state.selectedTask) return;
+  const url = new URL(window.location.href);
+  for (const [key, value] of Object.entries({ codex_project: state.selectedProject, codex_task: state.selectedTask.taskId,
+    codex_model: byId('codex-model')?.value, codex_effort: byId('codex-reasoning')?.value })) {
+    if (value) url.searchParams.set(key, value);
+    else url.searchParams.delete(key);
+  }
+  history.replaceState(null, '', url);
+}
+
+function clearNativeLocation() {
+  const url = new URL(window.location.href);
+  for (const key of ['codex_project', 'codex_task', 'codex_model', 'codex_effort']) url.searchParams.delete(key);
+  history.replaceState(null, '', url);
+}
+
+async function loadNativeTranscript({ earlier = false } = {}) {
+  const task = state.selectedTask;
+  if (state.mode !== 'codex' || !task) return;
+  if (!earlier) {
+    clearTranscript();
+    byId('chat-history').replaceChildren();
+    state.nativePage = { cursor: null, ids: new Set(), cursors: new Set(), loading: false };
+    byId('current-meta').textContent = task.title;
+  }
+  const paging = state.nativePage;
+  if (!paging || paging.loading || (earlier && !paging.cursor)) return;
+  paging.loading = true;
+  const generation = state.transcriptRequest;
+  const box = byId('chat-history');
+  const previousHeight = box.scrollHeight;
+  const previousTop = box.scrollTop;
+  const anchor = box.firstChild;
+  let more = byId('codex-history-more');
+  if (!more) {
+    more = document.createElement('button');
+    more.id = 'codex-history-more'; more.type = 'button'; more.className = 'codex-browser-more';
+    more.addEventListener('click', () => loadNativeTranscript({ earlier: Boolean(paging.cursor) }));
+    box.prepend(more);
+  }
+  more.disabled = true;
+  more.textContent = 'Loading conversation…';
+  window.chatModule?.hideWelcomeScreen?.();
+  try {
+    const params = new URLSearchParams({ limit: '5' });
+    if (earlier) params.set('cursor', paging.cursor);
+    const page = await requestJson(`/api/codex/projects/${encodeURIComponent(task.projectId)}/tasks/${encodeURIComponent(task.taskId)}/history?${params}`);
+    if (generation !== state.transcriptRequest) return;
+    if (page.task?.task_id !== task.taskId || page.task?.project_id !== task.projectId || !Array.isArray(page.items)) throw new Error('The bridge returned history for an unverified task.');
+    if (page.next_cursor && paging.cursors.has(page.next_cursor)) throw new Error('History pagination stopped making progress.');
+    const fragment = document.createDocumentFragment();
+    const work = new Map();
+    const turns = new Map((page.turns || []).map(turn => [turn.id, turn]));
+    for (const item of Array.isArray(page.items) ? page.items : []) {
+      if (!item.id || paging.ids.has(item.id)) continue;
+      paging.ids.add(item.id);
+      const node = addTranscriptMessage(item.role, item.text, task.taskId, {
+        timestamp: item.timestamp ? new Date(item.timestamp * 1000).toISOString() : undefined,
+      });
+      if (!node) continue;
+      node.dataset.nativeMessageId = item.id;
+      const imagePaths = new Set();
+      for (const image of item.images || []) {
+        imagePaths.add(image.path);
+        const attachment = document.createElement('p');
+        attachment.className = 'codex-history-attachment';
+        if (!image.unavailable && /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(image.data_url || '')) {
+          const preview = document.createElement('img');
+          preview.src = image.data_url; preview.alt = image.name || 'Attached image';
+          preview.loading = 'lazy'; preview.className = 'codex-history-image';
+          preview.addEventListener('error', () => { attachment.textContent = `${preview.alt} — image could not be decoded.`; });
+          const open = document.createElement('button');
+          open.type = 'button'; open.className = 'codex-history-preview';
+          open.setAttribute('aria-label', `Open ${preview.alt}`);
+          open.addEventListener('click', () => _openImageLightbox(image));
+          open.appendChild(preview); attachment.appendChild(open);
+        } else attachment.textContent = `${image.name || 'Image'} — image unavailable on the workstation or exceeds this page's image limit.`;
+        node.appendChild(attachment);
+      }
+      for (const path of item.attachments || []) {
+        if (imagePaths.has(path)) continue;
+        const attachment = document.createElement('p');
+        attachment.className = 'codex-history-attachment'; attachment.textContent = `Attached: ${path.split(/[\\/]/).pop()}`;
+        attachment.title = path;
+        node.appendChild(attachment);
+      }
+      const turnId = item.turn_id || item.id.split(':')[0];
+      if (item.role === 'assistant' && (item.turn_id || item.phase === 'commentary')) {
+        let group = work.get(turnId);
+        if (!group) {
+          const turn = turns.get(turnId) || {};
+          group = document.createElement('details');
+          group.className = 'native-work';
+          group.dataset.externalAgentTranscript = 'true';
+          const summary = document.createElement('summary');
+          const seconds = Math.max(0, Math.round((turn.duration_ms || item.duration_ms || 0) / 1000));
+          summary.textContent = turn.status === 'inProgress' ? 'Working…' : seconds ? `Worked for ${Math.floor(seconds / 60)}m ${seconds % 60}s` : 'Worked';
+          group.appendChild(summary);
+          for (const text of [...(turn.activity?.tools || []), ...(turn.activity?.outputs || []).map(path => `Edited ${path}`)]) {
+            const activity = document.createElement('p'); activity.textContent = text; group.appendChild(activity);
+          }
+          fragment.appendChild(group);
+          work.set(turnId, group);
+        }
+        if (item.phase === 'commentary') group.appendChild(node);
+        else { node.classList.add('native-final'); fragment.appendChild(node); }
+      } else fragment.appendChild(node);
+    }
+    if (earlier) box.insertBefore(fragment, anchor);
+    else box.appendChild(fragment);
+    paging.cursor = page.next_cursor || null;
+    if (paging.cursor) paging.cursors.add(paging.cursor);
+    more.textContent = paging.cursor ? 'Load earlier messages' : paging.ids.size ? 'Conversation loaded' : 'This task has no messages yet.';
+    more.hidden = !paging.cursor && paging.ids.size > 0;
+    box.prepend(more);
+    if (page.task) { state.selectedTask.title = page.task.title; byId('current-meta').textContent = page.task.title; setComposerHint(); }
+    document.dispatchEvent(new CustomEvent('odysseus:codex-history-loaded', { detail: { ...page, earlier } }));
+    if (earlier) box.scrollTop = previousTop + box.scrollHeight - previousHeight;
+    else window.uiModule?.scrollHistoryInstant?.();
+  } catch (error) {
+    if (generation !== state.transcriptRequest) return;
+    more.textContent = `${error.message || 'Conversation unavailable'} — Retry`;
+    more.hidden = false;
+    document.dispatchEvent(new CustomEvent('odysseus:codex-history-failed', { detail: { message: error.message || 'Conversation unavailable' } }));
+  } finally {
+    paging.loading = false;
+    more.disabled = false;
+  }
 }
 
 async function loadExternalTranscript(taskId) {
@@ -379,8 +728,13 @@ function setComposerHint() {
 }
 
 function clearSelection() {
+  state.taskRequest += 1;
+  if (state.nativePage) {
+    window.chatModule?.detachCurrentStream?.(currentSessionId());
+    byId('chat-history')?.replaceChildren();
+  }
+  clearTranscript();
   if (state.mode === 'external') {
-    clearTranscript();
     clearExternalAuthorityUI({ denyPending: true });
   }
   state.selectedTask = null;
@@ -395,6 +749,7 @@ function clearSelection() {
     byId('codex-project-view')?.appendChild(taskView);
   }
   resetComposerHint();
+  document.dispatchEvent(new CustomEvent('odysseus:workspace-context-changed'));
 }
 
 async function selectProject(projectId, displayName = '') {
@@ -405,6 +760,7 @@ async function selectProject(projectId, displayName = '') {
   clearSelection();
   state.selectedProject = projectId;
   state.selectedProjectName = displayName || projectId;
+  document.dispatchEvent(new CustomEvent('odysseus:workspace-context-changed'));
   const group = [...document.querySelectorAll('.codex-project-group')]
     .find(item => item.dataset.projectId === String(projectId));
   const taskView = byId('codex-task-view');
@@ -415,11 +771,16 @@ async function selectProject(projectId, displayName = '') {
   await Promise.all([loadTasks(), restoreCanonicalTask(currentSessionId())]);
 }
 
-function selectTask(button) {
+async function selectTask(button, { restore = false } = {}) {
+  if (state.selectedProject !== button.dataset.projectId) {
+    await selectProject(button.dataset.projectId, projects.find(project => project.project_id === button.dataset.projectId)?.display_name);
+  }
+  if (state.selectedProject !== button.dataset.projectId) return;
+  if (state.mode === 'codex' && !restore) window.sessionModule?.createBlankChat?.({ preserveWorkspace: true });
   state.selectedTask = {
     taskId: button.dataset.taskId,
     projectId: button.dataset.projectId,
-    title: button.dataset.taskTitle || 'Codex task',
+    title: button.dataset.taskTitle || 'Agent task',
     status: button.dataset.taskStatus || 'unknown',
   };
   document.querySelectorAll('.codex-task-row.is-selected').forEach(row => row.classList.remove('is-selected'));
@@ -427,13 +788,20 @@ function selectTask(button) {
   setComposerHint();
   byId('message')?.focus();
   if (state.mode === 'external') loadExternalTranscript(state.selectedTask.taskId);
-  else document.dispatchEvent(new CustomEvent('odysseus:codex-task-selected', { detail: state.selectedTask }));
+  else {
+    if (!restore) saveNativeLocation();
+    document.dispatchEvent(new CustomEvent('odysseus:codex-task-selected', { detail: state.selectedTask }));
+    loadNativeTranscript();
+  }
 }
 
 function open(detail = {}) {
   const browser = byId('codex-workspace-browser');
   if (!browser) return;
+  state.projectRequest += 1;
+  byId('codex-pinned-view').hidden = true;
   state.mode = detail.external === true ? 'external' : 'codex';
+  state.available = detail.available !== false;
   state.target = String(detail.target || (state.mode === 'codex' ? 'pc-codex' : ''));
   state.targetLabel = String(detail.label || state.target || 'Worker').slice(0, 80);
   state.governedTaskActions = detail.governedTaskActions === true;
@@ -452,23 +820,31 @@ function open(detail = {}) {
   if (bulkBar && !bulkBar.classList.contains('hidden')) byId('session-bulk-cancel')?.click();
   bulkBar?.classList.add('hidden');
   browser.hidden = false;
+  if (byId('codex-model-controls')) byId('codex-model-controls').hidden = state.mode !== 'codex';
+  if (state.mode === 'codex') loadModels();
+  else modelRequest += 1;
   clearSelection();
   if (byId('codex-browser-title')) byId('codex-browser-title').textContent = state.mode === 'external'
     ? state.targetLabel
     : 'Projects';
   const list = byId('codex-project-list');
   if (detail.available === false) {
-    list?.replaceChildren(statusRow(detail.reason || 'Friday is not currently available.', true));
+    list?.replaceChildren(statusRow(detail.reason || `${state.targetLabel} is not currently available.`, true));
     if (byId('codex-project-more')) byId('codex-project-more').hidden = true;
     return;
   }
-  if (state.mode === 'external') renderExternalWorkspaces();
-  else loadProjects();
+  if (state.mode === 'external') {
+    const generation = state.projectRequest;
+    layoutReady.then(() => { if (generation === state.projectRequest) renderExternalWorkspaces(); });
+  } else loadProjects();
 }
 
 function close() {
+  state.projectRequest += 1;
+  modelRequest += 1;
   clearTranscript();
   if (byId('codex-workspace-browser')) byId('codex-workspace-browser').hidden = true;
+  if (byId('codex-model-controls')) byId('codex-model-controls').hidden = true;
   if (byId('session-list')) byId('session-list').hidden = false;
   if (byId('chats-section-label')) byId('chats-section-label').textContent = 'Chats';
   if (byId('chats-library-btn')) byId('chats-library-btn').hidden = false;
@@ -486,6 +862,10 @@ function close() {
 }
 
 function syncTarget(detail = {}) {
+  // Catalog refreshes repeat the selected identity; keep its current task.
+  if (state.mode === 'codex' && state.target === detail.target && state.available && detail.available !== false
+      && !byId('codex-workspace-browser')?.hidden) return;
+  if (detail.target !== 'pc-codex') clearNativeLocation();
   if (detail.target === 'pc-codex' || detail.external === true) open(detail);
   else close();
 }
@@ -494,7 +874,11 @@ function getSelectedContext() {
   if (!state.selectedProject) return null;
   return {
     workspace: state.selectedProject,
+    projectName: state.selectedProjectName,
+    title: state.selectedTask?.title || '',
     codexThreadId: state.selectedTask?.taskId || null,
+    codexModel: state.mode === 'codex' ? byId('codex-model')?.value || null : null,
+    codexReasoningEffort: state.mode === 'codex' ? byId('codex-reasoning')?.value || null : null,
   };
 }
 
@@ -756,11 +1140,23 @@ async function handleExternalAuthorityDecision({ decisionId, choice, scope }) {
 function bind() {
   if (document.documentElement.dataset.codexWorkspaceBound === '1') return;
   document.documentElement.dataset.codexWorkspaceBound = '1';
+  byId('codex-model')?.addEventListener('change', () => { renderReasoningOptions(); saveNativeLocation(); });
+  byId('codex-reasoning')?.addEventListener('change', saveNativeLocation);
+  window.addEventListener('odysseus:session-cleared', event => {
+    if (event.detail?.preserveWorkspace) return;
+    clearNativeLocation();
+    clearSelection();
+  });
+  window.addEventListener('odysseus:session-navigating', () => { clearNativeLocation(); clearSelection(); });
   byId('codex-project-list')?.addEventListener('click', event => {
     const button = event.target.closest('.codex-project-row[data-project-id]');
-    if (button && !button.disabled) selectProject(button.dataset.projectId, button.dataset.projectName);
+    if (button && !button.disabled) { clearNativeLocation(); selectProject(button.dataset.projectId, button.dataset.projectName); }
   });
   byId('codex-task-list')?.addEventListener('click', event => {
+    const button = event.target.closest('.codex-task-row[data-task-id]');
+    if (button) selectTask(button);
+  });
+  byId('codex-pinned-list')?.addEventListener('click', event => {
     const button = event.target.closest('.codex-task-row[data-task-id]');
     if (button) selectTask(button);
   });
@@ -771,6 +1167,10 @@ function bind() {
     const sessionId = String(event.detail?.sessionId || '');
     if (!sessionId || sessionId === state.renderedSessionId) return;
     state.renderedSessionId = sessionId;
+    if (state.mode === 'codex' && state.selectedTask && new URLSearchParams(window.location.search).get('codex_task') === state.selectedTask.taskId) {
+      loadNativeTranscript();
+      return;
+    }
     clearTranscript();
     clearExternalAuthorityUI({ denyPending: true });
     restoreCanonicalTask(sessionId);

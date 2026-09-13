@@ -596,7 +596,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "update_plan",
-            "description": "Write back to the ACTIVE PLAN: mark steps done or revise them. Use this while executing an approved plan — after you finish a step, call update_plan with the full checklist and that step marked `- [x]`; when the user asks to change the plan, call it with the revised checklist. The user's docked plan window updates live. Pass the COMPLETE checklist every time (not a diff). No effect if there is no active plan.",
+            "description": "Publish your working plan for a multi-step task so the user can follow along. Use this for any task with three or more steps: call it once you know the steps, then again after finishing each step (mark it `- [x]`) and whenever the user asks to change the plan. Always pass the COMPLETE GitHub-style markdown checklist — one step per line, `- [ ]` pending and `- [x]` done — not a diff. The user sees a live todo panel above the composer that updates with each call.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -878,14 +878,35 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_settings",
-            "description": "Manage user preferences and settings. Use `disable_tool`/`enable_tool`/`list_tools` to turn individual tools on or off globally (e.g. shell, search, browser, documents, memory, skills, images, tasks, notes, calendar, email). Use list/get/set/delete for free-form preferences.",
+            "description": "Manage user preferences and settings. Use `disable_tool`/`enable_tool`/`list_tools` to turn individual tools on or off globally (e.g. shell, search, browser, documents, memory, skills, images, tasks, notes, calendar, email). Use `list_tools` to page, filter, and count the full built-in catalog (offset/limit, optional category/search), and `load_tools` to mount any enabled catalog entry for the rest of this request (the exact usage comes back in the result). Use list/get/set/delete for free-form preferences.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "get", "set", "delete", "disable_tool", "enable_tool", "list_tools"]},
+                    "action": {"type": "string", "enum": ["list", "get", "set", "delete", "disable_tool", "enable_tool", "list_tools", "load_tools", "mount_tools"]},
                     "key": {"type": "string", "description": "Setting key (for get/set/delete)"},
                     "value": {"description": "Setting value (for set) — can be string, number, boolean, or object"},
-                    "tool": {"type": "string", "description": "Tool name to disable/enable (for disable_tool/enable_tool). Accepts aliases: shell, search, browser, documents, memory, skills, images, tasks, notes, calendar, email — or a raw tool name like 'bash' or 'web_search'."}
+                    "offset": {"type": "integer", "minimum": 0, "description": "Catalog page start for list_tools (default 0). Follow next_offset until null."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "Catalog page size for list_tools (default 20, max 50)."},
+                    "category": {"type": "string", "description": "Optional list_tools filter: Code, Search, Documents, Media, Knowledge, Multi-Agent, Sessions, System, Other."},
+                    "search": {"type": "string", "description": "Optional list_tools filter matched against tool id and description."},
+                    "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool ids to mount for load_tools, e.g. ['grep', 'generate_image']."},
+                    "tool": {"type": "string", "description": "Tool name to disable/enable (for disable_tool/enable_tool) or to mount (for load_tools). Accepts aliases for toggles: shell, search, browser, documents, memory, skills, images, tasks, notes, calendar, email — or a raw tool name like 'bash', 'web_search', or 'manage_research'."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_extensions",
+            "description": "Inspect installed plugins/extensions and their capabilities without activating them, then mount exactly the tools this request needs. Use `list` to see installed extensions (works while disabled), `inspect` with an extension_id for capability names/kinds/permission modes, and `mount` with names to load those extension tools through the existing governed executor for the rest of this request (the exact schemas come back in the result). Disabled extensions are inspectable but not mountable.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "inspect", "mount"]},
+                    "extension_id": {"type": "string", "description": "Extension id for inspect (e.g. 'oracle')."},
+                    "names": {"type": "array", "items": {"type": "string"}, "description": "Capability names to mount for the rest of this request (from inspect)."}
                 },
                 "required": ["action"]
             }
@@ -1342,8 +1363,21 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_runtime_status",
-            "description": "Return the running Pandamonium application version and server-verified runtime facts including the actual brain model, architecture, quantization, context allocation, reported cache evidence, TTS provider, and worker availability. Use this whenever the operator asks what version, model, or runtime is active.",
-            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            "description": "Return the running Pandamonium application version, server-verified runtime facts (brain model, architecture, quantization, context allocation, cache evidence, TTS provider, workers), and this installation's release state. Use this for any version, release, update, or release-notes question. The release block names the canonical repository, reports the signed release channel and persisted updater status, and includes the curated release notes for the installed or requested version.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "release": {
+                        "type": "boolean",
+                        "description": "Include local release state and curated release notes (default true).",
+                    },
+                    "release_notes_version": {
+                        "type": "string",
+                        "description": "Exact release version whose curated notes to read, e.g. '1.0.47'. Defaults to the installed version.",
+                    },
+                },
+                "additionalProperties": False,
+            },
         },
     },
     {
@@ -1384,7 +1418,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "search_jarvis_knowledge",
-            "description": "Search the curated Jarvis business knowledge corpus. Use this for background context; requests for current or latest status should also delegate a read-only PC Codex inspection.",
+            "description": "Search the internal Jarvis knowledge index for background context. This does not query an external database or a user-named collection. For a requested external source, use the configured MCP discovery and read tools and cite their actual returned records.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1393,6 +1427,41 @@ FUNCTION_TOOL_SCHEMAS = [
                     "limit": {"type": "integer", "minimum": 1, "maximum": 12, "default": 6},
                 },
                 "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": "Generate an AI image from a text prompt. The saved image is attached to the conversation. Optionally choose the model, size, and quality.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "What to draw."},
+                    "model": {"type": "string", "description": "Optional image model id."},
+                    "size": {"type": "string", "description": "Optional size, e.g. 1024x1024."},
+                    "quality": {"type": "string", "description": "Optional quality (standard|high)."},
+                },
+                "required": ["prompt"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_research",
+            "description": "List, read/open, or delete saved deep-research reports from the Library. To START new research use trigger_research.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "read", "delete"]},
+                    "id": {"type": "string", "description": "Research report id (for read/delete)."},
+                    "search": {"type": "string", "description": "Optional filter for list."},
+                },
+                "required": ["action"],
                 "additionalProperties": False,
             },
         },
@@ -1695,7 +1764,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = action
     elif tool_type in ("manage_tasks", "manage_skills", "api_call",
                         "manage_endpoints", "manage_mcp", "manage_webhooks",
-                        "manage_tokens", "manage_documents", "manage_settings"):
+                        "manage_tokens", "manage_documents", "manage_settings",
+                        "manage_extensions"):
         content = json.dumps(args)
     elif tool_type == "ask_teacher":
         content = args.get("model", "auto") + "\n" + args.get("problem", "")

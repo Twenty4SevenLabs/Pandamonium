@@ -3,8 +3,11 @@
 // ES6 module — entry point, no exports (wires all modules together)
 // ============================================
 import Storage from './js/storage.js';
+import { initComposerLinks } from './js/composerLinks.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
+import projectsModule from './js/projects.js';
+import accessModeModule from './js/accessMode.js';
 import fileHandlerModule from './js/fileHandler.js';
 import modelsModule from './js/models.js?v=20260711-model-cleanup2';
 import ragModule from './js/rag.js';
@@ -52,6 +55,10 @@ import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
 import marketplaceModule from './js/marketplace.js';
 import updaterModule from './js/updater.js';
+import agentPlanModule from './js/agentPlan.js';
+import setupWizardModule from './js/setupWizard.js';
+
+initComposerLinks();
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -59,6 +66,7 @@ window.sessionModule = sessionModule;
 window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
+window.agentPlanModule = agentPlanModule;
 loadBrand();
 
 registerForegroundAction(FOREGROUND_ACTIONS.OPEN_CALENDAR, () => {
@@ -282,148 +290,19 @@ async function _syncWelcomeModelHint() {
   if (hasModel) {
     if (sub && !sub.dataset.researchOrigText) sub.textContent = 'New chat ready.';
     if (tip) tip.textContent = 'Pick a model if you want, or just type.';
-  } else {
-    if (sub && !sub.dataset.researchOrigText) {
-      sub.innerHTML = 'Welcome, <span class="setup-trigger-link" style="color:var(--accent,var(--red));font-weight:600;cursor:pointer;text-decoration:underline;" title="Click to launch setup">type /setup</span> to get started.';
-    }
-    if (tip) tip.textContent = 'Add an AI endpoint from Settings in the sidebar, or paste an endpoint/API key into the chat.';
-  }
-}
-
-const FIRST_RUN_DISMISS_KEY = 'pandamonium-first-run-dismissed';
-
-async function _gallerySetupStatus() {
-  try {
-    const response = await fetch(`${API_BASE}/api/gallery/discovery`, { credentials: 'same-origin' });
-    if (!response.ok) return null;
-    return await response.json();
-  } catch (_) {
-    return null;
-  }
-}
-
-async function _renderFirstRunGuide(identityStatus, options = {}) {
-  const guide = document.getElementById(options.targetId || 'welcome-setup');
-  if (!guide || !window._isAdmin) return;
-  const identityConfigured = identityStatus?.source === 'configured';
-  const hasModel = await _hasUsableChatModel();
-  let dismissed = false;
-  try { dismissed = sessionStorage.getItem(FIRST_RUN_DISMISS_KEY) === '1'; } catch (_) {}
-  if (!options.force && ((identityConfigured && hasModel) || dismissed)) {
-    guide.style.display = 'none';
-    guide.className = '';
-    guide.replaceChildren();
     return;
   }
-  const galleryDiscovery = await _gallerySetupStatus();
-  const connectedGalleries = Number(galleryDiscovery?.connected || 0);
-  const availableGallery = (galleryDiscovery?.sources || [])
-    .find(source => source.state === 'available');
-
-  guide.className = 'first-run-guide';
-  guide.style.display = 'grid';
-  guide.replaceChildren();
-
-  const copy = document.createElement('div');
-  copy.className = 'first-run-guide-copy';
-  const copyText = document.createElement('div');
-  const title = document.createElement('strong');
-  title.textContent = 'Make Pandamonium yours';
-  const detail = document.createElement('span');
-  detail.textContent = 'Name the persistent agent, connect a replaceable model engine, then add the services you want it to use.';
-  copyText.append(title, detail);
-  const dismiss = document.createElement('button');
-  dismiss.type = 'button';
-  dismiss.className = 'first-run-dismiss';
-  dismiss.textContent = options.dismissLabel || (options.force ? 'Skip for now' : 'Explore first');
-  dismiss.addEventListener('click', () => {
-    try { sessionStorage.setItem(FIRST_RUN_DISMISS_KEY, '1'); } catch (_) {}
-    guide.style.display = 'none';
-    options.onDismiss?.();
-  });
-  copy.append(copyText, dismiss);
-
-  const steps = document.createElement('div');
-  steps.className = 'first-run-steps';
-  const definitions = [
-    {
-      label: 'Agent identity',
-      state: identityConfigured ? `Ready: ${identityStatus.display_name || 'configured'}` : 'Required: using public default',
-      done: identityConfigured,
-      tab: 'ai',
-      target: 'set-agentIdentityCard',
-    },
-    {
-      label: 'Model engine',
-      state: hasModel ? 'Ready: model available' : 'Required: connect a model',
-      done: hasModel,
-      tab: 'services',
-    },
-    {
-      label: 'Connect your gallery',
-      state: connectedGalleries
-        ? `Ready: ${connectedGalleries} source${connectedGalleries === 1 ? '' : 's'} connected`
-        : availableGallery
-          ? `Found: ${availableGallery.label} on ${availableGallery.device}`
-          : 'Optional: scan this device and tailnet',
-      done: connectedGalleries > 0,
-      action: () => galleryModule.openGallerySettings(),
-    },
-    {
-      label: 'Integrations',
-      state: 'Optional: connect services and plugins',
-      done: false,
-      tab: 'integrations',
-    },
-  ];
-  definitions.forEach((definition, index) => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = `first-run-step${definition.done ? ' done' : ''}`;
-    const indexEl = document.createElement('span');
-    indexEl.className = 'first-run-step-index';
-    indexEl.textContent = definition.done ? '✓' : String(index + 1);
-    const label = document.createElement('span');
-    label.className = 'first-run-step-label';
-    label.textContent = definition.label;
-    const state = document.createElement('span');
-    state.className = 'first-run-step-state';
-    state.textContent = definition.state;
-    button.append(indexEl, label, state);
-    button.addEventListener('click', () => {
-      options.onNavigate?.();
-      if (definition.action) definition.action();
-      else settingsModule.open(definition.tab);
-      if (definition.target) {
-        setTimeout(() => document.getElementById(definition.target)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80);
-      }
-    });
-    steps.append(button);
-  });
-
-  const actions = document.createElement('div');
-  actions.className = 'first-run-actions';
-  const launchCommand = options.onCommand || ((command) => {
-    const messageInput = document.getElementById('message');
-    const chatForm = document.getElementById('chat-form');
-    if (!messageInput || !chatForm) return;
-    messageInput.value = command;
-    messageInput.dispatchEvent(new Event('input', { bubbles: true }));
-    chatForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-  });
-  const continueSetup = document.createElement('button');
-  continueSetup.type = 'button';
-  continueSetup.className = 'first-run-action';
-  continueSetup.textContent = 'Continue setup';
-  continueSetup.addEventListener('click', () => launchCommand('/setup'));
-  const restartTour = document.createElement('button');
-  restartTour.type = 'button';
-  restartTour.className = 'first-run-action first-run-action-primary';
-  restartTour.textContent = 'Restart product tour';
-  restartTour.addEventListener('click', () => launchCommand('/tour'));
-  actions.append(continueSetup, restartTour);
-
-  guide.append(copy, steps, actions);
+  if (window._isAdmin === false) {
+    if (sub && !sub.dataset.researchOrigText) sub.textContent = 'Setup is managed by your administrator.';
+    if (tip) tip.textContent = 'Your administrator still needs to connect a model engine.';
+    return;
+  }
+  if (sub && !sub.dataset.researchOrigText) {
+    sub.innerHTML = 'Welcome, <span class="setup-wizard-link" style="color:var(--accent,var(--red));font-weight:600;cursor:pointer;text-decoration:underline;" title="Open the setup guide">open the setup guide</span> to get started.';
+  }
+  if (tip) tip.textContent = 'The guide names your assistant and connects a model engine — no settings digging.';
+  const trigger = sub?.querySelector('.setup-wizard-link');
+  trigger?.addEventListener('click', () => setupWizardModule.open());
 }
 
 async function initPluginSidebar() {
@@ -1518,23 +1397,24 @@ function initializeEventListeners() {
     }, 260);
   };
 
+  setupWizardModule.init(API_BASE, {
+    openSettings: (tab) => settingsModule.open(tab),
+    openMarketplace: () => { try { marketplaceModule.open(); } catch (_) {} },
+    openGallery: () => { try { galleryModule.openGallerySettings(); } catch (_) {} },
+    runChatCommand: (command) => runGuideCommand(command),
+  });
+  window.addEventListener('pandamonium-setup-wizard-closed', () => {
+    if (guideFocusTimer) clearTimeout(guideFocusTimer);
+    guideFocusTimer = setTimeout(() => userBarGuide?.focus(), 260);
+  });
+
   if (userBarSettings) {
     userBarSettings.addEventListener('click', () => settingsModule.open());
   }
   if (userBarGuide) {
-    userBarGuide.addEventListener('click', async () => {
+    userBarGuide.addEventListener('click', () => {
       if (guideFocusTimer) clearTimeout(guideFocusTimer);
-      if (guideModal) guideModal._dismissRun = null;
-      guideModal?.classList.remove('hidden');
-      await _renderFirstRunGuide(window._agentIdentityStatus || {}, {
-        targetId: 'guide-panel',
-        force: true,
-        dismissLabel: 'Skip for now',
-        onDismiss: () => closeGuideModal(),
-        onNavigate: () => closeGuideModal(false),
-        onCommand: runGuideCommand,
-      });
-      guideModal?.querySelector('.first-run-step, .first-run-action, .first-run-dismiss')?.focus();
+      setupWizardModule.open();
     });
   }
   el('close-guide-modal')?.addEventListener('click', () => closeGuideModal());
@@ -1553,8 +1433,9 @@ function initializeEventListeners() {
     .then(d => {
       window._isAdmin = !!d.is_admin;
       window._agentIdentityStatus = d.agent_identity || null;
-      if (d.is_admin) _renderFirstRunGuide(window._agentIdentityStatus);
-      if (d.is_admin && userBarGuide) userBarGuide.hidden = false;
+      if (userBarGuide) userBarGuide.hidden = false;
+      setupWizardModule.maybeAutoOpen(d);
+      _syncWelcomeModelHint().catch(() => {});
       if (d.is_admin && userBarAdmin) userBarAdmin.style.display = '';
       const userBarName = el('user-bar-name');
       const userBarAvatar = el('user-bar-avatar');
@@ -1606,11 +1487,12 @@ function initializeEventListeners() {
 
   window.addEventListener('pandamonium-identity-updated', (event) => {
     window._agentIdentityStatus = event.detail || window._agentIdentityStatus;
-    try { sessionStorage.removeItem(FIRST_RUN_DISMISS_KEY); } catch (_) {}
-    _renderFirstRunGuide(window._agentIdentityStatus);
+    setupWizardModule.refreshStatus();
+    _syncWelcomeModelHint().catch(() => {});
   });
   window.addEventListener('ge:model-endpoints-updated', () => {
-    _renderFirstRunGuide(window._agentIdentityStatus);
+    setupWizardModule.refreshStatus();
+    _syncWelcomeModelHint().catch(() => {});
   });
 
   // Session sort dropdown
@@ -2081,6 +1963,9 @@ function initializeEventListeners() {
   setupToggle('web-toggle-btn', 'web-toggle', 'web');
   setupToggle('bash-toggle-btn', 'bash-toggle', 'bash');
   try { workspaceModule.initWorkspace(); } catch (_) {}
+  try { projectsModule.initProjects(); } catch (_) {}
+  try { agentPlanModule.initAgentPlan(); } catch (_) {}
+  try { accessModeModule.initAccessMode(); } catch (_) {}
 
   // Document editor toggle (special: uses module panel, not a checkbox)
   function bringOpenDocumentToFrontOnMobile() {
@@ -3535,8 +3420,8 @@ function initializeEventListeners() {
     });
     textarea.addEventListener('input', (e) => {
       const currentValue = textarea.value || '';
-      const insertedLineBreak = _isLineBreakInputEvent(e)
-        || _countLineBreaks(currentValue) > _countLineBreaks(previousTextareaValue);
+      const insertedLineBreak = e.inputType !== 'insertFromPaste' && (_isLineBreakInputEvent(e)
+        || _countLineBreaks(currentValue) > _countLineBreaks(previousTextareaValue));
       if (insertedLineBreak && _shouldQueueFromMobileLineBreak(textarea)) {
         textarea.value = currentValue.replace(/\n+$/g, '');
         previousTextareaValue = textarea.value || '';
@@ -4236,7 +4121,12 @@ function startPandamoniumApp() {
 
   // Auto-focus input on load
   if (messageInput) {
-    setTimeout(() => messageInput.focus(), 100);
+    setTimeout(() => {
+      const active = document.activeElement;
+      if (!active || active === document.body || active === document.documentElement) {
+        messageInput.focus();
+      }
+    }, 100);
   }
 
   // Add drag and drop handlers for the chat container

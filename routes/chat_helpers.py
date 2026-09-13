@@ -360,6 +360,7 @@ async def preprocess(
     chat_handler, message, att_ids, sess,
     auto_opened_docs: Optional[list] = None,
     allow_tool_preprocessing: bool = True,
+    native_agent_images: bool = False,
 ) -> PreprocessedMessage:
     """Run chat_handler.preprocess_message and wrap the result."""
     enhanced, user_content, text_ctx, yt_transcripts, att_meta = (
@@ -369,6 +370,7 @@ async def preprocess(
             sess,
             auto_opened_docs=auto_opened_docs,
             allow_tool_preprocessing=allow_tool_preprocessing,
+            **({"native_agent_images": True} if native_agent_images else {}),
         )
     )
     return PreprocessedMessage(
@@ -653,6 +655,7 @@ async def build_chat_context(
     agent_mode: bool = False,
     allow_tool_preprocessing: bool = True,
     persist_user: bool = True,
+    native_agent_images: bool = False,
 ) -> ChatContext:
     """Build the full context (preface + messages) for an LLM call.
 
@@ -671,6 +674,7 @@ async def build_chat_context(
         chat_handler, message, att_ids or [], sess,
         auto_opened_docs=auto_opened_docs,
         allow_tool_preprocessing=allow_tool_preprocessing,
+        native_agent_images=native_agent_images,
     )
 
     # Approval-card continuations are control-plane events, not new user chat.
@@ -734,13 +738,24 @@ async def build_chat_context(
     # The stream path uses enhanced_message (with CoT/preprocessing applied),
     # the sync path uses text_for_context.
     _ctx_msg = preprocessed.enhanced_message if use_enhanced_message else preprocessed.text_for_context
+    from src.action_intents import classify_tool_intent
+
+    _chat_intent = classify_tool_intent(_ctx_msg)
+    _chat_domains = (
+        [_chat_intent.category] if _chat_intent.needs_tools and _chat_intent.category else []
+    )
     _preface_kwargs = dict(
         message=_ctx_msg,
         session=sess,
         use_web=use_web and not skip_web,
         use_memory=mem_enabled,
         time_filter=time_filter,
-        preset_system_prompt=agent_system_prompt(preset.system_prompt, model=sess.model),
+        preset_system_prompt=agent_system_prompt(
+            preset.system_prompt,
+            model=sess.model,
+            trace_surface="chat",
+            protocol_domains=_chat_domains,
+        ),
         owner=user,
         character_name=preset.character_name,
         agent_mode=agent_mode,

@@ -63,6 +63,22 @@ def _catalog_for_worker(worker: str) -> tuple[dict[str, Any], dict[str, dict[str
     return registry, worker_catalog(registry)
 
 
+def _codex_bridge_worker(worker: str) -> bool:
+    """Return true when a worker resolves to a Codex bridge adapter.
+
+    The fixed pc-codex/vps-codex slots are Codex bridges by contract; node-agent
+    endpoints registered as data are recognized by their adapter, so their
+    conversation binding and execution policy stay identical.
+    """
+    if worker in {"pc-codex", "vps-codex"}:
+        return True
+    try:
+        adapter = adapters().get(worker)
+    except Exception:
+        adapter = None
+    return getattr(adapter, "adapter_name", "") == "codex-bridge"
+
+
 def configure(session_manager) -> None:
     global _SESSION_MANAGER
     _SESSION_MANAGER = session_manager
@@ -243,7 +259,7 @@ def task_events(task_id: str, after: int = -1) -> list[dict]:
 def _binding_key(owner: str, session_id: str, worker: str, workspace: str) -> str:
     # A Codex conversation maps to exactly one task/thread across project-browser,
     # text, voice, and reconnect callers. Other worker types retain workspace scope.
-    scope = "conversation" if worker in {"pc-codex", "vps-codex"} else workspace
+    scope = "conversation" if _codex_bridge_worker(worker) else workspace
     return f"v2:{owner}:{session_id}:{worker}:{scope}"
 
 
@@ -780,6 +796,7 @@ async def direct_hermes_turn(
     *,
     owner: str | None,
     workspace: str = "home-lab",
+    images: list[dict] | None = None,
 ) -> str:
     """Talk to Gordon directly without creating a Jarvis broker task."""
     identity = str(owner or "").strip()
@@ -800,6 +817,7 @@ async def direct_hermes_turn(
         session_id=f"odysseus-gordon-{scope}",
         session_key=f"odysseus:gordon:{scope}",
         message=prompt,
+        **({"images": images} if images else {}),
     )
 
 
@@ -810,41 +828,68 @@ async def direct_codex_turn(
     owner: str,
     workspace: str,
     presenter: str,
+    worker: str = "pc-codex",
     codex_thread_id: str | None = None,
+    codex_model: str | None = None,
+    codex_reasoning_effort: str | None = None,
+    explicit_workspace: bool = False,
+    images: list[dict] | None = None,
 ) -> tuple[dict, str]:
-    """Start or steer the one Codex task bound to this conversation."""
-    active = find_active_task(session_id, "pc-codex", None, owner)
+    """Start or steer the one Codex task bound to this conversation.
+
+    ``worker`` defaults to the fixed pc-codex slot; registered node-agent
+    endpoints pass their own worker id so the same conversation semantics and
+    authority path apply to data-registered Codex bridges (MAD-934).
+    """
+    active = find_active_task(session_id, worker, None, owner)
     if active:
+        _check_active_codex_selection(active, codex_model, codex_reasoning_effort)
+        if explicit_workspace and workspace != active.get("workspace"):
+            raise RuntimeError("conversation_project_mismatch")
         if codex_thread_id and active.get("codex_thread_id") not in {None, codex_thread_id}:
             raise RuntimeError("conversation_task_conflict")
         _bind_task_presenter(active, presenter)
         return await task_action(
             active["task_id"],
             "steer",
-            {"prompt": prompt},
+            {"prompt": prompt, **({"images": images} if images else {})},
             persist_user_message=False,
             owner=owner,
         ), "steered"
-    binding = get_worker_binding(owner, session_id, "pc-codex", workspace)
-    workspace = str(binding.get("workspace") or workspace)
+    binding = get_worker_binding(owner, session_id, worker, workspace)
+    if not explicit_workspace and not codex_thread_id:
+        workspace = str(binding.get("workspace") or workspace)
     task = await start_task(
-        "pc-codex",
+        worker,
         session_id,
         workspace,
         prompt,
         owner=owner,
-        codex_thread_id=codex_thread_id or binding.get("codex_thread_id"),
+        codex_thread_id=codex_thread_id or (
+            binding.get("codex_thread_id") if binding.get("workspace") == workspace else None
+        ),
+        codex_model=codex_model,
+        codex_reasoning_effort=codex_reasoning_effort,
         presenter=presenter,
+        images=images,
+        preserve_native_config=True,
     )
     if task.get("reused"):
         return await task_action(
             task["task_id"],
             "steer",
-            {"prompt": prompt},
+            {"prompt": prompt, **({"images": images} if images else {})},
             persist_user_message=False,
             owner=owner,
         ), "steered"
     return task, "blocked" if task.get("status") == "blocked" else "started"
+
+
+def _check_active_codex_selection(task: dict, model: str | None, effort: str | None) -> None:
+    if (model and model != task.get("codex_model")) or (
+        effort and effort != task.get("codex_reasoning_effort")
+    ):
+        raise RuntimeError("Wait for the current Codex task to finish before changing its model or reasoning.")
 
 
 async def start_task(
@@ -866,12 +911,16 @@ async def start_task(
     external_connection_version: str | None = None,
     presenter: str | None = None,
     persist_result: bool = True,
+    codex_model: str | None = None,
+    codex_reasoning_effort: str | None = None,
+    images: list[dict] | None = None,
+    preserve_native_config: bool = False,
 ) -> dict:
     owner = str(owner or "").strip()
     if not owner:
         raise PermissionError("owner_required")
     require_session_owner(session_id, owner)
-    if worker in {"pc-codex", "vps-codex"} and not worker_task_execution_enabled():
+    if _codex_bridge_worker(worker) and not worker_task_execution_enabled():
         raise RuntimeError("codex_task_execution_disabled")
     registry, catalog = _catalog_for_worker(worker)
     if worker not in catalog:
@@ -904,6 +953,7 @@ async def start_task(
     async with _start_lock(owner, session_id, worker):
         active = find_active_task(session_id, worker, None, owner)
         if active:
+            _check_active_codex_selection(active, codex_model, codex_reasoning_effort)
             incompatible = (
                 active.get("workspace") != workspace
                 or (
@@ -919,7 +969,7 @@ async def start_task(
         binding = get_worker_binding(owner, session_id, worker, workspace)
         bound_workspace = str(binding.get("workspace") or "")
         if (
-            worker in {"pc-codex", "vps-codex"}
+            _codex_bridge_worker(worker)
             and binding.get("codex_thread_id")
             and bound_workspace
             and bound_workspace != workspace
@@ -938,6 +988,9 @@ async def start_task(
             "permission_mode": permission_mode,
             "approved": approved,
             "codex_thread_id": codex_thread_id,
+            "codex_model": codex_model,
+            "codex_reasoning_effort": codex_reasoning_effort,
+            "preserve_native_config": preserve_native_config,
             "thread_title": " ".join(str(thread_title or "").split())[:200] or None,
             "read_all_requested": asks_read_all(prompt),
             "request_id": str(request_id or "").strip()[:200] or None,
@@ -966,7 +1019,7 @@ async def start_task(
             codex_thread_id=codex_thread_id,
         )
         try:
-            remote = await adapter.start(task)
+            remote = await adapter.start({**task, **({"images": images} if images else {})})
         except Exception as exc:
             _append_event(task["task_id"], {
                 "type": "error",
@@ -1319,7 +1372,7 @@ def search_knowledge(query: str, owner: str | None = None, client: str | None = 
             "mtime": meta.get("mtime"),
             "score": row.get("similarity"),
         })
-    return {"query": query, "client": client, "results": results}
+    return {"query": query, "client": client, "source": {"kind": "internal_knowledge_index", "backend": "rag_fallback"}, "results": results}
 
 
 def self_check() -> None:

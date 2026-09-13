@@ -12,6 +12,7 @@ from core.models import ChatMessage
 from src.action_protocol import compose_capability_catalog, normalize_action_call, validate_action_call
 from src.agent_identity import configured_agent_id
 from src.auth_helpers import require_user
+from src.tool_security import owner_is_admin_or_single_user
 from src.agent_worker_adapters import WORKER_IDS, WorkerUnavailable, adapters, require_worker_task_permission
 from src.external_agent_bridge import ExternalAgentBridgeError
 from src.authority_protocol import authority_store, operator_identity
@@ -47,6 +48,8 @@ class TaskCreate(BaseModel):
     codex_thread_id: str | None = None
     thread_title: str | None = Field(default=None, max_length=200)
     request_id: str | None = Field(default=None, max_length=200)
+    codex_model: str | None = Field(default=None, max_length=128)
+    codex_reasoning_effort: str | None = Field(default=None, max_length=32)
 
 
 class TaskSteer(BaseModel):
@@ -124,15 +127,18 @@ def setup_agent_task_routes(session_manager):
         if worker not in WORKER_IDS:
             registry = adapters(include_external=True)
             adapter = registry.get(worker)
-            if not adapter or getattr(adapter, "adapter_name", "") != "external-agent-sidecar":
+            if adapter is None:
                 raise ValueError("unknown_worker")
-            sidecar_action = "start" if action in {"create", "resume"} else action
-            adapter.validate_action_arguments(sidecar_action, exact_action_arguments)
-            external_policy = await adapter.action_policy(
-                sidecar_action,
-                owner=owner,
-                workspace=workspace,
-            )
+            if getattr(adapter, "adapter_name", "") == "external-agent-sidecar":
+                sidecar_action = "start" if action in {"create", "resume"} else action
+                adapter.validate_action_arguments(sidecar_action, exact_action_arguments)
+                external_policy = await adapter.action_policy(
+                    sidecar_action,
+                    owner=owner,
+                    workspace=workspace,
+                )
+            # Registered node agents fall through to the same authority path
+            # as the fixed workers: no external sidecar policy is involved.
         call = normalize_action_call(
             request_id=request_id,
             call_id=str(uuid.uuid4()),
@@ -285,7 +291,7 @@ def setup_agent_task_routes(session_manager):
             statuses = await worker_statuses(owner=owner, include_external=True)
             return {
                 worker: status for worker, status in statuses.items()
-                if worker not in WORKER_IDS
+                if worker not in WORKER_IDS and status.get("adapter") != "codex-bridge"
             }
         except ExternalAgentBridgeError as exc:
             raise HTTPException(503, exc.code)
@@ -396,6 +402,13 @@ def setup_agent_task_routes(session_manager):
             raise HTTPException(503, "Codex project catalog is unavailable")
         return adapter
 
+    @router.get("/api/codex/models")
+    async def codex_models(_owner: str = Depends(require_user)):
+        try:
+            return await _codex_catalog_adapter().catalog_models()
+        except Exception:
+            raise HTTPException(503, "Codex model catalog is unavailable. Check the workstation bridge.")
+
     @router.get("/api/codex/projects")
     async def codex_projects(
         query: str = Query(default="", max_length=200),
@@ -418,6 +431,38 @@ def setup_agent_task_routes(session_manager):
             raise HTTPException(503, "Codex project catalog is unavailable")
         except Exception:
             raise HTTPException(503, "Codex project catalog is unavailable")
+
+    @router.get("/api/codex/projects/{project_id}/tasks/{thread_id}/history")
+    async def codex_task_history(project_id: str, thread_id: str,
+                                 cursor: str | None = Query(default=None, max_length=2000),
+                                 limit: int = Query(default=5, ge=1, le=10),
+                                 _owner: str = Depends(require_user)):
+        # This catalog belongs to the private workstation, not every app account.
+        if not owner_is_admin_or_single_user(_owner):
+            raise HTTPException(403, "Native workstation history requires operator access")
+        try:
+            return await _codex_catalog_adapter().catalog_task_details(project_id, thread_id, history=True, cursor=cursor, limit=limit)
+        except ValueError:
+            raise HTTPException(400, "Invalid Codex task")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise HTTPException(404, "Task history is unavailable. Verify the project and update its Codex bridge to v1.0.39 or later.")
+            raise HTTPException(503, "Codex task history is unavailable. Check the selected bridge.")
+        except Exception:
+            raise HTTPException(503, "Codex task history is unavailable. Check the selected bridge.")
+
+    @router.get("/api/codex/projects/{project_id}/tasks/{thread_id}")
+    async def codex_task_details(project_id: str, thread_id: str, _owner: str = Depends(require_user)):
+        try:
+            return await _codex_catalog_adapter().catalog_task_details(project_id, thread_id)
+        except ValueError:
+            raise HTTPException(400, "Invalid Codex task")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise HTTPException(404, "Codex task is unavailable in this project")
+            raise HTTPException(503, "Codex session details are unavailable")
+        except Exception:
+            raise HTTPException(503, "Codex session details are unavailable")
 
     @router.get("/api/codex/projects/{project_id}/tasks")
     async def codex_project_tasks(
@@ -478,6 +523,8 @@ def setup_agent_task_routes(session_manager):
                 action_arguments={
                     "prompt": payload.prompt,
                     "permission_mode": payload.permission_mode,
+                    **({"codex_model": payload.codex_model} if payload.codex_model else {}),
+                    **({"codex_reasoning_effort": payload.codex_reasoning_effort} if payload.codex_reasoning_effort else {}),
                 },
             )
             external_policy = trace.get("external_policy") or {}

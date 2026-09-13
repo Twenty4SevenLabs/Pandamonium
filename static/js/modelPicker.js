@@ -139,7 +139,8 @@ function _selectedAgent() {
   if (!_agentCatalogVerified) return null;
   const selected = _selectedAgents.get(_agentSelectionKey()) || _selectedAgents.get(_PENDING_AGENT_KEY);
   if (selected) return selected;
-  const defaultIdentity = _selectorItems.find(item => item.target === 'jarvis' && !item.disabled)
+  const defaultTarget = new URLSearchParams(window.location.search).has('codex_task') ? 'pc-codex' : 'jarvis';
+  const defaultIdentity = _selectorItems.find(item => item.target === defaultTarget && !item.disabled)
     || _selectorItems.find(item => !item.disabled);
   return defaultIdentity ? {
     target: defaultIdentity.target,
@@ -161,7 +162,8 @@ export function getSelectedAgentTarget() {
 
 export function getSelectedAgentSelection() {
   const selected = _selectedAgent();
-  return selected ? { ...selected } : null;
+  const current = _selectorItems.find(item => item.target === selected?.target);
+  return selected ? { ...selected, runtime: current?.runtime || '', location: current?.location || '' } : null;
 }
 
 export function clearPendingAgentTarget() {
@@ -169,7 +171,7 @@ export function clearPendingAgentTarget() {
 }
 
 export function preserveSelectedAgentForNewChat() {
-  const selected = _selectedAgents.get(_agentSelectionKey());
+  const selected = _selectedAgent();
   if (selected) _selectedAgents.set(_PENDING_AGENT_KEY, { ...selected });
   else clearPendingAgentTarget();
 }
@@ -209,6 +211,8 @@ function _emitConversationTarget(selectedAgent) {
   if (!selectedAgent) return;
   const detail = {
     target: selectedAgent.target,
+    runtime: _selectorItems.find(item => item.target === selectedAgent.target)?.runtime || '',
+    location: _selectorItems.find(item => item.target === selectedAgent.target)?.location || '',
     label: selectedAgent.label || selectedAgent.target,
     kind: selectedAgent.kind,
     available: selectedAgent.available !== false,
@@ -242,6 +246,7 @@ async function _refreshSelectorCatalog() {
       const entity = entityById.get(selection.entity_id);
       if (!entity || !['model', 'agent', 'worker'].includes(entity.kind)) return;
       const capabilities = Array.isArray(selection.capabilities) ? selection.capabilities : [];
+      const runtime = String(selection.runtime || (capabilities.includes('codex') ? 'Codex' : capabilities.includes('claude') ? 'Claude' : capabilities.includes('hermes') ? 'Hermes' : capabilities.includes('external_agent') ? 'External agent' : 'Model-backed agent'));
       const item = {
         kind: entity.kind,
         target: String(selection.target || ''),
@@ -249,15 +254,9 @@ async function _refreshSelectorCatalog() {
         modelId: String(selection.model_id || ''),
         endpointId: String(selection.endpoint_id || ''),
         display: String(entity.display_name || 'Configured choice'),
-        epName: capabilities.includes('codex')
-          ? 'Workstation Codex'
-          : (capabilities.includes('hermes')
-            ? 'Hermes'
-            : (capabilities.includes('claude')
-              ? 'Claude'
-              : (capabilities.includes('external_agent')
-                ? 'External worker'
-                : (capabilities.includes('model') ? 'Self-hosted model' : 'Configured identity')))),
+        runtime,
+        location: String(selection.location || ''),
+        epName: [runtime, selection.location].filter(Boolean).join(' · '),
         providerText: `${entity.kind} ${entity.health?.state || ''} ${selection.reason || ''}`,
         stale: selection.selectable !== true,
         disabled: selection.selectable !== true,
@@ -342,6 +341,7 @@ function _firstAvailableModel() {
   const items = window.modelsModule.getCachedItems() || [];
   for (const item of items) {
     if (item.offline) continue;
+    if ((item.model_type || 'llm') !== 'llm') continue;
     const models = (item.models || []).concat(item.models_extra || []);
     if (!models.length) continue;
     return {
@@ -478,6 +478,9 @@ function _initModelPickerDropdown() {
       Math.max(inset + width, window.innerWidth - inset),
     );
     menu.style.right = `${anchorRight - desiredRight}px`;
+    const top = wrap.getBoundingClientRect().top;
+    menu.style.maxHeight = `${Math.max(120, top - 24)}px`;
+    menu.style.overflowY = 'auto';
   }
 
   function _openPickerShortcut(kind) {
@@ -636,6 +639,23 @@ function _initModelPickerDropdown() {
       epSpan.textContent = _epDisplay;
       row.appendChild(epSpan);
 
+      // Mark the current selection (MAD-888): identity rows by target, model
+      // rows by the session's active model. The check is the compact-selector
+      // selected affordance; behavior and routing are unchanged.
+      const _selectedNow = _selectedAgent();
+      const _sessionModel = (_deps.getSessions().find(s => s.id === _deps.getCurrentSessionId()) || {}).model || '';
+      const _isSelected = (m.target && _selectedNow?.target === m.target)
+        || (!m.target && !!m.mid && m.mid === _sessionModel);
+      row.setAttribute('aria-selected', _isSelected ? 'true' : 'false');
+      if (_isSelected) {
+        row.classList.add('is-selected');
+        const check = document.createElement('span');
+        check.className = 'model-switch-check';
+        check.setAttribute('aria-hidden', 'true');
+        check.textContent = '✓';
+        row.appendChild(check);
+      }
+
       row.addEventListener('click', () => _pick(m));
       row.addEventListener('keydown', event => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -784,6 +804,7 @@ function _initModelPickerDropdown() {
     let match = null;
     for (const item of items) {
       if (item.offline) continue;
+      if ((item.model_type || 'llm') !== 'llm') continue;
       if (targetEndpointId && String(item.endpoint_id || '') !== targetEndpointId) continue;
       const models = (item.models || []).concat(item.models_extra || []);
       const displays = (item.models_display || []).concat(item.models_extra_display || []);
@@ -952,6 +973,7 @@ export function updateModelPicker() {
     const allAvailable = [];
     items.forEach(item => {
       if (item.offline) return;
+      if ((item.model_type || 'llm') !== 'llm') return;
       (item.models || []).concat(item.models_extra || []).forEach(m => allAvailable.push(m));
     });
     if (allAvailable.length > 0 && !allAvailable.includes(modelId)) {

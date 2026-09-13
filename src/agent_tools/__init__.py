@@ -34,7 +34,7 @@ from . import admin_tools as admin_tools
 from .admin_tools import (
     ADMIN_TOOL_HANDLERS,
     do_manage_endpoints, do_manage_mcp, do_manage_webhooks,
-    do_manage_tokens, do_manage_settings,
+    do_manage_tokens, do_manage_settings, do_manage_extensions,
 )
 
 TOOL_HANDLERS = {
@@ -76,7 +76,7 @@ TOOL_HANDLERS.update(ADMIN_TOOL_HANDLERS)
 # Constants (re-exported for backward compatibility — single source of truth
 # is src.constants; always prefer importing from there for new code)
 # ---------------------------------------------------------------------------
-MAX_AGENT_ROUNDS = 50
+MAX_AGENT_ROUNDS = 80
 SHELL_TIMEOUT = 60
 PYTHON_TIMEOUT = 30
 
@@ -94,6 +94,7 @@ TOOL_TAGS = {"bash", "python", "hermes_ssh", "hermes_kanban", "web_search", "web
              "suggest_document",
              "manage_endpoints", "manage_mcp", "manage_webhooks",
              "manage_tokens", "manage_documents", "manage_settings",
+             "manage_extensions",
              "get_runtime_status", "start_agent_task", "read_agent_task", "search_jarvis_knowledge",
              "manage_notes", "manage_calendar", "read_calendar",
              "resolve_contact", "manage_contact",
@@ -110,7 +111,7 @@ TOOL_TAGS = {"bash", "python", "hermes_ssh", "hermes_kanban", "web_search", "web
              "list_downloads", "cancel_download",
              "search_hf_models", "list_cached_models",
              "list_serve_presets", "serve_preset", "adopt_served_model",
-             "list_cookbook_servers",
+             "list_cookbook_servers", "tail_serve_output",
              # Other tools the agent reaches for that were also missing.
              "edit_image", "trigger_research", "manage_research",
              # Generic loopback to any UI-button endpoint (cookbook,

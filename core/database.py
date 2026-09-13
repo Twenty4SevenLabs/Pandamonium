@@ -197,6 +197,9 @@ class Session(TimestampMixin, Base):
 
     # Organization
     folder = Column(String, nullable=True, default=None)
+    # Durable binding to a real Pandamonium project (MAD-920). Null means the
+    # chat is unfiled. Project removal never deletes sessions; it only unbinds.
+    project_id = Column(String, nullable=True, default=None, index=True)
     
     # Headers stored as JSON
     headers = Column(JSON, default=dict)
@@ -249,6 +252,7 @@ class Session(TimestampMixin, Base):
             'message_count': self.message_count,
             'is_important': self.is_important,
             'folder': self.folder,
+            'project_id': self.project_id,
             'total_input_tokens': self.total_input_tokens or 0,
             'total_output_tokens': self.total_output_tokens or 0,
             'crew_member_id': self.crew_member_id,
@@ -513,6 +517,11 @@ class ModelEndpoint(TimestampMixin, Base):
     # Optional OAuth/session-backed credential row. Used by subscription-backed
     # providers that need refresh tokens instead of a static API key.
     provider_auth_id = Column(String, nullable=True, index=True)
+    # JSON metadata for first-class node-agent endpoints (endpoint_kind="agent"):
+    # bridge protocol, node workspaces, and other node-owned fields. Model
+    # endpoints leave this NULL. Kept as JSON so a new node-agent field does not
+    # need another schema migration; the pairing token itself stays in api_key.
+    agent_meta = Column(Text, nullable=True)
 
 
 class ProviderAuthSession(TimestampMixin, Base):
@@ -1050,6 +1059,30 @@ def _migrate_add_provider_auth_id_column():
             pass
 
 
+def _migrate_add_agent_meta_column():
+    """Add agent_meta column to model_endpoints if it doesn't exist."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if columns and "agent_meta" not in columns:
+            conn.execute("ALTER TABLE model_endpoints ADD COLUMN agent_meta TEXT")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added 'agent_meta' column to model_endpoints")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"model_endpoints.agent_meta migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _migrate_add_model_type_column():
     """Add model_type column to model_endpoints if it doesn't exist."""
     import sqlite3
@@ -1270,6 +1303,31 @@ def _migrate_add_folder_column():
             conn.close()
         except Exception:
             pass
+
+def _migrate_add_project_id_column():
+    """Add project_id column to sessions table if it doesn't exist (MAD-920)."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(sessions)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if "project_id" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_sessions_project_id ON sessions (project_id)")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added 'project_id' column to sessions")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Migration check for project_id failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 
 def _migrate_add_token_columns():
     """Add cumulative token tracking columns to sessions table."""
@@ -2036,6 +2094,7 @@ def init_db():
     _migrate_add_model_endpoint_refresh_columns()
     _migrate_add_model_endpoint_owner_column()
     _migrate_add_provider_auth_id_column()
+    _migrate_add_agent_meta_column()
     _migrate_add_supports_tools_column()
     _migrate_add_task_run_model_column()
     _migrate_add_owner_column()
@@ -2043,6 +2102,7 @@ def init_db():
     _migrate_add_last_message_at_column()
     _migrate_add_agent_target_column()
     _migrate_add_folder_column()
+    _migrate_add_project_id_column()
     _migrate_add_token_columns()
     _migrate_add_mode_column()
     _migrate_add_multiuser_owner_columns()

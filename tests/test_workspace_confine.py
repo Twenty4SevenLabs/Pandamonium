@@ -234,10 +234,14 @@ async def test_binding_does_not_leak(ws, admin):
 def _sent_tool_names(monkeypatch, *, workspace):
     import asyncio
     import src.agent_loop as al
+    import src.context_budget as context_budget
 
     monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
+    # Keep a stable explicit budget so this exercises selection/routing, not
+    # catalog-cap arithmetic (the paged manage_settings schema grows over time).
+    monkeypatch.setattr(context_budget, "model_input_token_budget", lambda model: 8000, raising=False)
     # Isolate the selection logic from owner gating (tested separately).
     monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
 
@@ -255,6 +259,7 @@ def _sent_tool_names(monkeypatch, *, workspace):
             "https://api.openai.com/v1", "gpt-test",
             [{"role": "user", "content": "look at the local project"}],
             max_rounds=1, relevant_tools=None, owner="admin", workspace=workspace,
+            context_length=200_000,
         )
         return [c async for c in gen]
 
@@ -263,17 +268,16 @@ def _sent_tool_names(monkeypatch, *, workspace):
     return {t["function"]["name"] for t in schemas if isinstance(t, dict) and "function" in t}
 
 
-def test_low_signal_with_workspace_surfaces_readonly_file_tools(monkeypatch):
+def test_low_signal_with_workspace_mounts_builtin_catalog(monkeypatch):
+    """MAD-905/907: API engines mount the built-in catalog on vague workspace
+    turns, and the catalog gateway is always present. Confinement and
+    authority still gate execution; schema omission is not the safety net."""
     names = _sent_tool_names(monkeypatch, workspace="/tmp")
-    # read-only nav tools surface so the agent can explore
+    # An active workspace is the file-work signal; nav tools still surface.
     assert "read_file" in names
     assert "get_workspace" in names
-    assert "grep" in names
-    # write/shell tools do NOT surface on a vague message
-    assert "write_file" not in names
-    assert "edit_file" not in names
-    assert "bash" not in names
-    assert "python" not in names
+    # MAD-907: discovery stays reachable even when the budget caps the rest.
+    assert "manage_settings" in names
 
 
 def test_low_signal_without_workspace_excludes_file_tools(monkeypatch):
