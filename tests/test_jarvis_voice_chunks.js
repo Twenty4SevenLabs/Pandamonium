@@ -666,7 +666,7 @@ let foregroundResultRender = null;
 sandbox.chatModule = {
   addMessage(role, text, model, metadata) {
     foregroundResultRender = { role, text, model, metadata };
-    return { dataset: { ...metadata }, parentElement: chat };
+    return { dataset: { ...metadata }, parentElement: chat, classList: { add() {} } };
   },
 };
 placement.renderWorkerResult(

@@ -48,10 +48,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Browser MCP is a supported built-in, so Docker must not download its package
 # or browser on first use. Keep the package and browser revision coupled here;
 # the runtime launches this exact CLI instead of an unpinned npx request.
+#
+# Playwright's Chrome-for-Testing fetcher spawn()s a nested node process.
+# Docker's default build/runtime sandbox returns EACCES on that spawn
+# (privileged install works; BuildKit security.insecure is not allowed here).
+# If the official installer cannot spawn node, fetch the same pinned zip with
+# Python so the image still bakes chromium-1243 + ffmpeg-1011.
+COPY docker/fetch-playwright-browsers.py /usr/local/bin/fetch-playwright-browsers.py
 RUN npm install --prefix /opt/pandamonium-browser-mcp --omit=dev --no-audit --no-fund \
         "@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}" \
     && node /opt/pandamonium-browser-mcp/node_modules/playwright-core/cli.js install-deps chromium \
-    && node /opt/pandamonium-browser-mcp/node_modules/playwright-core/cli.js install --no-shell chromium
+    && (node /opt/pandamonium-browser-mcp/node_modules/playwright-core/cli.js install --no-shell chromium \
+        || python3 /usr/local/bin/fetch-playwright-browsers.py)
 
 # libgl1/libglib2.0-0t64/libxcb1 are runtime shared libs (libGL.so.1,
 # libglib-2.0/libgthread, libxcb.so.1) that opencv-python (cv2) loads. The
