@@ -74,8 +74,11 @@ test('Plugins → Add Plugins previews and executes the approved lifecycle', asy
   await launcher.focus();
   await page.keyboard.press('Enter');
   await expect(page.locator('#marketplace-modal')).toBeVisible();
-  await expect(page.locator('#marketplace-search')).toBeFocused();
+  await expect(page.locator('#marketplace-tab-installed')).toBeFocused();
+  await expect(page.locator('#marketplace-panel-installed')).toBeVisible();
   await expect(page.getByRole('dialog', { name: 'Add Plugins' })).toContainText('Signed marketplace');
+  await page.getByRole('tab', { name: 'Add a new plugin' }).click();
+  await expect(page.locator('#marketplace-panel-add')).toBeVisible();
   await expect(page.getByRole('button', { name: /Atlas/ })).toContainText('Update available');
   await expect(page.getByRole('button', { name: /Robin/ })).toContainText('Revoked');
 
@@ -142,6 +145,7 @@ test('marketplace renders loading, offline, empty, and mobile detail navigation'
   expect(launcherBox.height).toBeGreaterThanOrEqual(44);
   await launcher.focus();
   await page.keyboard.press('Space');
+  await page.getByRole('tab', { name: 'Add a new plugin' }).click();
   await expect(page.locator('#marketplace-results')).toContainText('Loading plugins');
   resolveCatalog();
   await expect(page.getByRole('button', { name: /Atlas/ })).toBeVisible();
@@ -160,7 +164,9 @@ test('marketplace renders loading, offline, empty, and mobile detail navigation'
   await mockApp(page, { schema_version: 'pandamonium.marketplace-view.v1', status: 'error', failure: 'marketplace_catalog_unsigned', plugins: [] });
   await page.locator('#marketplace-retry').click();
   await expect(page.locator('#marketplace-results')).toContainText('Catalog verification failed');
-  await expect(page.locator('#marketplace-results')).toContainText('marketplace_catalog_unsigned');
+  // The raw backend code is mapped to a human message plus next step (MAD-925).
+  await expect(page.locator('#marketplace-results')).not.toContainText('marketplace_catalog_unsigned');
+  await expect(page.locator('#marketplace-results')).toContainText('Something went wrong during setup. Check the connection and try again.');
 
   await page.unroute('**/api/**');
   await mockApp(page, { schema_version: 'pandamonium.marketplace-view.v1', status: 'empty', failure: null, plugins: [] });

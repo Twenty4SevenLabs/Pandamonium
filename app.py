@@ -850,6 +850,19 @@ app.include_router(setup_cookbook_routes())
 from routes.workspace_routes import setup_workspace_routes
 app.include_router(setup_workspace_routes())
 
+# SSH connections (MAD-935: Settings-managed node access with keyless preset keys)
+from routes.ssh_routes import setup_ssh_routes
+app.include_router(setup_ssh_routes())
+
+# Nextcloud files (MAD-937: owner-scoped read-only connection and browsing)
+from routes.nextcloud_routes import setup_nextcloud_routes
+app.include_router(setup_nextcloud_routes())
+
+# Guided in-app bug reports (MAD-856: redacted diagnostics + server-held
+# GitHub App submission; the browser never receives a repository credential).
+from routes.feedback_routes import setup_feedback_routes
+app.include_router(setup_feedback_routes())
+
 # Pandamonium agent workstation projects (MAD-902)
 from routes.project_routes import setup_project_routes
 app.include_router(setup_project_routes())
@@ -1190,6 +1203,13 @@ async def _startup_event():
             )
     except Exception as e:
         logger.warning(f"Session-folder project migration skipped: {e}")
+    # MAD-929: persist the installation settings identity as the registry's
+    # first entry exactly once. Idempotent; leaves an existing registry alone.
+    try:
+        from src.agent_identities import ensure_migrated
+        await asyncio.to_thread(ensure_migrated)
+    except Exception as e:
+        logger.warning(f"Agent identity registry migration skipped: {e}")
     # Strong refs to fire-and-forget startup tasks. Without this, Python may
     # GC tasks created with `asyncio.create_task(...)` before they finish.
     _startup_tasks: list[asyncio.Task] = getattr(app.state, "_startup_tasks", [])

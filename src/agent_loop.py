@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 from src.llm_core import (
     stream_llm,
     stream_llm_with_fallback,
+    _detect_provider,
     _is_ollama_native_url,
 )
 from src.model_context import (
@@ -363,6 +364,13 @@ _DOMAIN_RULES = {
 ## Network inspection rules
 - Use `inspect_network` before making claims or diagrams about the current network. It runs only fixed, bounded, read-only probes and cannot accept commands or paths.
 - Distinguish the running service's visible network view from any wider topology that the probes cannot observe. If a probe is unavailable or incomplete, state that limitation instead of guessing.""",
+    "android": """\
+## Android device rules
+- Use `android_device` for the configured Android SDK, emulators, and connected devices. Start with `status` when the SDK is unknown, then `devices` and `avds` before acting.
+- Every device action needs the exact serial from `devices`; never guess a serial or reuse a stale one. If the target is unauthorized or offline, report that instead of retrying blindly.
+- `wait` is for boot readiness after `start`/`reboot`; it is bounded and cancellable with `cancel`.
+- An APK path must be absolute on the machine that runs the adapter. There is no arbitrary adb shell, no host shell, and no uninstall/wipe/clear-data surface.
+- Report the citation (serial + action) and the effective limits with any evidence such as a screenshot or recording.""",
     "settings": """\
 ## Settings/API rules
 - Use `manage_settings` for preferences and tool enable/disable.
@@ -415,8 +423,9 @@ _DOMAIN_TOOL_MAP = {
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "read_calendar", "manage_tasks"},
     "ui": {"ui_control"},
     "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "search_chats"},
-    "files": {"bash", "python", "read_file", "write_file", "edit_file", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs"},
+    "files": {"bash", "python", "read_file", "write_file", "edit_file", "grep", "glob", "ls", "get_workspace", "manage_workspace", "manage_bg_jobs"},
     "network_inspection": {"inspect_network"},
+    "android": {"android_device"},
     # Deep research is an agent-decided capability, not a user toggle: when
     # research intent fires, seed the job starter and the report reader so the
     # model can start/read research without the legacy per-message flag.
@@ -789,6 +798,30 @@ Edit an EXISTING file by exact string replacement. PREFER this over bash (sed/ec
 ```get_workspace
 ```
 Return the absolute path of the active workspace folder. File tools are CONFINED to it (paths can be RELATIVE to it); the shell starts there (cwd) but is NOT sandboxed. Call this first when the user says "the project"/"the code"/"this folder" without a path, instead of asking them. No arguments.""",
+
+    "manage_workspace": """\
+```manage_workspace
+{"action": "show|set|clear", "path": "<absolute folder, required for set>"}
+```
+Set, clear, or report the active workspace folder for this chat. Use `set` when the user says to work out of / switch to / use a folder (e.g. "work out of /srv/app", "use the Home Lab folder"): the server validates it (must exist, not a filesystem root or sensitive path) and saves it on the chat so the picker/pill and every client see the same value. Use `clear` when they say to stop confining to a folder. `show` (or no action) reports the current workspace. Setting it takes effect for the rest of this request; never claim a folder is active without calling this or `get_workspace`.""",
+
+    "ssh_node": """\
+```ssh_node
+{"connection": "<saved connection id or label>", "action": "list|read|run", "path": "<remote path>", "command": "<allowlisted command>"}
+```
+Work with a SAVED SSH connection (Settings > SSH Connections). Never invents a target: name an existing connection by id or exact label. `list` shows a folder (`path` optional, defaults to the home folder); `read` returns a file's text bounded to 64 KiB; `run` executes exactly one command from the connection's allowlist (no shell operators, no chaining). Output and run time are bounded, every call is audited, and the result cites the node and path. If the connection is missing or the command is not allowlisted, report that honestly instead of retrying another target.""",
+
+    "nextcloud_files": """\
+```nextcloud_files
+{"action": "list|read|search", "path": "<folder or file path>", "query": "<file name search>"}
+```
+Read-only access to the owner's connected Nextcloud (Settings > Integrations). `list` shows a folder (`path` optional, defaults to the account root); `search` matches file names (at least 2 characters, `path` optional to narrow the folder); `read` returns a text file's contents bounded to 64 KiB. There is no write or upload path. Secret-shaped paths are excluded, content and run time are bounded, and every result cites the exact node and path — quote that citation when you answer from a file. If Nextcloud is not connected or a path is excluded, say so honestly instead of trying another server.""",
+
+    "android_device": """\
+```android_device
+{"action": "status|devices|avds|start|stop|reboot|wait|install|launch|force_stop|deep_link|screenshot|record|logcat|input|cancel", "serial": "<exact serial>", "avd": "<AVD name>", "apk": "<absolute .apk path>", "package": "<com.example.app>", "url": "<https://...>", "input": "tap|swipe|text|key", "x": 0, "y": 0, "x1": 0, "y1": 0, "x2": 0, "y2": 0, "duration_ms": 300, "text": "<text>", "key": "HOME", "lines": 200, "tag": "<tag>", "seconds": 15, "timeout": 120, "headless": false}
+```
+Governed Android emulator/ADB control for the configured SDK. Start with `status` (SDK resolution), then `devices` (serial, model, Android/API version, boot and authorization state) and `avds`. `start` launches an installed AVD; `wait` (bounded, cancellable with `cancel`) confirms boot readiness; `stop`/`reboot` act on one explicit serial. `install` needs an absolute `.apk` path on the machine that runs the adapter. `launch`/`force_stop` take a package; `deep_link` takes an http(s) URL; `screenshot`/`record` save bounded evidence files; `logcat` dumps at most 2000 lines; `input` sends explicit tap/swipe/text/key. There is NO arbitrary adb shell, no host shell, no uninstall/wipe/clear-data, and no credential or Play Store automation. Every device action requires a ready serial, concurrent commands against one serial are rejected as busy, and results cite the serial and effective limits.""",
 
     "create_document": """\
 ```create_document
@@ -1884,6 +1917,15 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         r"\b(kanban|card|task|board)\b.{0,40}\barchive\b",
     ):
         domains.add("hermes")
+    # Android emulator/device intent — seed the governed adapter so "start the
+    # Pixel AVD", "adb devices", "install the APK", or "screenshot the
+    # emulator" reach `android_device` even when embedding retrieval misses.
+    if has(
+        r"\b(?:android|emulators?|avds?|adb|apks?|logcat)\b",
+        r"\bdeep\s?link\b",
+        r"\bmobile\s+app\b",
+    ):
+        domains.add("android")
     if has(r"\b(contact|contacts|phone|phone number|address book|vcard)\b"):
         domains.add("contacts")
     # API-integration intent — calling a configured service via the api_call
@@ -3363,10 +3405,63 @@ async def _run_verifier_subagent(
     return [r.strip() for r in reasons.split(";") if r.strip()]
 
 
+async def _bounded_empty_recovery(
+    endpoint_url: str,
+    model: str,
+    messages: list,
+    headers: Optional[Dict],
+    *,
+    temperature: float,
+    max_tokens: int,
+    timeout: int,
+    reasoning_effort: Optional[str],
+) -> tuple:
+    """One side-effect-free replay for a zero-content turn.
+
+    Returns ``(recovered_text, failure_category, diagnostic_id)``. The caller
+    must only invoke this when no tool has run in the request: replaying a
+    prompt that already executed a tool could duplicate an external side
+    effect.
+    """
+    from src.model_response_diagnosis import classify_exception
+
+    diagnostic_id = str(uuid.uuid4())[:12]
+    try:
+        from src.llm_core import llm_call_async
+
+        recovery_messages = list(messages) + [{
+            "role": "system",
+            "content": (
+                "Your previous turn produced no user-facing answer. Answer the "
+                "user's request now in plain text. Do not call any tools."
+            ),
+        }]
+        raw = await llm_call_async(
+            url=endpoint_url,
+            model=model,
+            messages=recovery_messages,
+            headers=headers,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            reasoning_effort=reasoning_effort,
+        )
+        recovered = _strip_think_blocks(strip_tool_blocks(raw or "")).strip()
+        if recovered:
+            return recovered, "", diagnostic_id
+    except Exception as exc:
+        logger.warning("[agent] bounded empty-response recovery failed: %s", exc)
+        return "", classify_exception(exc)["category"], diagnostic_id
+    return "", "zero_content_completion", diagnostic_id
+
+
 def _empty_response_fallback(
     full_response: str,
     round_reasoning: str,
     tool_events: list,
+    *,
+    category: Optional[str] = None,
+    request_id: str = "",
 ) -> tuple:
     """Return (final_response, sse_chunk_or_none) for the end-of-loop empty-response guard.
 
@@ -3374,6 +3469,11 @@ def _empty_response_fallback(
     content=""), full_response is empty but round_reasoning has content.
     The reasoning was already streamed as {thinking:true} chunks — do not
     re-emit it as a normal delta.  Just persist it and yield nothing.
+
+    Otherwise the caller has already tried its one bounded, side-effect-free
+    recovery. This returns exactly one actionable result naming the recovery
+    action (validate settings / change model / change endpoint mode / retry /
+    inspect a redacted diagnostic) — never a repeated generic card.
 
     Returns:
         (final_response: str, chunk: str | None)
@@ -3384,12 +3484,20 @@ def _empty_response_fallback(
     if tool_events:
         _error_msg = (
             "The tool call completed, but the model returned no final answer. "
-            "Please retry the request."
+            "Retry the request — the tool already ran, so it is not replayed "
+            "automatically."
         )
+        if category:
+            from src.model_response_diagnosis import recovery_guidance
+
+            _error_msg = f"{_error_msg} {recovery_guidance(category, request_id)}"
         return _error_msg, f'data: {json.dumps({"delta": _error_msg})}\n\n'
     if round_reasoning.strip():
         return round_reasoning, None
-    _error_msg = "The model returned an empty response. Please try again or switch to a different model."
+    from src.model_response_diagnosis import recovery_guidance
+
+    _guidance = recovery_guidance(category or "zero_content_completion", request_id)
+    _error_msg = f"The model returned an empty response. {_guidance}"
     return _error_msg, f'data: {json.dumps({"delta": _error_msg})}\n\n'
 
 
@@ -3754,22 +3862,45 @@ async def stream_agent_loop(
             yield "data: [DONE]\n\n"
             return
 
+        _direct_finish_category = "ok"
         if not direct_response.strip():
-            empty_err = "Model returned no text"
-            yield f'event: error\ndata: {json.dumps({"error": empty_err, "status": 502})}\n\n'
-            record_operational_event(
-                request_id=_action_request_id,
-                session_id=session_id,
-                operator_id=operator_identity(owner),
-                actor=f"engine:{direct_actual_model}",
-                component="engine",
-                event_type="response",
-                status="failed",
-                duration=time.monotonic() - _request_trace_started,
-                error=empty_err,
+            # No tools were offered on this path, so one bounded replay cannot
+            # duplicate a side effect.
+            from src.model_response_diagnosis import diagnostic_payload, recovery_guidance
+
+            _direct_recovered, _direct_failure, _direct_diag = await _bounded_empty_recovery(
+                endpoint_url,
+                model,
+                direct_messages,
+                headers,
+                temperature=temperature,
+                max_tokens=min(max_tokens or 128, 128),
+                timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
+                reasoning_effort=reasoning_effort,
             )
-            yield "data: [DONE]\n\n"
-            return
+            if _direct_recovered:
+                direct_response = _direct_recovered
+                _direct_finish_category = "recovered"
+                yield f"data: {json.dumps({'delta': _direct_recovered})}\n\n"
+            else:
+                _direct_finish_category = _direct_failure or "zero_content_completion"
+                _provider_slug = ""
+                try:
+                    _provider_slug = str(_detect_provider(endpoint_url) or "")
+                except Exception:
+                    _provider_slug = ""
+                yield "data: " + json.dumps(diagnostic_payload(
+                    _direct_finish_category,
+                    request_id=_direct_diag,
+                    provider=_provider_slug,
+                    model=model,
+                )) + "\n\n"
+                fallback = (
+                    "The model returned an empty response. "
+                    + recovery_guidance(_direct_finish_category, _direct_diag)
+                )
+                direct_response = fallback
+                yield f"data: {json.dumps({'delta': fallback})}\n\n"
 
         duration = time.time() - direct_start
         metrics = {
@@ -3792,9 +3923,15 @@ async def stream_agent_loop(
             actor=f"engine:{direct_actual_model}",
             component="engine",
             event_type="response",
-            status="succeeded",
+            status="succeeded" if _direct_finish_category in ("ok", "recovered") else "degraded",
             duration=time.monotonic() - _request_trace_started,
             usage={"input_tokens": metrics["input_tokens"], "output_tokens": metrics["output_tokens"], "tool_rounds": 0},
+            metadata={
+                "finish_category": _direct_finish_category,
+                "diagnostic_id": _direct_diag if _direct_finish_category not in ("ok", "recovered") else _action_request_id,
+                "provider": str(_detect_provider(endpoint_url) or ""),
+                "streamed": True,
+            },
         )
         yield "data: [DONE]\n\n"
         return
@@ -5877,6 +6014,33 @@ async def stream_agent_loop(
                             sorted(_new_mounts),
                         )
 
+            # MAD-883: `manage_workspace` results carry `workspace_changed`.
+            # Rebind the turn's workspace so the NEXT round's tool calls and
+            # schema selection use the folder the agent just set (or drop the
+            # confinement on clear), and tell the client to update its pill.
+            if isinstance(result, dict) and result.get("workspace_changed"):
+                _new_workspace = str(result.get("workspace") or "").strip()
+                workspace = _new_workspace or None
+                yield (
+                    f'data: {json.dumps({"type": "workspace_changed", "data": {"path": _new_workspace, "session": session_id}})}\n\n'
+                )
+                if _new_workspace and _relevant_tools is not None:
+                    # A freshly bound folder is the file-work signal: surface
+                    # the file tool objects for the next round instead of
+                    # waiting for the following user message.
+                    _file_tools = {
+                        _name
+                        for _name in _DOMAIN_TOOL_MAP["files"]
+                        if _name not in disabled_tools
+                        and _name not in _intent_pruned_tools
+                    }
+                    if _file_tools - _relevant_tools:
+                        _relevant_tools.update(_file_tools)
+                        logger.info(
+                            "[tool-rag] workspace set mid-turn; file tools unlocked: %s",
+                            sorted(_file_tools),
+                        )
+
             # MAD-913: `manage_extensions action=mount` results carry
             # `mounted_extension_tools`. Register their schemas for the NEXT
             # round and remember the owning extension so dispatch can route
@@ -6459,10 +6623,57 @@ async def stream_agent_loop(
         logger.info("[agent] round cap (%d) reached mid-task — emitting rounds_exhausted", max_rounds)
         yield f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds})}\n\n'
 
-    # If the response is completely empty and no tools were executed,
-    # yield a fallback message so the user is not left hanging.
+    # ── One truthful result for a zero-content turn (MAD-860) ──────────────
+    # If the turn produced no text, no reasoning, and ran no tool, replaying
+    # the conversation cannot duplicate a tool or external side effect, so one
+    # bounded non-streaming retry is safe. If a tool did run, never replay —
+    # surface an explicit retry instead. Either way the client gets exactly
+    # one chronological result, not repeated generic empty-response cards.
+    _finish_category = "ok"
+    _diagnostic_id = ""
+    _provider_slug = ""
+    try:
+        _provider_slug = str(_detect_provider(endpoint_url) or "")
+    except Exception:
+        _provider_slug = ""
+    if (
+        not full_response.strip()
+        and not tool_events
+        and not round_reasoning.strip()
+    ):
+        from src.model_response_diagnosis import diagnostic_payload
+
+        _recovered, _recovery_failure_category, _diagnostic_id = await _bounded_empty_recovery(
+            endpoint_url,
+            model,
+            messages,
+            headers,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
+            reasoning_effort=reasoning_effort,
+        )
+        if _recovered:
+            full_response = _recovered
+            _finish_category = "recovered"
+            yield f'data: {json.dumps({"delta": _recovered})}\n\n'
+        else:
+            _finish_category = _recovery_failure_category or "zero_content_completion"
+            yield "data: " + json.dumps(diagnostic_payload(
+                _finish_category,
+                request_id=_diagnostic_id,
+                provider=_provider_slug,
+                model=model,
+            )) + "\n\n"
+
+    # If the response is still completely empty, yield one actionable
+    # fallback result so the user is not left hanging.
     full_response, _fallback_chunk = _empty_response_fallback(
-        full_response, round_reasoning, tool_events
+        full_response,
+        round_reasoning,
+        tool_events,
+        category=_finish_category if _finish_category != "ok" else None,
+        request_id=_diagnostic_id,
     )
     if _fallback_chunk:
         yield _fallback_chunk
@@ -6522,6 +6733,8 @@ async def stream_agent_loop(
     _request_status = "succeeded"
     if _exhausted_rounds:
         _request_status = "degraded"
+    if _finish_category not in ("ok", "recovered"):
+        _request_status = "degraded"
     for _event in tool_events:
         _status = (_event.get("action_result") or {}).get("status")
         if _status in {"unknown", "timed_out", "cancelled", "denied", "failed"}:
@@ -6542,8 +6755,14 @@ async def stream_agent_loop(
             "tool_rounds": metrics.get("agent_rounds"),
             "tool_calls": metrics.get("tool_calls"),
         },
+        metadata={
+            "finish_category": _finish_category,
+            "diagnostic_id": _diagnostic_id or _action_request_id,
+            "provider": _provider_slug,
+            "streamed": True,
+        },
         evidence_refs=[{"tool_event_ids": [event.get("operational_event_id") for event in tool_events if event.get("operational_event_id")]}],
-        error=None if _request_status == "succeeded" else {"category": _request_status, "detail": "request did not complete normally"},
+        error=None if _request_status == "succeeded" else {"category": _finish_category if _finish_category not in ("ok", "recovered") else _request_status, "detail": "request did not complete normally"},
     )
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
 

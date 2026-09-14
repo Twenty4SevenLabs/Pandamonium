@@ -65,7 +65,11 @@ TOOL_CATEGORIES: Dict[str, str] = {
     "manage_webhooks": "System",
     "manage_tokens": "System",
     "manage_settings": "System",
+    "manage_workspace": "System",
     "manage_extensions": "System",
+    "ssh_node": "System",
+    "android_device": "System",
+    "nextcloud_files": "Knowledge",
 }
 
 # Email tools run through the bundled email MCP server; the bare names have no

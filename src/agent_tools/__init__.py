@@ -24,12 +24,16 @@ from .hermes_kanban_tool import HermesKanbanTool
 from .hermes_agent_tool import HermesAgentTool
 from .web_tools import WebSearchTool, WebFetchTool
 from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
+from .workspace_tools import ManageWorkspaceTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool
 from .bg_job_tools import ManageBgJobsTool
 from .network_tools import NetworkInspectionTool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
+from .ssh_tools import SshNodeTool
+from .nextcloud_tools import NextcloudFilesTool
+from .android_tools import AndroidDeviceTool
 from . import admin_tools as admin_tools
 from .admin_tools import (
     ADMIN_TOOL_HANDLERS,
@@ -57,6 +61,7 @@ TOOL_HANDLERS = {
     "suggest_document": SuggestDocumentTool().execute,
     "manage_documents": ManageDocumentTool().execute,
     "get_workspace": GetWorkspaceTool().execute,
+    "manage_workspace": ManageWorkspaceTool().execute,
     "ask_user": AskUserTool().execute,
     "update_plan": UpdatePlanTool().execute,
     "chat_with_model": ChatWithModelTool().execute,
@@ -68,6 +73,9 @@ TOOL_HANDLERS = {
     "list_sessions": ListSessionsTool().execute,
     "send_to_session": SendToSessionTool().execute,
     "manage_session": ManageSessionTool().execute,
+    "ssh_node": SshNodeTool().execute,
+    "nextcloud_files": NextcloudFilesTool().execute,
+    "android_device": AndroidDeviceTool().execute,
 }
 # Config/integration admin tools (manage_endpoints/mcp/webhooks/tokens/settings).
 TOOL_HANDLERS.update(ADMIN_TOOL_HANDLERS)
@@ -81,8 +89,8 @@ SHELL_TIMEOUT = 60
 PYTHON_TIMEOUT = 30
 
 # Tool types that trigger execution
-TOOL_TAGS = {"bash", "python", "hermes_ssh", "hermes_kanban", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
-             "grep", "glob", "ls", "get_workspace", "manage_bg_jobs", "inspect_network",
+TOOL_TAGS = {"bash", "python", "hermes_ssh", "hermes_kanban", "hermes_agent", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
+             "grep", "glob", "ls", "get_workspace", "manage_workspace", "manage_bg_jobs", "inspect_network",
              "create_document", "update_document", "edit_document",
              "search_chats",
              "chat_with_model", "create_session", "list_sessions",
@@ -98,6 +106,14 @@ TOOL_TAGS = {"bash", "python", "hermes_ssh", "hermes_kanban", "web_search", "web
              "get_runtime_status", "start_agent_task", "read_agent_task", "search_jarvis_knowledge",
              "manage_notes", "manage_calendar", "read_calendar",
              "resolve_contact", "manage_contact",
+             # Governed node access (MAD-936): SSH list/read/run bound to
+             # operator-saved connections and per-connection command policy.
+             "ssh_node",
+             # Read-only Nextcloud file source (MAD-937).
+             "nextcloud_files",
+             # Governed Android emulator/ADB adapter (MAD-838): SDK discovery,
+             # AVD lifecycle, and bounded device actions. Admin-only.
+             "android_device",
              # Email tool names come from BUILTIN_EMAIL_TOOLS (unioned below)
              # so the fence regex, dispatch, and non-admin blocklist all cover
              # the same set.

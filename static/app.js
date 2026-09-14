@@ -6,6 +6,7 @@ import Storage from './js/storage.js';
 import { initComposerLinks } from './js/composerLinks.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
+import bugReportModule from './js/bugReport.js';
 import projectsModule from './js/projects.js';
 import accessModeModule from './js/accessMode.js';
 import fileHandlerModule from './js/fileHandler.js';
@@ -57,10 +58,13 @@ import marketplaceModule from './js/marketplace.js';
 import updaterModule from './js/updater.js';
 import agentPlanModule from './js/agentPlan.js';
 import setupWizardModule from './js/setupWizard.js';
+import { MANAGED_BY_ADMIN_COPY, createModelSetupEntry, humanSetupError } from './js/setupUi.js';
 
 initComposerLinks();
 
 const API_BASE = window.location.origin;
+window.setupWizardModule = setupWizardModule;
+window.humanSetupError = humanSetupError;
 window.themeModule = themeModule;
 window.sessionModule = sessionModule;
 window.uiModule = uiModule;
@@ -293,16 +297,14 @@ async function _syncWelcomeModelHint() {
     return;
   }
   if (window._isAdmin === false) {
-    if (sub && !sub.dataset.researchOrigText) sub.textContent = 'Setup is managed by your administrator.';
+    if (sub && !sub.dataset.researchOrigText) sub.textContent = MANAGED_BY_ADMIN_COPY;
     if (tip) tip.textContent = 'Your administrator still needs to connect a model engine.';
     return;
   }
   if (sub && !sub.dataset.researchOrigText) {
-    sub.innerHTML = 'Welcome, <span class="setup-wizard-link" style="color:var(--accent,var(--red));font-weight:600;cursor:pointer;text-decoration:underline;" title="Open the setup guide">open the setup guide</span> to get started.';
+    sub.replaceChildren('Welcome, ', createModelSetupEntry(), ' to get started.');
   }
-  if (tip) tip.textContent = 'The guide names your assistant and connects a model engine — no settings digging.';
-  const trigger = sub?.querySelector('.setup-wizard-link');
-  trigger?.addEventListener('click', () => setupWizardModule.open());
+  if (tip) tip.textContent = 'The wizard names your assistant and connects a model engine — no settings digging.';
 }
 
 async function initPluginSidebar() {
@@ -1963,6 +1965,7 @@ function initializeEventListeners() {
   setupToggle('web-toggle-btn', 'web-toggle', 'web');
   setupToggle('bash-toggle-btn', 'bash-toggle', 'bash');
   try { workspaceModule.initWorkspace(); } catch (_) {}
+  try { bugReportModule.initBugReport(); } catch (_) {}
   try { projectsModule.initProjects(); } catch (_) {}
   try { agentPlanModule.initAgentPlan(); } catch (_) {}
   try { accessModeModule.initAccessMode(); } catch (_) {}
@@ -3410,6 +3413,21 @@ function initializeEventListeners() {
     _syncMobileEnterKeyHint(textarea);
     window.addEventListener('odysseus:chat-busy-change', () => _syncMobileEnterKeyHint(textarea));
     uiModule.autoResize(textarea);
+    // Re-measure whenever the composer's content width changes (picker
+    // clearance, responsive collapse, side docks) so the height never keeps a
+    // stale measure from a wider layout. Height-only changes are ignored to
+    // avoid feedback loops with autoResize itself.
+    if (typeof ResizeObserver !== 'undefined') {
+      let lastContentWidth = null;
+      const composerResizeObserver = new ResizeObserver(entries => {
+        const entry = entries[entries.length - 1];
+        const width = entry.contentBoxSize?.[0]?.inlineSize ?? entry.contentRect.width;
+        if (lastContentWidth !== null && Math.abs(width - lastContentWidth) < 0.5) return;
+        lastContentWidth = width;
+        uiModule.autoResize(textarea);
+      });
+      composerResizeObserver.observe(textarea, { box: 'content-box' });
+    }
     let previousTextareaValue = textarea.value || '';
     textarea.addEventListener('beforeinput', (e) => {
       if (_isLineBreakInputEvent(e) && _shouldQueueFromMobileLineBreak(textarea)) {

@@ -261,6 +261,104 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "manage_workspace",
+            "description": "Set, clear, or report the active workspace folder for this chat. The workspace is the folder file tools are confined to; it is stored on the chat so every client sees the same value. Use action=set with an existing absolute directory when the user says to work out of / switch to a folder, action=clear to remove it, action=show (default) to report the current one. The server validates the folder with the same rules as the picker: it must exist and cannot be a filesystem root or a sensitive path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["show", "set", "clear"], "description": "show (default) reports the current workspace; set binds the folder in `path`; clear removes it"},
+                    "path": {"type": "string", "maxLength": 1024, "description": "Absolute folder path (required for set), e.g. /home/leo/project"}
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_node",
+            "description": "Run a bounded, read-only-by-default operation on one SAVED SSH connection (Settings > SSH Connections): list a folder, read a file, or run a command the connection's allowlist permits. Never invents a target: the connection must already be saved. Output and run time are bounded; every call is audited. Results cite the exact node and path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "connection": {"type": "string", "maxLength": 120, "description": "Saved connection id or exact label, e.g. 'Home VPS'"},
+                    "action": {"type": "string", "enum": ["list", "read", "run"], "description": "list a folder, read a file, or run one allowlisted command"},
+                    "path": {"type": "string", "maxLength": 1024, "description": "Remote file/folder path (required for read; defaults to the home folder for list)"},
+                    "command": {"type": "string", "maxLength": 120, "description": "One command from the connection's allowlist (required for run; no shell operators)"},
+                    "max_bytes": {"type": "integer", "minimum": 1, "maximum": 65536, "description": "Optional smaller read limit; never above the 64 KiB hard cap"}
+                },
+                "required": ["connection", "action"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "nextcloud_files",
+            "description": "Read-only access to the owner's connected Nextcloud (Settings > Integrations): list a folder, search file names, or read a text file. There is no write/upload path. Content is bounded and secret-shaped paths are excluded. Results cite the exact node and path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "read", "search"], "description": "list a folder, read a file, or search file names"},
+                    "path": {"type": "string", "maxLength": 1024, "description": "Folder path for list/search, file path for read (root when omitted for list)"},
+                    "query": {"type": "string", "maxLength": 120, "description": "File-name search text (required for search; at least 2 characters)"},
+                    "max_bytes": {"type": "integer", "minimum": 1, "maximum": 65536, "description": "Optional smaller text read limit; never above the 64 KiB hard cap"}
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "android_device",
+            "description": "Governed Android emulator/ADB control for the configured SDK: discover the SDK, list connected devices/emulators and installed AVDs, start/stop/reboot/wait for an AVD, install an APK, launch/force-stop a package, open a deep link, capture a screenshot or screen recording, read scoped logcat, and send explicit tap/swipe/text/key input. Device actions require an explicit serial that must be connected and ready. There is no arbitrary adb shell, no host shell, and no uninstall/wipe/clear-data. Output and run time are bounded and audited.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "status", "devices", "avds",
+                            "start", "stop", "reboot", "wait",
+                            "install", "launch", "force_stop",
+                            "deep_link", "screenshot", "record",
+                            "logcat", "input", "cancel",
+                        ],
+                        "description": "status: SDK resolution; devices/avds: inventory; start/stop/reboot/wait: AVD lifecycle; install/launch/force_stop/deep_link: app control; screenshot/record/logcat: evidence; input: tap/swipe/text/key; cancel: stop an in-flight wait",
+                    },
+                    "serial": {"type": "string", "maxLength": 128, "description": "Exact device serial from the devices action, e.g. emulator-5554 (required for every device action)"},
+                    "avd": {"type": "string", "maxLength": 64, "description": "Installed AVD name to start (required for start)"},
+                    "headless": {"type": "boolean", "description": "Start the AVD without a window (optional for start)"},
+                    "timeout": {"type": "integer", "minimum": 5, "maximum": 600, "description": "Boot wait budget in seconds (optional for wait; default 120)"},
+                    "apk": {"type": "string", "maxLength": 1024, "description": "Absolute path to one .apk to install (required for install)"},
+                    "package": {"type": "string", "maxLength": 255, "description": "Full Android package name, e.g. com.example.app (required for launch/force_stop; optional for deep_link)"},
+                    "url": {"type": "string", "maxLength": 2048, "description": "http(s)-style deep link/intent URL (required for deep_link)"},
+                    "seconds": {"type": "integer", "minimum": 1, "maximum": 180, "description": "Screen recording length in seconds (optional for record; default 15)"},
+                    "lines": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "Logcat lines to dump (optional; default 200)"},
+                    "tag": {"type": "string", "maxLength": 64, "description": "Optional single logcat tag filter, e.g. ActivityManager"},
+                    "input": {"type": "string", "enum": ["tap", "swipe", "text", "key"], "description": "Input gesture kind (required for input)"},
+                    "x": {"type": "integer", "minimum": 0, "maximum": 10000, "description": "Tap x (tap) or swipe start x (swipe)"},
+                    "y": {"type": "integer", "minimum": 0, "maximum": 10000, "description": "Tap y (tap) or swipe start y (swipe)"},
+                    "x1": {"type": "integer", "minimum": 0, "maximum": 10000, "description": "Swipe start x"},
+                    "y1": {"type": "integer", "minimum": 0, "maximum": 10000, "description": "Swipe start y"},
+                    "x2": {"type": "integer", "minimum": 0, "maximum": 10000, "description": "Swipe end x"},
+                    "y2": {"type": "integer", "minimum": 0, "maximum": 10000, "description": "Swipe end y"},
+                    "duration_ms": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "Swipe duration in ms (optional; default 300)"},
+                    "text": {"type": "string", "maxLength": 200, "description": "Text to type for input=text"},
+                    "key": {"type": "string", "maxLength": 64, "description": "Key name for input=key, e.g. HOME, BACK, ENTER, APP_SWITCH, DPAD_DOWN"},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "write_file",
             "description": "Write/save a file to disk",
             "parameters": {
@@ -1628,6 +1726,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         content = json.dumps(args) if args else "{}"
     elif tool_type == "get_workspace":
         content = ""
+    elif tool_type == "manage_workspace":
+        content = json.dumps(args) if args else "{}"
     elif tool_type == "write_file":
         content = args.get("path", "") + "\n" + args.get("content", "")
     elif tool_type == "edit_file":

@@ -2458,6 +2458,27 @@ import { getSelectedAgentSelection } from './modelPicker.js';
                   6000
                 );
                 continue;
+              } else if (json.type === 'workspace_changed') {
+                // The agent called manage_workspace. The server already
+                // persisted it on this chat; mirror it into the cached session
+                // metadata and the pill so every surface agrees (MAD-883).
+                const _wsChanged = (json.data && json.data.path) || '';
+                if (sessionModule && sessionModule.applySessionWorkspace) {
+                  sessionModule.applySessionWorkspace(
+                    (json.data && json.data.session) || streamSessionId,
+                    _wsChanged
+                  );
+                } else {
+                  import('./workspace.js').then((m) => {
+                    const ws = m.default || m;
+                    if (ws && ws.setWorkspace) ws.setWorkspace(_wsChanged);
+                  });
+                }
+                uiModule.showToast(
+                  _wsChanged ? `Workspace set: ${_wsChanged}` : 'Workspace cleared',
+                  4000
+                );
+                continue;
               } else if (json.type === 'model_fallback') {
                 // Model went offline — switched to fallback
                 var _fbData = json.data || {};
@@ -2556,6 +2577,47 @@ import { getSelectedAgentSelection } from './modelPicker.js';
                   });
                   note.appendChild(contBtn);
                   _chatBox.appendChild(note);
+                  try { note.scrollIntoView({ block: 'end', behavior: 'smooth' }); } catch (_) { uiModule.scrollHistory && uiModule.scrollHistory(); }
+                }
+              } else if (json.type === 'model_response_diagnostic') {
+                // MAD-860: one actionable result for a zero-content model turn.
+                // The delta already carries the redacted guidance; this card
+                // adds the operator-visible Retry. Appended to the assistant
+                // holder (not the re-rendered body) so the final render keeps
+                // it. No repeated generic empty cards: any prior diagnostic
+                // card is replaced, not stacked.
+                if (!_isBg && holder) {
+                  holder.querySelectorAll('.model-response-diagnostic').forEach(node => node.remove());
+                  const note = document.createElement('div');
+                  note.className = 'stopped-indicator model-response-diagnostic';
+                  const label = document.createElement('span');
+                  label.className = 'rounds-exhausted-label';
+                  label.textContent = json.guidance || 'The model returned no content.';
+                  note.appendChild(label);
+                  const retryBtn = document.createElement('button');
+                  retryBtn.className = 'continue-btn';
+                  retryBtn.title = 'Send the same request again';
+                  retryBtn.textContent = 'Retry \u25B8';
+                  const _diagHolder = holder;
+                  retryBtn.addEventListener('click', () => {
+                    note.remove();
+                    const _userMsgs = document.querySelectorAll('#chat-history .msg-user');
+                    const _lastUser = _userMsgs[_userMsgs.length - 1];
+                    const _userBody = _lastUser ? _lastUser.querySelector('.body') : null;
+                    const _text = (_userBody ? _userBody.textContent : '').trim();
+                    const _input = uiModule.el('message');
+                    if (!_text || !_input) {
+                      uiModule.showToast && uiModule.showToast('Send the message again to retry.', 4000);
+                      return;
+                    }
+                    _hideUserBubble = true;
+                    _pendingContinue = _diagHolder;
+                    _input.value = _text;
+                    const _send = document.querySelector('.send-btn');
+                    if (_send) _send.click();
+                  });
+                  note.appendChild(retryBtn);
+                  holder.appendChild(note);
                   try { note.scrollIntoView({ block: 'end', behavior: 'smooth' }); } catch (_) { uiModule.scrollHistory && uiModule.scrollHistory(); }
                 }
               } else if (json.type === 'model_actual') {

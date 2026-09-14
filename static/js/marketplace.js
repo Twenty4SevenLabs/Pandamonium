@@ -1,3 +1,5 @@
+import { humanSetupError } from './setupUi.js';
+
 const API_BASE = window.location.origin;
 
 let modal;
@@ -15,7 +17,6 @@ let previousFocus = null;
 let loadGeneration = 0;
 let actionGeneration = 0;
 let scanUrl;
-let scanRef;
 let scanButton;
 let scanProgress;
 let scanTitle;
@@ -27,10 +28,20 @@ let scanStatus;
 let scanTimer = null;
 let scanInFlight = false;
 let scanGeneration = 0;
+let scanId = null;
 let installedPlugins = [];
 let installedSelectedId = null;
 let installedList;
 let installedSummary;
+let installedView;
+let installedDetail;
+let installedDetailContent;
+let installedBack;
+let tabInstalled;
+let tabAdd;
+let panelInstalled;
+let panelAdd;
+let activeTab = 'installed';
 const SCAN_PHASES = ['fetch', 'classify', 'extract', 'audit', 'report'];
 const SCAN_POLL_INTERVAL_MS = 900;
 
@@ -62,6 +73,25 @@ function close() {
   modal.setAttribute('aria-hidden', 'true');
   workspace?.classList.remove('has-detail');
   (previousFocus?.isConnected ? previousFocus : launcher)?.focus();
+}
+
+function setTab(tab, focus = false) {
+  activeTab = tab === 'add' ? 'add' : 'installed';
+  [
+    [tabInstalled, panelInstalled, 'installed'],
+    [tabAdd, panelAdd, 'add'],
+  ].forEach(([button, panel, name]) => {
+    button?.setAttribute('aria-selected', String(activeTab === name));
+    if (panel) panel.hidden = activeTab !== name;
+  });
+  if (focus) (activeTab === 'add' ? tabAdd : tabInstalled)?.focus({ preventScroll: true });
+}
+
+function showInstalledList() {
+  installedSelectedId = null;
+  renderInstalled();
+  if (installedDetail) installedDetail.hidden = true;
+  if (installedView) installedView.hidden = false;
 }
 
 function renderState(title, message) {
@@ -183,13 +213,13 @@ async function loadInstalled(generation) {
   } catch (error) {
     if (generation !== loadGeneration) return;
     installedPlugins = [];
-    installedList?.replaceChildren(element('span', 'marketplace-installed-empty', error?.message || 'Installed plugins unavailable.'));
+    installedList?.replaceChildren(element('span', 'marketplace-installed-empty', humanSetupError(error, 'Installed plugins unavailable.')));
     if (installedSummary) installedSummary.textContent = 'Unavailable';
   }
 }
 
 function renderInstalledDetail(payload) {
-  detailContent.replaceChildren();
+  installedDetailContent.replaceChildren();
   const heading = element('div');
   heading.append(element('h3', '', `${payload.name}${payload.version ? ` ${payload.version}` : ''}`));
   const badges = element('div', 'marketplace-detail-badges');
@@ -201,7 +231,7 @@ function renderInstalledDetail(payload) {
     badge(payload.runtime || 'unknown', ''),
   );
   heading.append(badges, element('p', '', payload.origin === 'configured' ? 'Configured surface' : 'Installed plugin'));
-  detailContent.append(heading);
+  installedDetailContent.append(heading);
 
   const identity = detailSection('Identity');
   appendFacts(identity, [
@@ -210,20 +240,20 @@ function renderInstalledDetail(payload) {
     ['Descriptor', payload.descriptor || 'unknown'],
     ['Revision', payload.source_revision || 'not recorded'],
   ]);
-  detailContent.append(identity);
+  installedDetailContent.append(identity);
 
   const capabilities = detailSection('Capabilities and tools');
   capabilities.append(listOrNone(
     payload.capabilities,
     item => `${item.name} · ${item.kind} · ${item.permission_mode}${item.description ? ` — ${item.description}` : ''}`,
   ));
-  detailContent.append(capabilities);
+  installedDetailContent.append(capabilities);
 
   const permissions = detailSection('Permissions');
   const permissionItems = [`Default: ${payload.permissions?.default || 'unknown'}`];
   Object.entries(payload.permissions?.capabilities || {}).forEach(([name, mode]) => permissionItems.push(`${name}: ${mode}`));
   permissions.append(listOrNone(permissionItems, value => value));
-  detailContent.append(permissions);
+  installedDetailContent.append(permissions);
 
   const boundaries = detailSection('Data boundaries');
   const boundary = payload.data_boundaries || {};
@@ -231,7 +261,7 @@ function renderInstalledDetail(payload) {
     ['read', 'write', 'network'].map(kind => `${kind}: ${(boundary[kind] || []).length ? (boundary[kind] || []).join(', ') : 'none'}`),
     value => value,
   ));
-  detailContent.append(boundaries);
+  installedDetailContent.append(boundaries);
 
   const configuration = detailSection('Configuration');
   configuration.append(listOrNone(
@@ -239,31 +269,36 @@ function renderInstalledDetail(payload) {
     item => `${item.key}${item.required ? ' · required' : ' · optional'}${item.secret ? ' · secret' : ''} — ${item.description}`,
   ));
   configuration.append(element('p', 'marketplace-action-status', 'Values live in Settings/Connections; no secret values are shown here.'));
-  detailContent.append(configuration);
+  installedDetailContent.append(configuration);
 
   if (payload.notes?.length) {
     const notes = detailSection('Notes');
     notes.append(listOrNone(payload.notes, value => value));
-    detailContent.append(notes);
+    installedDetailContent.append(notes);
   }
 }
 
-async function selectInstalled(id, focus = true) {
+async function selectInstalled(id) {
   installedSelectedId = id;
   selectedId = null;
   renderInstalled();
   renderCards();
+  installedView.hidden = true;
+  installedDetail.hidden = false;
+  installedDetailContent.replaceChildren();
+  const state = element('div', 'marketplace-state');
+  state.append(element('strong', '', 'Loading plugin…'), element('span', '', 'Reading the installed record.'));
+  installedDetailContent.append(state);
   try {
     const payload = await api(`/api/extensions/installed/${encodeURIComponent(id)}`);
     renderInstalledDetail(payload);
   } catch (error) {
-    detailContent.replaceChildren();
-    const state = element('div', 'marketplace-state');
-    state.append(element('strong', '', 'Plugin detail unavailable'), element('span', '', error?.message || ''));
-    detailContent.append(state);
+    installedDetailContent.replaceChildren();
+    const failure = element('div', 'marketplace-state');
+    failure.append(element('strong', '', 'Plugin detail unavailable'), element('span', '', humanSetupError(error, 'Try again in a moment.')));
+    installedDetailContent.append(failure);
   }
-  workspace.classList.add('has-detail');
-  if (focus) detail.focus();
+  installedDetail.focus();
 }
 
 function appendFacts(container, facts) {
@@ -309,7 +344,7 @@ async function api(path, options = {}) {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.detail || `marketplace_http_${response.status}`);
+  if (!response.ok) throw new Error(humanSetupError(payload.detail || `marketplace_http_${response.status}`));
   return payload;
 }
 
@@ -421,7 +456,7 @@ async function pollScan(scanId, generation) {
       title: job.status === 'succeeded' ? 'Scan complete' : job.status === 'failed' ? 'Scan failed' : (job.message || 'Scanning…'),
       detail: job.status === 'succeeded'
         ? `Classified as ${job.artifact?.repo_class || 'unknown'}`
-        : (job.error || job.message || ''),
+        : humanSetupError(job.error || job.message || ''),
       progress: job.progress,
       stage: job.stage,
     });
@@ -431,12 +466,12 @@ async function pollScan(scanId, generation) {
       return;
     }
     if (job.status === 'failed') {
-      scanStatus.textContent = `Scan stopped: ${job.error || job.message || 'unknown error'}`;
+      scanStatus.textContent = `Scan stopped: ${humanSetupError(job.error || job.message || 'unknown error')}`;
       return;
     }
   } catch (error) {
-    setScanProgress({ state: 'error', title: 'Scan unavailable', detail: error?.message || String(error), progress: 0, stage: 'fetch' });
-    scanStatus.textContent = `Scan request failed: ${error?.message || error}`;
+    setScanProgress({ state: 'error', title: 'Scan unavailable', detail: humanSetupError(error), progress: 0, stage: 'fetch' });
+    scanStatus.textContent = `Scan request failed: ${humanSetupError(error)}`;
     return;
   } finally {
     scanInFlight = false;
@@ -446,7 +481,6 @@ async function pollScan(scanId, generation) {
 
 async function startSourceScan() {
   const url = scanUrl.value.trim();
-  const ref = scanRef.value.trim() || 'HEAD';
   scanStatus.textContent = '';
   scanResults.hidden = true;
   scanResults.replaceChildren();
@@ -459,17 +493,19 @@ async function startSourceScan() {
   }
   stopScanPolling();
   const generation = ++scanGeneration;
+  scanId = null;
   scanButton.disabled = true;
   setScanProgress({ state: 'working', title: 'Starting scan…', detail: url, progress: 0, stage: 'fetch' });
   try {
     const job = await api('/api/extensions/scans', {
       method: 'POST',
-      body: JSON.stringify({ source_url: url, ref }),
+      body: JSON.stringify({ source_url: url }),
     });
     if (generation !== scanGeneration) return;
+    scanId = job.scan_id || null;
     pollScan(job.scan_id, generation);
   } catch (error) {
-    setScanProgress({ state: 'error', title: 'Scan unavailable', detail: error?.message || String(error), progress: 0, stage: 'fetch' });
+    setScanProgress({ state: 'error', title: 'Scan unavailable', detail: humanSetupError(error), progress: 0, stage: 'fetch' });
   } finally {
     scanButton.disabled = false;
   }
@@ -479,9 +515,11 @@ async function prepareSourceAction(artifact, section, actions) {
   actions.querySelectorAll('button').forEach(button => { button.disabled = true; });
   scanStatus.textContent = 'Preparing install preview…';
   try {
+    const request = { operation: 'install', source_url: artifact.source_url, ref: artifact.source_revision };
+    if (scanId) request.scan_id = scanId;
     const plan = await api('/api/extensions/plans/source', {
       method: 'POST',
-      body: JSON.stringify({ operation: 'install', source_url: artifact.source_url, ref: artifact.source_revision }),
+      body: JSON.stringify(request),
     });
     section.querySelector('.marketplace-action-preview')?.remove();
     const manifest = plan.manifest || {};
@@ -492,6 +530,9 @@ async function prepareSourceAction(artifact, section, actions) {
         `revision ${(plan.source_revision || '').slice(0, 12)}…`,
         `${Object.keys(plan.requested_permissions?.capabilities || {}).length} declared permission overrides`,
         `${Object.values(plan.lifecycle_commands || {}).flat().length} lifecycle command entries`,
+        plan.manifest_origin === 'scan_draft'
+          ? 'generated draft manifest (repository has no jarvis-extension.json)'
+          : 'repository manifest',
         'static scan completed before install',
       ].join(' · ')),
     );
@@ -518,7 +559,7 @@ async function prepareSourceAction(artifact, section, actions) {
     preview.scrollIntoView({ block: 'center' });
     approve.focus({ preventScroll: true });
   } catch (error) {
-    scanStatus.textContent = `Install preview unavailable: ${error?.message || error}`;
+    scanStatus.textContent = `Install preview unavailable: ${humanSetupError(error)}`;
     actions.querySelectorAll('button').forEach(button => { button.disabled = false; });
   }
 }
@@ -561,7 +602,7 @@ async function executeAction(plan, plugin, operation, status, actions) {
     status.textContent = `${actionLabel(operation)} completed.`;
     summary.textContent = `${plugin.name}: ${actionLabel(operation)} completed.`;
   } catch (error) {
-    status.textContent = `${actionLabel(operation)} failed: ${error?.message || error}`;
+    status.textContent = `${actionLabel(operation)} failed: ${humanSetupError(error)}`;
     actions.querySelectorAll('button').forEach(button => { button.disabled = false; });
   }
 }
@@ -611,7 +652,7 @@ async function prepareAction(plugin, operation, section, status, actions) {
     status.textContent = 'Review the exact signed package, data, and restart scope before approval.';
     approve.focus();
   } catch (error) {
-    status.textContent = `${actionLabel(operation)} unavailable: ${error?.message || error}`;
+    status.textContent = `${actionLabel(operation)} unavailable: ${humanSetupError(error)}`;
     actions.querySelectorAll('button').forEach(button => { button.disabled = false; });
   }
 }
@@ -735,7 +776,7 @@ async function load() {
     plugins = Array.isArray(payload.plugins) ? payload.plugins : [];
     renderCategories();
     if (payload.status === 'offline') return renderState('Marketplace offline', 'No verified catalog is available. Refresh after connectivity or catalog configuration is restored.');
-    if (payload.status === 'error') return renderState('Catalog verification failed', payload.failure || 'The marketplace catalog could not be verified.');
+    if (payload.status === 'error') return renderState('Catalog verification failed', humanSetupError(payload.failure || 'The marketplace catalog could not be verified.'));
     if (payload.status === 'empty') return renderState('No plugins published', 'The verified catalog is empty. Installed plugins remain unchanged.');
     renderCards();
     if (plugins[0] && window.innerWidth > 720) selectPlugin(plugins[0].id, false);
@@ -743,7 +784,7 @@ async function load() {
     if (generation !== loadGeneration) return;
     plugins = [];
     renderCategories();
-    renderState('Marketplace unavailable', error?.message || 'The marketplace request failed.');
+    renderState('Marketplace unavailable', humanSetupError(error, 'The marketplace request failed.'));
   }
 }
 
@@ -753,7 +794,8 @@ function open() {
   modal.setAttribute('aria-hidden', 'false');
   search.value = '';
   category.value = '';
-  installedSelectedId = null;
+  setTab('installed');
+  showInstalledList();
   scanGeneration += 1;
   stopScanPolling();
   scanResults.hidden = true;
@@ -761,7 +803,7 @@ function open() {
   scanStatus.textContent = '';
   scanProgress.hidden = true;
   load();
-  requestAnimationFrame(() => search.focus());
+  requestAnimationFrame(() => tabInstalled?.focus({ preventScroll: true }));
 }
 
 function trapFocus(event) {
@@ -797,7 +839,6 @@ function init() {
   detail = document.getElementById('marketplace-detail');
   detailContent = document.getElementById('marketplace-detail-content');
   scanUrl = document.getElementById('marketplace-source-url');
-  scanRef = document.getElementById('marketplace-source-ref');
   scanButton = document.getElementById('marketplace-source-scan');
   scanProgress = document.getElementById('marketplace-scan-progress');
   scanTitle = document.getElementById('marketplace-scan-title');
@@ -808,17 +849,37 @@ function init() {
   scanStatus = document.getElementById('marketplace-scan-status');
   installedList = document.getElementById('marketplace-installed-list');
   installedSummary = document.getElementById('marketplace-installed-summary');
-  if (!modal || !launcher || !search || !category || !results || !summary || !workspace || !detail || !detailContent) return;
+  installedView = document.getElementById('marketplace-installed-view');
+  installedDetail = document.getElementById('marketplace-installed-detail');
+  installedDetailContent = document.getElementById('marketplace-installed-detail-content');
+  installedBack = document.getElementById('marketplace-installed-back');
+  tabInstalled = document.getElementById('marketplace-tab-installed');
+  tabAdd = document.getElementById('marketplace-tab-add');
+  panelInstalled = document.getElementById('marketplace-panel-installed');
+  panelAdd = document.getElementById('marketplace-panel-add');
+  if (!modal || !launcher || !search || !category || !results || !summary || !workspace || !detail || !detailContent || !installedDetailContent) return;
   launcher.addEventListener('click', open);
   document.getElementById('close-marketplace-modal')?.addEventListener('click', close);
   document.getElementById('marketplace-retry')?.addEventListener('click', load);
   scanButton?.addEventListener('click', startSourceScan);
-  [scanUrl, scanRef].forEach(input => input?.addEventListener('keydown', event => {
+  scanUrl?.addEventListener('keydown', event => {
     if (event.key === 'Enter') {
       event.preventDefault();
       startSourceScan();
     }
-  }));
+  });
+  tabInstalled?.addEventListener('click', () => setTab('installed'));
+  tabAdd?.addEventListener('click', () => setTab('add'));
+  modal.querySelector('.marketplace-tabs')?.addEventListener('keydown', event => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    setTab(activeTab === 'installed' ? 'add' : 'installed', true);
+  });
+  installedBack?.addEventListener('click', () => {
+    const previous = installedSelectedId;
+    showInstalledList();
+    installedList?.querySelector(`[data-installed-id="${CSS.escape(previous || '')}"]`)?.focus();
+  });
   document.getElementById('marketplace-back')?.addEventListener('click', () => {
     workspace.classList.remove('has-detail');
     results.querySelector(`[data-plugin-id="${CSS.escape(selectedId || '')}"]`)?.focus();

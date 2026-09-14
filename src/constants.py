@@ -7,7 +7,7 @@ from src.runtime_paths import get_app_root, get_default_data_dir, get_default_ex
 
 apply_legacy_env_aliases()
 
-APP_VERSION = "1.0.60"
+APP_VERSION = "1.0.64"
 
 # Base paths
 BASE_DIR = os.path.join(get_app_root(), "")
@@ -26,6 +26,10 @@ RUNBOOK_DIR = os.path.join(PERSONAL_DIR, "runbook")
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 FEATURES_FILE = os.path.join(DATA_DIR, "features.json")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+# Multi-identity registry (MAD-929): saved agent identities and their attached
+# model profiles. Settings still own the installation identity contract; this
+# file migrates it as the first entry and layers additional identities on top.
+AGENT_IDENTITIES_FILE = os.path.join(DATA_DIR, "agent_identities.json")
 BRAND_FILE = os.path.join(DATA_DIR, "brand.json")
 AUTH_FILE = os.path.join(DATA_DIR, "auth.json")
 USER_PREFS_FILE = os.path.join(DATA_DIR, "user_prefs.json")
@@ -58,6 +62,19 @@ SKILLS_DIR = os.path.join(DATA_DIR, "skills")
 GALLERY_DIR = os.path.join(DATA_DIR, "gallery")
 GALLERY_UPLOADS_DIR = os.path.join(DATA_DIR, "gallery_uploads")
 MEMORY_VECTORS_DIR = os.path.join(DATA_DIR, "memory_vectors")
+# Operator-configured SSH nodes (MAD-935). Only the pinned known_hosts file
+# persists here; private keys stay encrypted in the DB and are materialized to
+# this managed directory only for the duration of a keygen/derive/test command.
+SSH_CONNECTIONS_DIR = os.path.join(DATA_DIR, "ssh_connections")
+SSH_AUDIT_FILE = os.path.join(DATA_DIR, "ssh_connections_audit.jsonl")
+# Governed Android emulator/ADB adapter (MAD-838). Screenshots and screen
+# recordings captured through the adapter are written here as task evidence;
+# the audit trail records every attempt with redacted, bounded fields.
+ANDROID_EVIDENCE_DIR = os.path.join(DATA_DIR, "android_evidence")
+# Guided in-app bug reports (MAD-856): validated screenshot bytes and the
+# exact-once submission index live here. Never holds GitHub credentials.
+FEEDBACK_DIR = os.path.join(DATA_DIR, "feedback")
+ANDROID_AUDIT_FILE = os.path.join(DATA_DIR, "android_audit.jsonl")
 
 # Paths with an intentional dedicated env override, defaulting under DATA_DIR.
 MAIL_ATTACHMENTS_DIR = os.getenv("ODYSSEUS_MAIL_ATTACHMENTS_DIR", os.path.join(DATA_DIR, "mail-attachments"))

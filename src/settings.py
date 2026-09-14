@@ -41,6 +41,11 @@ DEFAULT_SETTINGS = {
         "hidden prompts, scratchpads, or private chain-of-thought."
     ),
     "agent_constitution_version": "1",
+    # Voice greeting mode. Default OFF: a casual greeting follows the
+    # configured identity/model path like any other turn. Operators may opt in
+    # to a deterministic low-latency greeting; it always uses the saved display
+    # name and stays generic while the public default identity is active.
+    "voice_deterministic_greeting": False,
     # Protocol layer: mount the versioned JOS protocol packs into the agent
     # system prompt. The constitution above stays the light operator-editable
     # layer; disabling this restores the exact prior prompt composition.
@@ -179,6 +184,20 @@ DEFAULT_SETTINGS = {
     # entry is an absolute path. Sensitive subpaths (.ssh, .gnupg, shell
     # rc files, SSH key files) are always blocked regardless of roots.
     "tool_path_extra_roots": [],
+    # Installation-owned Android SDK location for the governed emulator/ADB
+    # adapter (MAD-838). Empty = resolve PANDAMONIUM_ANDROID_SDK_ROOT /
+    # ODYSSEUS_ANDROID_SDK_ROOT / ANDROID_SDK_ROOT / ANDROID_HOME, then PATH.
+    # No SDK is bundled with the base image; the adapter fails closed when none
+    # is configured.
+    "android_sdk_root": "",
+    # Optional comma-separated allowlist of AVD names the adapter may start.
+    # Empty = any installed AVD with a valid name may be started.
+    "android_avd_allowlist": "",
+    # Guided in-app bug reports (MAD-856). The surface is on by default; the
+    # GitHub submission path itself is config-gated by the
+    # PANDAMONIUM_GITHUB_* env vars and fails closed with honest copy when
+    # unconfigured. Set false to hide the action entirely.
+    "feedback_enabled": True,
     "task_endpoint_id": "",
     "task_model": "",
     "default_endpoint_id": "",

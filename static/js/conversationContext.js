@@ -1,4 +1,5 @@
 import { getSelectedAgentSelection } from './modelPicker.js';
+import { sidePanelDocked, watchSidePanelDock } from './modalSnap.js';
 
 const byId = id => document.getElementById(id);
 const levels = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -14,12 +15,28 @@ let activityOffset = null;
 let activityLoading = false;
 let drawerSection = '';
 let environment = [];
+// MAD-932: while a side-mounted panel owns the edge, Details hides by default.
+// `_detailsAutoHidden` remembers that WE hid it so closing the dock restores
+// the prior state; `_detailsUserOverride` remembers an explicit re-open while
+// docked so the dock observer never fights the user's choice.
+let _detailsAutoHidden = false;
+let _detailsUserOverride = false;
 const activityCursors = new Set();
 const array = value => Array.isArray(value) ? value : [];
 
 function sessionId() { return window.sessionModule?.getCurrentSessionId?.() || ''; }
 function currentSession() { return window.sessionModule?.getSessions?.().find(session => session.id === sessionId()) || {}; }
 function target() { return getSelectedAgentSelection()?.target || currentSession().agent_target || 'jarvis'; }
+
+// The reasoning level the session is actually set to (MAD-930): the bound
+// identity's attached profile level, persisted as sessions.reasoning_level by
+// the MAD-929 binding (or carried on the pending chat until it materializes).
+// An empty value means the model's own default applies.
+function sessionReasoningLevel() {
+  const sessionLevel = String(currentSession().reasoning_level || '').trim();
+  const pendingLevel = String(window.sessionModule?.getPendingChat?.()?.reasoningLevel || '').trim();
+  return (sessionLevel || pendingLevel).toLowerCase();
+}
 
 // Reasoning-effort support for the active model (MAD-900). The models payload
 // carries a per-endpoint `reasoning_levels` map for API reasoning models; when
@@ -60,13 +77,27 @@ function renderEffort() {
   const options = native
     ? [...byId('codex-reasoning').options].map(option => option.value).filter(Boolean)
     : reasoningMode ? reasoningLevels : levels;
-  const chosen = native ? byId('codex-reasoning').value : (reasoningMode && !reasoningLevels.includes(agentEffort) ? '' : agentEffort);
+  const sessionLevel = sessionReasoningLevel();
+  const chosen = native
+    ? byId('codex-reasoning').value
+    : reasoningMode
+      ? (reasoningLevels.includes(agentEffort) ? agentEffort : (reasoningLevels.includes(sessionLevel) ? sessionLevel : ''))
+      : agentEffort;
   const index = Math.max(0, options.indexOf(chosen));
   range.max = String(Math.max(0, options.length - 1));
   range.value = String(chosen ? index : native ? 0 : Math.min(2, Math.max(0, options.length - 1)));
   range.disabled = !options.length;
   range.style.setProperty('--effort-fill', `${Number(range.max) ? Number(range.value) / Number(range.max) * 100 : 0}%`);
-  const label = names[chosen] || chosen || 'Default';
+  // The reasoning chip names the level actually in effect. A session level
+  // (identity default) shows as itself; when nothing is configured the model's
+  // own default applies, and the work-budget control keeps its legacy label.
+  const label = chosen
+    ? (names[chosen] || chosen)
+    : native
+      ? 'Task default'
+      : reasoningMode
+        ? 'Model default'
+        : 'Default';
   const controlLabel = native || reasoningMode ? 'Reasoning effort' : 'Agent work budget';
   byId('conversation-effort-label').textContent = controlLabel;
   byId('conversation-effort-value').textContent = label;
@@ -262,10 +293,37 @@ async function loadHistory() {
   }
 }
 
-function setOpen(open) {
+function setOpen(open, { auto = false } = {}) {
   byId('session-context-panel').hidden = !open;
   byId('chat-container').classList.toggle('context-open', open);
   byId('session-context-toggle').setAttribute('aria-expanded', String(open));
+  if (auto) return;
+  // Explicit user choice: an open while a side panel is docked becomes the
+  // remembered preference; a close clears both the preference and any pending
+  // auto-restore.
+  if (open) {
+    _detailsUserOverride = sidePanelDocked();
+    _detailsAutoHidden = false;
+  } else {
+    _detailsUserOverride = false;
+    _detailsAutoHidden = false;
+  }
+}
+
+// React to the canonical dock state (MAD-932). Never runs while the user has
+// explicitly asked for Details to stay open.
+function _syncDetailsWithSidePanel(docked) {
+  if (docked) {
+    if (_detailsUserOverride) return;
+    if (byId('session-context-panel').hidden) return;
+    _detailsAutoHidden = true;
+    setOpen(false, { auto: true });
+    return;
+  }
+  if (_detailsAutoHidden) {
+    _detailsAutoHidden = false;
+    setOpen(true, { auto: true });
+  }
 }
 
 function bind() {
@@ -344,7 +402,10 @@ function bind() {
     renderPanel();
   });
   window.addEventListener('odysseus:turn-completed', event => { if (event.detail.sessionId === sessionId()) loadHistory(); });
-  setOpen(window.matchMedia('(min-width: 1250px)').matches);
+  setOpen(window.matchMedia('(min-width: 1250px)').matches, { auto: true });
+  // The initial open is viewport-driven, not a user preference, so let the
+  // dock state govern it from the first mutation onward (MAD-932).
+  watchSidePanelDock(_syncDetailsWithSidePanel);
   renderEffort();
   loadHistory();
 }

@@ -50,6 +50,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "glob",
     "ls",
     "get_workspace",
+    "manage_workspace",
     "inspect_network",
     "search_chats",
     "manage_memory",
@@ -71,6 +72,11 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "vault_search",
     "vault_get",
     "vault_unlock",
+    "ssh_node",
+    "nextcloud_files",
+    # Governed Android emulator/ADB control (MAD-838) runs host binaries and
+    # can change device state; admin-only like the file/shell tools.
+    "android_device",
     "download_model",
     "serve_model",
     "serve_preset",

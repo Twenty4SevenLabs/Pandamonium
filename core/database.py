@@ -200,6 +200,13 @@ class Session(TimestampMixin, Base):
     # Durable binding to a real Pandamonium project (MAD-920). Null means the
     # chat is unfiled. Project removal never deletes sessions; it only unbinds.
     project_id = Column(String, nullable=True, default=None, index=True)
+    # Server-persisted active workspace for this chat (MAD-883). Null means no
+    # workspace is bound: file tools use the default allowed roots. Storing it
+    # per session makes the selection visible to every client that opens the
+    # chat and lets the in-app agent set/clear/report it. The value is always
+    # re-vetted with vet_workspace() before it is bound to a turn, so a folder
+    # that was deleted or made unusable is dropped instead of trusted.
+    workspace = Column(String, nullable=True, default=None)
     
     # Headers stored as JSON
     headers = Column(JSON, default=dict)
@@ -227,6 +234,12 @@ class Session(TimestampMixin, Base):
     total_output_tokens = Column(Integer, default=0)
     mode = Column(String, nullable=True)  # 'agent', 'chat', or 'research'
     crew_member_id = Column(String, nullable=True)  # links to crew_members.id
+    # Session-bound saved identity (MAD-929). Null keeps the installation
+    # identity, exactly like sessions that predate the registry.
+    identity_id = Column(String, nullable=True)
+    # Reasoning level from the bound identity's model profile; used when the
+    # client does not send an explicit per-turn reasoning_effort.
+    reasoning_level = Column(String, nullable=True)
 
     # Relationship to chat messages
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
@@ -253,9 +266,12 @@ class Session(TimestampMixin, Base):
             'is_important': self.is_important,
             'folder': self.folder,
             'project_id': self.project_id,
+            'workspace': self.workspace or '',
             'total_input_tokens': self.total_input_tokens or 0,
             'total_output_tokens': self.total_output_tokens or 0,
             'crew_member_id': self.crew_member_id,
+            'identity_id': self.identity_id,
+            'reasoning_level': self.reasoning_level,
         }
 
 class ChatMessage(Base):
@@ -537,6 +553,46 @@ class ProviderAuthSession(TimestampMixin, Base):
     refresh_token = Column(EncryptedText, nullable=True)
     last_refresh = Column(DateTime, nullable=True)
     auth_mode = Column(String, nullable=True)
+
+class SshConnection(TimestampMixin, Base):
+    """Operator-configured SSH nodes for direct node access (MAD-935).
+
+    Key material never lives in plaintext columns: ``private_key`` is
+    transparently encrypted at rest (EncryptedText). ``public_key`` and the
+    pinned host key are not secrets and are safe to display. Status fields
+    cache the last user-initiated test so the list can show an honest state
+    without re-dialing the node on every render.
+    """
+    __tablename__ = "ssh_connections"
+
+    id = Column(String, primary_key=True, index=True)
+    label = Column(String, nullable=False)
+    host = Column(String, nullable=False)
+    user = Column(String, nullable=False, default="")
+    port = Column(Integer, nullable=False, default=22)
+    # Keyless (preset-key) connections use the stored managed key instead of
+    # ambient agent/default keys. Disabling it keeps the stored key so the
+    # operator can re-enable without re-generating.
+    keyless = Column(Boolean, default=False)
+    private_key = Column(EncryptedText, nullable=True)
+    public_key = Column(Text, nullable=True)
+    # Pinned host key as a managed known_hosts line (or lines) plus the
+    # preferred fingerprint shown to the operator.
+    host_key = Column(Text, nullable=True)
+    host_key_fingerprint = Column(String, nullable=True)
+    host_key_type = Column(String, nullable=True)
+    # Last user-initiated connection test result, redacted human copy only.
+    last_status = Column(String, nullable=True)
+    last_status_reason = Column(String, nullable=True)
+    last_status_message = Column(Text, nullable=True)
+    last_checked_at = Column(DateTime, nullable=True)
+    # Per-connection agent command policy (MAD-936): JSON array of allowlisted
+    # commands for the governed agent SSH tool. NULL means the built-in
+    # conservative read-only default in src/ssh_connections.py.
+    allowed_commands = Column(Text, nullable=True)
+    # Installation-level by default (admin-configured). Null means shared.
+    owner = Column(String, nullable=True, index=True)
+
 
 class McpServer(TimestampMixin, Base):
     """Admin-configured MCP (Model Context Protocol) tool servers."""
@@ -882,6 +938,37 @@ def _migrate_add_last_message_at_column():
             pass
 
 
+def _migrate_add_ssh_allowed_commands_column():
+    """Add the per-connection agent command policy column (MAD-936). Idempotent."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='ssh_connections'"
+            ).fetchall()
+        ]
+        if "ssh_connections" not in tables:
+            return
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(ssh_connections)").fetchall()]
+        if "allowed_commands" not in columns:
+            conn.execute("ALTER TABLE ssh_connections ADD COLUMN allowed_commands TEXT")
+            conn.commit()
+            logging.getLogger(__name__).info(
+                "Migrated: added 'allowed_commands' to ssh_connections"
+            )
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"ssh_connections.allowed_commands migration failed: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _migrate_add_agent_target_column():
     """Add the server-owned conversation identity and preserve legacy chats."""
     import sqlite3
@@ -907,6 +994,59 @@ def _migrate_add_agent_target_column():
     finally:
         if conn is not None:
             conn.close()
+
+def _migrate_add_session_workspace_column():
+    """Add the per-session active workspace (MAD-883). Idempotent: guarded by a
+    PRAGMA table_info check so every startup is safe. Existing sessions keep
+    NULL (no workspace) — the client migrates its legacy localStorage value on
+    the next send, which persists it here."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+        if "workspace" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN workspace TEXT")
+            conn.commit()
+            logging.getLogger(__name__).info("Migrated: added 'workspace' on sessions")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"session workspace migration failed: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _migrate_add_session_identity_columns():
+    """Add the session-bound saved identity + reasoning level (MAD-929).
+
+    Guarded + idempotent. Legacy rows keep NULL, which resolves the
+    installation identity exactly as before the registry existed.
+    """
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+        if "identity_id" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN identity_id TEXT")
+        if "reasoning_level" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN reasoning_level TEXT")
+        conn.commit()
+        logging.getLogger(__name__).info(
+            "Migrated: added 'identity_id' + 'reasoning_level' on sessions"
+        )
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"session identity migration failed: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
+
 
 def _migrate_add_document_archived_column():
     """Add `archived` to documents (soft-archive flag). Guarded + idempotent."""
@@ -2101,6 +2241,9 @@ def init_db():
     _migrate_add_document_archived_column()
     _migrate_add_last_message_at_column()
     _migrate_add_agent_target_column()
+    _migrate_add_session_workspace_column()
+    _migrate_add_session_identity_columns()
+    _migrate_add_ssh_allowed_commands_column()
     _migrate_add_folder_column()
     _migrate_add_project_id_column()
     _migrate_add_token_columns()

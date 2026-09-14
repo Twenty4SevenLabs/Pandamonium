@@ -1932,12 +1932,18 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
 
     // Project-bound chats bring their project folder along so file/shell tools
     // stay confined to the project (MAD-920); leaving one releases it.
+    // Otherwise show the workspace persisted on THIS chat (MAD-883) — the
+    // server value wins, so a stale localStorage value from another chat can't
+    // masquerade as this chat's confinement. When neither chat has one, keep
+    // the local value: it migrates to the server on the next send.
     const _project = meta?.project_id ? projectsModule.getProjectById(meta.project_id) : null;
     if (_project && _project.available !== false) {
       setWorkspace(_project.resolved_path || _project.path || '');
+    } else if (meta?.workspace) {
+      setWorkspace(meta.workspace);
     } else if (!meta?.project_id) {
       const _prevMeta = sessions.find(s => s.id === prevSessionId);
-      if (_prevMeta?.project_id) setWorkspace('');
+      if (_prevMeta?.project_id || _prevMeta?.workspace) setWorkspace('');
     }
 
     // Detach any in-flight stream to background instead of aborting
@@ -2356,7 +2362,14 @@ export async function materializePendingSession() {
   fd.append('name', name);
   fd.append('endpoint_url', pending?.url || '');
   fd.append('model', pending?.modelId || 'Codex');
-  fd.append('agent_target', getSelectedAgentTarget() || 'jarvis');
+  const pendingTarget = getSelectedAgentTarget() || 'jarvis';
+  fd.append('agent_target', pendingTarget);
+  // A saved identity picked before the first message binds as soon as the
+  // session exists (MAD-930). Worker-routed sessions never carry it.
+  const pendingIdentity = String(pending?.identityId || '').trim();
+  if (pendingIdentity && pendingTarget === 'jarvis') {
+    fd.append('identity_id', pendingIdentity);
+  }
   if (native?.workspace || (pending?.url && pending?.modelId)) {
     fd.append('skip_validation', 'true');
   }
@@ -2422,6 +2435,18 @@ export function getCurrentSessionId() {
 
 export function getSessions() {
   return sessions;
+}
+
+/**
+ * Apply a workspace change that happened server-side (the agent called
+ * manage_workspace) to the cached session metadata and the pill, without
+ * writing back to the server (MAD-883).
+ */
+export function applySessionWorkspace(sessionId, path) {
+  const next = path || '';
+  const meta = sessions.find(s => s.id === sessionId);
+  if (meta) meta.workspace = next;
+  if (!sessionId || sessionId === currentSessionId) setWorkspace(next);
 }
 
 export function getCurrentModel() {
@@ -3767,6 +3792,7 @@ const sessionModule = {
   getPendingChat,
   getCurrentSessionId,
   getSessions,
+  applySessionWorkspace,
   getCurrentModel,
   getCurrentEndpointUrl,
   getChatAgentTarget,

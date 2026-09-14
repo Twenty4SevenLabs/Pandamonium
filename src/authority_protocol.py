@@ -111,6 +111,8 @@ _DEFAULT_EFFECT_BY_CAPABILITY = {
             "list_models", "list_cached_models", "list_downloads", "list_serve_presets",
             "list_served_models", "list_cookbook_servers", "search_hf_models", "vault_search",
             "vault_get", "resolve_contact", "manage_books",
+            # Read-only Nextcloud files (MAD-937): list/read/search only.
+            "nextcloud_files",
         }
     },
     **{
@@ -125,6 +127,9 @@ _DEFAULT_EFFECT_BY_CAPABILITY = {
             "manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks",
             "hermes_ssh", "hermes_kanban", "hermes_agent",
             "manage_extensions",
+            # Changing the chat's active workspace (MAD-883) is a bounded,
+            # reversible scope change; the folder is vetted by vet_workspace.
+            "manage_workspace",
         }
     },
     **{
@@ -139,6 +144,9 @@ _DEFAULT_EFFECT_BY_CAPABILITY = {
     "vault_unlock": "credential_or_auth_change",
 }
 _READ_ACTIONS = frozenset({"inventory", "list", "get", "read", "view", "search", "find", "status", "health"})
+# Governed Android adapter actions (MAD-838) that only observe: SDK/device/AVD
+# inventory, boot wait, bounded logcat dump, and screenshot capture.
+_ANDROID_READ_ACTIONS = frozenset({"status", "devices", "avds", "wait", "logcat", "screenshot"})
 _PUBLIC_READS = frozenset({"web_search", "web_fetch", "get_runtime_status"})
 _LEGACY_EFFECTS = {
     "read_only": "read",
@@ -345,6 +353,13 @@ def _outside_configured_workspace(call: Mapping[str, Any]) -> bool:
     policy = call.get("capability_policy") if isinstance(call.get("capability_policy"), Mapping) else {}
     if arguments.get("outside_workspace") is True:
         return True
+    if str(call.get("name") or "") == "manage_workspace":
+        # Switching the workspace is the explicit intent of this tool; the
+        # requested folder is vetted by vet_workspace and is not an attempt to
+        # escape the CURRENT boundary. Without this, "work out of /other"
+        # would be classified outside_workspace_boundary and gated as an
+        # escape instead of a workspace change (MAD-883).
+        return False
     configured_scopes = policy.get("configured_scopes")
     requested_scope = str(arguments.get("workspace") or "")
     if requested_scope and isinstance(configured_scopes, (list, tuple, set)):
@@ -445,6 +460,19 @@ def action_effect_for(call: Mapping[str, Any]) -> str:
         candidates.append("destructive_or_difficult_to_recover")
     elif name == "api_call":
         candidates.append("read" if method == "GET" else "external_publication_or_communication")
+    elif name == "ssh_node":
+        # Governed node access (MAD-936): list/read are reads. A run is
+        # classified from the concrete command, so a destructive or
+        # privilege-expanding allowlisted command still hits the gate.
+        candidates.append(
+            _shell_effect(str(arguments.get("command") or "")) if action == "run" else "read"
+        )
+    elif name == "android_device":
+        # Governed Android adapter (MAD-838): inventory, boot wait, logcat, and
+        # screenshot are reads; lifecycle, install, launch, deep link, and
+        # input change device state and are reversible writes. Destructive
+        # device operations are not implemented in the adapter at all.
+        candidates.append("read" if action in _ANDROID_READ_ACTIONS else "reversible_write")
     elif action in _EXTERNAL_ACTIONS:
         candidates.append("external_publication_or_communication")
     elif action in _READ_ACTIONS:
