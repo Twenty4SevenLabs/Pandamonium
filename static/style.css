@@ -16285,6 +16285,42 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
 .ssh-check { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-top: 8px; }
 .ssh-editor-form { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-top: 10px; }
 .ssh-editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+
+/* Training Runtime tab (MAD-796). Reuses the admin row/button language. */
+.unsloth-row .unsloth-meta {
+  font-size: 11px;
+  opacity: 0.7;
+  margin-top: 3px;
+  word-break: break-all;
+}
+.unsloth-row .unsloth-note {
+  font-size: 11px;
+  opacity: 0.65;
+  margin-top: 4px;
+}
+.unsloth-chip {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+  opacity: 0.9;
+}
+.unsloth-chip-ok { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, var(--border)); }
+.unsloth-chip-bad { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, var(--border)); }
+.unsloth-chip-idle { opacity: 0.55; }
+.unsloth-caps { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.unsloth-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.unsloth-actions .admin-btn-delete { margin-left: auto; }
+.unsloth-editor-form { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-top: 10px; }
+.unsloth-editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 /* Local / API subsection labels inside the Endpoints card */
 .adm-ep-section-head {
   display: flex;
@@ -44210,15 +44246,16 @@ body.cursor-agent-overlay-open .chat-container {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  height: 21px;
-  padding: 0 6px;
+  min-height: 26px;
+  padding: 3px 10px;
   font-size: 11px;
   font-weight: 500;
   font-family: inherit;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--border) 35%, transparent);
+  border-radius: 999px;
+  /* 65% mix matches the identity pill and clears WCAG AA on the dark bar. */
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
@@ -44253,6 +44290,16 @@ body.cursor-agent-overlay-open .chat-container {
   flex-shrink: 0;
 }
 .composer-model-btn .model-picker-logo:empty { display: none; }
+/* Provider logos injected into composer/menu controls are presentational
+   viewBox SVGs; keep them icon-sized everywhere, independent of any
+   viewport-scoped sizing elsewhere in the sheet. */
+.composer-model-btn .model-picker-logo svg,
+.model-picker-menu .model-picker-logo svg {
+  width: 12px;
+  height: 12px;
+  max-width: 12px;
+  max-height: 12px;
+}
 .composer-model-btn.is-override {
   color: var(--fg);
 }
